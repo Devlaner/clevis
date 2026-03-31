@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: ../apps/api
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+      - ../packages/checks:/app/packages/checks
+    ports:
+      - "${API_PORT:-8080}:8080"
+
+  worker:
+    build:
+      context: ../apps/worker
+    env_file:
+      - ../.env
+    volumes:
+      - ../data:/app/data
+    depends_on:
+      - api
+
+  ui:
+    build:
+      context: ../apps/ui
+    env_file:
+      - ../.env
+    ports:
+      - "${UI_PORT:-3000}:3000"
+    depends_on:
+      - api
