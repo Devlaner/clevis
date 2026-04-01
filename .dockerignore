@@ -21,6 +21,16 @@ data/
 # JS/Next (other apps; not used by API Dockerfile)
 **/node_modules/
 **/.next/
+**/out/
+**/.turbo/
+**/*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Agent / editor metadata (not needed in API image)
+.agents/
+.github/
 
 # Images that COPY only apps/api + packages/checks
 apps/ui/
