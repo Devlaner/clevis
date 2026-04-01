@@ -5,6 +5,9 @@ __pycache__/
 
 /prowler/
 
+# Local SQLite + runtime dir (Docker Compose mounts ../data → do not commit)
+/data/
+
 # C extensions
 *.so
 
