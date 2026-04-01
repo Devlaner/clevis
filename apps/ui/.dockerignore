@@ -1,0 +1,12 @@
+# UI build context is apps/ui
+
+node_modules
+.next
+.git
+
+.env
+.env.*
+!.env.example
+
+npm-debug.log*
+.DS_Store

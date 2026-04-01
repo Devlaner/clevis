@@ -1,0 +1,36 @@
+# API build context is repo root — keep the daemon upload small and safe.
+
+.git
+.gitignore
+
+# Secrets (never bake into images)
+.env
+.env.*
+!.env.example
+
+# Local runtime data
+data/
+
+# Python noise
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+
+# JS/Next (other apps; not used by API Dockerfile)
+**/node_modules/
+**/.next/
+
+# Images that COPY only apps/api + packages/checks
+apps/ui/
+apps/worker/
+deploy/
+
+# Local reference tree if present
+prowler/
+
+# Editor / IDE
+.idea/
+.vscode/
+.cursor/
