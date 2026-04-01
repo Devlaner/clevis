@@ -1,0 +1,12 @@
+# Worker build context is apps/worker
+
+__pycache__
+*.py[cod]
+.git
+
+.env
+.env.*
+
+.pytest_cache/
+.venv/
+venv/
