@@ -5,6 +5,7 @@ __pycache__/
 
 /prowler/
 .agents/
+./apps/ui/node_modules/
 
 # Local SQLite + runtime dir (Docker Compose mounts ../data → do not commit)
 /data/
