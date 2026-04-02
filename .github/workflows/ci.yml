@@ -4,9 +4,34 @@ on:
   pull_request:
   push:
     branches:
-      - main
+      - "**"
 
 jobs:
+  commits:
+    name: Commit Messages (Conventional Commits)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install commitlint
+        run: npm ci
+
+      - name: Lint commits (PR)
+        if: ${{ github.event_name == 'pull_request' }}
+        run: npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.sha }} --verbose
+
+      - name: Lint commits (push)
+        if: ${{ github.event_name == 'push' }}
+        run: npx commitlint --from ${{ github.event.before }} --to ${{ github.sha }} --verbose
+
   ui:
     name: UI Typecheck + Build
     runs-on: ubuntu-latest
