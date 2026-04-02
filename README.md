@@ -15,3 +15,14 @@ Basic analytics for GitHub repos and organizations using the GitHub API.
 
 Open the UI (default: `http://localhost:3000`).
 
+## CI / CD
+CI runs on every PR/push to `main` and verifies:
+- UI TypeScript typecheck + production UI build
+- Python source compilation
+- Docker image build for `api`, `worker`, and `ui`
+
+On version tags (`v*`), Docker images are published to GHCR so others can self-host without rebuilding from source:
+- `ghcr.io/<owner>/<repo>-api`
+- `ghcr.io/<owner>/<repo>-worker`
+- `ghcr.io/<owner>/<repo>-ui`
+
