@@ -3,7 +3,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "next build",
+    "check": "npm run typecheck && npm run build",
+    "prepare": "husky",
     "start": "next start -p 3000"
   },
   "dependencies": {
@@ -23,6 +26,7 @@
     "@types/node": "^22.13.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "husky": "^9.1.7",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.7.3"
