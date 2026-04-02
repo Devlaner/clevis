@@ -1,15 +1,38 @@
+import "@/app/globals.css"
+import { Geist } from "next/font/google"
+import { cn } from "@/lib/utils"
+import { SidebarProvider, SidebarInset, SidebarTrigger } from "@/components/ui/sidebar"
+import { TooltipProvider } from "@/components/ui/tooltip"
+import { AppSidebar } from "@/components/app-sidebar"
+import { Separator } from "@/components/ui/separator"
+
+const geist = Geist({ subsets: ["latin"], variable: "--font-sans" })
+
 export const metadata = {
   title: "clevis",
-  description: "Basic analytics for GitHub repos and organizations",
-};
+  description: "GitHub security analytics and cache management",
+}
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body style={{ fontFamily: "Arial, sans-serif", margin: 0, padding: 24 }}>
-        <h1>clevis</h1>
-        {children}
+    <html lang="en" className={cn("font-sans", geist.variable)}>
+      <body className="min-h-screen">
+        <TooltipProvider>
+          <SidebarProvider>
+            <AppSidebar />
+            <SidebarInset>
+              <header className="flex h-14 items-center gap-2 border-b px-6">
+                <SidebarTrigger className="-ml-2" />
+                <Separator orientation="vertical" className="h-4" />
+                <span className="text-sm font-medium text-muted-foreground">clevis</span>
+              </header>
+              <main className="flex-1 p-6">
+                {children}
+              </main>
+            </SidebarInset>
+          </SidebarProvider>
+        </TooltipProvider>
       </body>
     </html>
-  );
+  )
 }
