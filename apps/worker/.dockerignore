@@ -2,11 +2,27 @@
 
 __pycache__
 *.py[cod]
+*.egg-info/
+.eggs/
 .git
 
 .env
 .env.*
+!.env.example
 
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
 .venv/
 venv/
+ENV/
+
+*.log
+.coverage
+htmlcov/
+
+.DS_Store
+Thumbs.db
