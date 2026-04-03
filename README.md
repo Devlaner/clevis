@@ -16,7 +16,7 @@ Basic analytics for GitHub repos and organizations using the GitHub API.
 Open the UI (default: `http://localhost:3000`).
 
 ## CI / CD
-CI runs on every PR/push to `main` and verifies:
+CI runs on **every pull request** and on **pushes to any branch** and verifies:
 - UI TypeScript typecheck + production UI build
 - Python source compilation
 - Docker image build for `api`, `worker`, and `ui`
