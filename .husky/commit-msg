@@ -1,2 +1,5 @@
 #!/usr/bin/env sh
-npx --no -- commitlint --edit "$1"
+# Same Conventional Commit rules as CI (.github/workflows/ci.yml). On failure Git
+# aborts this commit; fix the message and run git commit again.
+printf '%s\n' "Commit message: checking (commitlint, verbose)…"
+commitlint --verbose --edit "$1"
