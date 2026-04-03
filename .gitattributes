@@ -1,0 +1,32 @@
+# Normalize line endings repo-wide to avoid CRLF/LF churn on Windows.
+# Default: treat files as text and store them with LF in git.
+* text=auto eol=lf
+
+# Windows scripts should remain CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+
+# Shell scripts should be LF
+*.sh text eol=lf
+
+# Common binaries
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.7z binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.mp4 binary
+*.webm binary
+*.mov binary
