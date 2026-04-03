@@ -41,12 +41,22 @@ The repo uses `.gitattributes` so text files are stored with **LF**. On Windows,
 
 ## Git hooks (Husky)
 
-After `npm ci` at the repo root:
+After `npm ci` at the **repository root**, Git uses Husky (`core.hooksPath` → `.husky/_`). Then:
 
-- **`pre-commit`** runs `npm --prefix apps/ui run typecheck`. Ensure `apps/ui` dependencies are installed so this succeeds.
-- **`commit-msg`** runs [Commitlint](https://commitlint.js.org/) with the [Conventional Commits](https://www.conventionalcommits.org/) preset (`@commitlint/config-conventional`).
+- **`pre-commit`** runs before the commit is recorded. It runs `npm --prefix apps/ui run typecheck`. Install UI deps (`apps/ui/npm ci`) so this can succeed.
+- **`commit-msg`** runs **immediately after** you supply a message—whether from `git commit -m "your subject"` or from the editor. It runs the same [Commitlint](https://commitlint.js.org/) rules as CI ([Conventional Commits](https://www.conventionalcommits.org/) via `@commitlint/config-conventional`), with **`--verbose`** output like the workflow.
+
+If Commitlint fails, **Git does not create the commit**. You will see the errors in your terminal; fix the message and run `git commit` again (no need to wait for CI to discover the problem).
+
+**Hooks not running?** Run `npm ci` (or `npm install`) once at the repo root. If you only install dependencies under `apps/ui`, root Husky never runs and commits will not be checked locally.
 
 To bypass hooks in exceptional cases (not recommended for routine work): `git commit --no-verify`.
+
+**Dry-run a message without committing** (from repo root, after `npm ci`):
+
+```bash
+printf '%s\n' 'feat(ui): example valid message' | npx --no -- commitlint --verbose
+```
 
 ## Commit messages
 

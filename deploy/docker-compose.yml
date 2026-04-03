@@ -1,3 +1,5 @@
+name: clevis
+
 services:
   api:
     build:
