@@ -22,7 +22,7 @@ jobs:
           node-version: 22
 
       - name: Install commitlint
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Lint commits (PR)
         if: ${{ github.event_name == 'pull_request' }}
