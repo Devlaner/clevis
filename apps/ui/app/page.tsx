@@ -1,133 +1,89 @@
-"use client"
-
-import { useState } from "react"
 import { PageHeader } from "@/components/page-header"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Input } from "@/components/ui/input"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  FolderGit2,
+  GitPullRequest,
+  ShieldCheck,
+  Users,
+  ArrowRight,
+  Radio,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
-import { Shield, AlertTriangle, CheckCircle, XCircle } from "lucide-react"
 
-const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080"
+const stats = [
+  { label: "Repositories", value: "\u2014", icon: FolderGit2 },
+  { label: "Open PRs", value: "\u2014", icon: GitPullRequest },
+  { label: "Security Score", value: "\u2014", icon: ShieldCheck },
+  { label: "Team Members", value: "\u2014", icon: Users },
+]
 
-export default function DashboardPage() {
-  const [owner, setOwner] = useState("")
-  const [token, setToken] = useState("")
-  const [data, setData] = useState<any>(null)
-  const [error, setError] = useState("")
-  const [loading, setLoading] = useState(false)
-
-  async function runScan() {
-    setError("")
-    setLoading(true)
-    try {
-      const res = await fetch(`${API}/analytics/overview`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ owner, token }),
-      })
-      const json = await res.json()
-      if (!res.ok) {
-        setError(json.detail || "Scan failed")
-        return
-      }
-      setData(json)
-    } finally {
-      setLoading(false)
-    }
-  }
-
+export default function CockpitPage() {
   return (
     <>
       <PageHeader
-        title="Security Analytics"
-        description="Run security checks for a GitHub organization and inspect its posture."
+        title="Cockpit"
+        description="Your GitHub organization at a glance."
       />
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Shield className="size-5" />
-              Run Scan
-            </CardTitle>
-            <CardDescription>
-              Enter your organization login and a GitHub token to analyze security posture.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-4">
-            <Input
-              placeholder="Organization login"
-              value={owner}
-              onChange={(e) => setOwner(e.target.value)}
-            />
-            <Input
-              placeholder="GitHub token"
-              type="password"
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-            />
-            <Button onClick={runScan} disabled={loading || !owner || !token}>
-              {loading ? "Scanning..." : "Run analytics"}
-            </Button>
-            {error && (
-              <div className="flex items-center gap-2 text-sm text-destructive">
-                <AlertTriangle className="size-4" />
-                {error}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {stats.map((s) => (
+          <Card key={s.label} className="group glow-border transition-all hover:glow-sm">
+            <CardContent className="flex items-center gap-4 pt-0">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                <s.icon className="size-5 text-primary" />
               </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {data && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Score</CardTitle>
-              <CardDescription>
-                {data.failed_checks} of {data.total_checks} checks failed
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-center">
-                <span className={`text-6xl font-bold ${data.score >= 80 ? "text-green-600" : data.score >= 50 ? "text-yellow-600" : "text-red-600"}`}>
-                  {data.score}
-                </span>
-                <span className="ml-1 text-2xl text-muted-foreground">/100</span>
+              <div>
+                <p className="text-xs text-muted-foreground">{s.label}</p>
+                <p className="text-2xl font-bold tracking-tight">{s.value}</p>
               </div>
             </CardContent>
           </Card>
-        )}
+        ))}
       </div>
 
-      {data && (
-        <Card className="mt-6">
+      <div className="mt-8 grid gap-6 lg:grid-cols-3">
+        <Card className="lg:col-span-2 glow-border">
           <CardHeader>
-            <CardTitle>Check Results</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Radio className="size-4 text-primary" />
+              Recent Activity
+            </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="divide-y">
-              {data.checks.map((c: any) => (
-                <div key={c.id} className="flex items-start gap-4 py-4 first:pt-0 last:pb-0">
-                  {c.status === "passed" ? (
-                    <CheckCircle className="mt-0.5 size-5 shrink-0 text-green-600" />
-                  ) : (
-                    <XCircle className="mt-0.5 size-5 shrink-0 text-red-600" />
-                  )}
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{c.title}</span>
-                      <Badge variant={c.severity === "high" ? "destructive" : "secondary"}>
-                        {c.severity}
-                      </Badge>
-                    </div>
-                    <p className="text-sm text-muted-foreground">{c.remediation}</p>
-                  </div>
-                </div>
-              ))}
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <div className="flex size-12 items-center justify-center rounded-full bg-muted/50 mb-3">
+                <Radio className="size-5 text-muted-foreground" />
+              </div>
+              <p className="text-sm font-medium text-muted-foreground">
+                No activity yet
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground/60">
+                Connect a GitHub account to see your feed
+              </p>
             </div>
           </CardContent>
         </Card>
-      )}
+
+        <Card className="glow-border">
+          <CardHeader>
+            <CardTitle className="text-base">Quick Actions</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-2">
+            <Button variant="outline" className="justify-between" render={<a href="/security" />}>
+              Run Security Scan
+              <ArrowRight className="size-3.5 text-muted-foreground" />
+            </Button>
+            <Button variant="outline" className="justify-between" render={<a href="/repos" />}>
+              Manage Caches
+              <ArrowRight className="size-3.5 text-muted-foreground" />
+            </Button>
+            <Button variant="outline" className="justify-between" render={<a href="/collaborators" />}>
+              View Collaborators
+              <ArrowRight className="size-3.5 text-muted-foreground" />
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
     </>
   )
 }
