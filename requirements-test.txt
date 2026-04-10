@@ -1,0 +1,2 @@
+# Test runner only (not used by API/worker images). Install after runtime requirements.
+pytest==8.3.5
