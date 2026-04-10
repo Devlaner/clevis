@@ -33,7 +33,7 @@ jobs:
         run: npx commitlint --from ${{ github.event.before }} --to ${{ github.sha }} --verbose
 
   ui:
-    name: UI Typecheck + Build
+    name: UI Typecheck + Test + Build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -58,12 +58,16 @@ jobs:
         working-directory: apps/ui
         run: npm run lint
 
+      - name: Test UI
+        working-directory: apps/ui
+        run: npm run test
+
       - name: Build UI
         working-directory: apps/ui
         run: npm run build
 
   python:
-    name: Python Compile / Requirements
+    name: Python Tests + Compile
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -79,6 +83,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r apps/api/requirements.txt
           python -m pip install -r apps/worker/requirements.txt
+          python -m pip install "pytest>=8.0.0"
+
+      - name: Run Python tests
+        run: pytest -q
 
       - name: Compile Python sources
         run: python -m compileall apps/api/src apps/worker/src

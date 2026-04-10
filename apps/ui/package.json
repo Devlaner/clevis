@@ -6,7 +6,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "next build",
     "lint": "eslint .",
-    "check": "npm run typecheck && npm run lint && npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run test && npm run build",
     "start": "next start -p 3000"
   },
   "dependencies": {
@@ -24,13 +26,18 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.5",
     "@tailwindcss/postcss": "^4.2.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^22.13.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.1",
     "eslint": "^9.0.0",
     "eslint-config-next": "^15.5.14",
+    "jsdom": "^29.0.2",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.4"
   }
 }

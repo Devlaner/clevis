@@ -16,9 +16,21 @@
     "plugins": [{ "name": "next" }],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+      "vitest": ["./node_modules/vitest"],
+      "vitest/*": ["./node_modules/vitest/*"],
+      "@testing-library/react": ["./node_modules/@testing-library/react"],
+      "@testing-library/jest-dom": ["./node_modules/@testing-library/jest-dom"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    "vitest-env.d.ts",
+    ".next/types/**/*.ts",
+    "../../tests/ui/**/*.test.ts",
+    "../../tests/ui/**/*.test.tsx"
+  ],
   "exclude": ["node_modules"]
 }
