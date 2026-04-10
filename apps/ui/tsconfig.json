@@ -30,7 +30,9 @@
     "vitest-env.d.ts",
     ".next/types/**/*.ts",
     "../../tests/ui/**/*.test.ts",
-    "../../tests/ui/**/*.test.tsx"
+    "../../tests/ui/**/*.test.tsx",
+    "../../tests/ui/**/*.spec.ts",
+    "../../tests/ui/**/*.spec.tsx"
   ],
   "exclude": ["node_modules"]
 }
