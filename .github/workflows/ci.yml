@@ -29,7 +29,7 @@ jobs:
         run: npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.sha }} --verbose
 
       - name: Lint commits (push)
-        if: ${{ github.event_name == 'push' }}
+        if: ${{ github.event_name == 'push' && github.ref != 'refs/heads/main' && github.event.before != '0000000000000000000000000000000000000000' }}
         run: npx commitlint --from ${{ github.event.before }} --to ${{ github.sha }} --verbose
 
   ui:
@@ -53,6 +53,10 @@ jobs:
       - name: Typecheck
         working-directory: apps/ui
         run: npm run typecheck
+
+      - name: Lint UI
+        working-directory: apps/ui
+        run: npm run lint
 
       - name: Build UI
         working-directory: apps/ui

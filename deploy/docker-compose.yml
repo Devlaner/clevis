@@ -12,6 +12,15 @@ services:
       - ../packages/checks:/app/packages/checks
     ports:
       - "${API_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - clevis
 
   worker:
     build:
@@ -21,7 +30,11 @@ services:
     volumes:
       - ../data:/app/data
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - clevis
 
   ui:
     build:
@@ -31,4 +44,12 @@ services:
     ports:
       - "${UI_PORT:-3000}:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - clevis
+
+networks:
+  clevis:
+    driver: bridge
