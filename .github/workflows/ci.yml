@@ -60,7 +60,7 @@ jobs:
 
       - name: Test UI
         working-directory: apps/ui
-        run: npm run test
+        run: npx vitest run
 
       - name: Build UI
         working-directory: apps/ui
@@ -86,7 +86,7 @@ jobs:
           python -m pip install "pytest>=8.0.0"
 
       - name: Run Python tests
-        run: pytest -q
+        run: python -m pytest -q
 
       - name: Compile Python sources
         run: python -m compileall apps/api/src apps/worker/src
