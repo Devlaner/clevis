@@ -28,11 +28,9 @@ export default function MyPRsPage() {
   const myPrsQuery = useQuery({
     queryKey: ["analytics.my-prs", org, page],
     queryFn: () => api.analytics.myPrs(org, page, PER_PAGE, resolveQuery.data?.token),
-    enabled: org.trim().length > 2 && resolveQuery.isSuccess,
+    enabled: org.trim().length > 2 && !resolveQuery.isLoading,
     retry: false,
   })
-
-  const tokenFailed = resolveQuery.isError
 
   return (
     <>
@@ -52,14 +50,12 @@ export default function MyPRsPage() {
         <MyItemsList
           items={myPrsQuery.data?.items ?? []}
           isLoading={myPrsQuery.isLoading || resolveQuery.isLoading}
-          isError={tokenFailed || myPrsQuery.isError}
+          isError={myPrsQuery.isError}
           errorMessage={
-            tokenFailed
-              ? (resolveQuery.error instanceof Error ? resolveQuery.error.message : "Failed to resolve GitHub access.")
-              : (myPrsQuery.error instanceof Error ? myPrsQuery.error.message : "Failed to load your pull requests.")
+            myPrsQuery.error instanceof Error ? myPrsQuery.error.message : "Failed to load your pull requests."
           }
-          onRetry={() => (tokenFailed ? resolveQuery.refetch() : myPrsQuery.refetch())}
-          retrying={tokenFailed ? resolveQuery.isFetching : myPrsQuery.isFetching}
+          onRetry={() => myPrsQuery.refetch()}
+          retrying={myPrsQuery.isFetching}
           emptyNoun="open pull requests"
           totalCount={myPrsQuery.data?.total_count ?? 0}
           page={page}

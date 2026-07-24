@@ -116,20 +116,31 @@ describe("ReleasesPage", () => {
     await waitFor(() => expect(screen.getByText("Failed to load releases.")).toBeInTheDocument());
   });
 
-  it("surfaces a token-resolve failure with retry instead of firing the release-timeline query", async () => {
+  it("still queries via a connected GitHub App installation when there's no saved PAT to resolve", async () => {
     localStorage.setItem("default_org", "acme");
-    tokensResolveMock.mockRejectedValue(new Error("No GitHub App installation found"));
+    tokensResolveMock.mockRejectedValue(new Error("No saved token for this org"));
+    releaseTimelineMock.mockResolvedValue({ org: "acme", releases: [RELEASE] });
 
     renderPage();
 
-    await waitFor(() => expect(screen.getByText("No GitHub App installation found")).toBeInTheDocument());
-    expect(releaseTimelineMock).not.toHaveBeenCalled();
-
-    tokensResolveMock.mockResolvedValueOnce({ token: "ghp_test" });
-    releaseTimelineMock.mockResolvedValueOnce({ org: "acme", releases: [RELEASE] });
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-
     await waitFor(() => expect(screen.getAllByText(/v1\.2\.0/).length).toBeGreaterThan(0));
+    expect(releaseTimelineMock).toHaveBeenCalledWith("acme", "", 90);
+  });
+
+  it("shows the release-timeline endpoint's own error when neither a saved token nor an installation is available", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockRejectedValue(new Error("No saved token for this org"));
+    releaseTimelineMock.mockRejectedValue(
+      new Error("No GitHub App installation found for 'acme' and no token was provided."),
+    );
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("No GitHub App installation found for 'acme' and no token was provided."),
+      ).toBeInTheDocument(),
+    );
   });
 
   it("shows the empty state only when the query genuinely succeeds with no rows", async () => {

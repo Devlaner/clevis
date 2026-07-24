@@ -100,20 +100,31 @@ describe("MyIssuesPage", () => {
     await waitFor(() => expect(screen.getByText(/No assigned issues/)).toBeInTheDocument());
   });
 
-  it("surfaces a token-resolve failure with retry instead of firing the analytics query", async () => {
+  it("still queries via a connected GitHub App installation when there's no saved PAT to resolve", async () => {
     localStorage.setItem("default_org", "acme");
-    tokensResolveMock.mockRejectedValue(new Error("No GitHub App installation found"));
+    tokensResolveMock.mockRejectedValue(new Error("No saved token for this org"));
+    myIssuesMock.mockResolvedValue({ items: [ISSUE_ITEM], total_count: 1, page: 1, per_page: 25 });
 
     renderPage();
 
-    await waitFor(() => expect(screen.getByText("No GitHub App installation found")).toBeInTheDocument());
-    expect(myIssuesMock).not.toHaveBeenCalled();
-
-    tokensResolveMock.mockResolvedValueOnce({ token: "ghp_test" });
-    myIssuesMock.mockResolvedValueOnce({ items: [ISSUE_ITEM], total_count: 1, page: 1, per_page: 25 });
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-
     await waitFor(() => expect(screen.getByText("Investigate flake")).toBeInTheDocument());
+    expect(myIssuesMock).toHaveBeenCalledWith("acme", 1, 25, undefined);
+  });
+
+  it("shows the analytics endpoint's own error when neither a saved token nor an installation is available", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockRejectedValue(new Error("No saved token for this org"));
+    myIssuesMock.mockRejectedValue(
+      new Error("No GitHub App installation found for 'acme' and no token was provided."),
+    );
+
+    renderPage();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("No GitHub App installation found for 'acme' and no token was provided."),
+      ).toBeInTheDocument(),
+    );
   });
 
   it("advances to page 2 and re-queries when Next is clicked", async () => {
