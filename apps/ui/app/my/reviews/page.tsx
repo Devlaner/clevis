@@ -28,11 +28,9 @@ export default function MyReviewsPage() {
   const myReviewsQuery = useQuery({
     queryKey: ["analytics.my-reviews", org, page],
     queryFn: () => api.analytics.myReviews(org, page, PER_PAGE, resolveQuery.data?.token),
-    enabled: org.trim().length > 2 && resolveQuery.isSuccess,
+    enabled: org.trim().length > 2 && !resolveQuery.isLoading,
     retry: false,
   })
-
-  const tokenFailed = resolveQuery.isError
 
   return (
     <>
@@ -52,14 +50,12 @@ export default function MyReviewsPage() {
         <MyItemsList
           items={myReviewsQuery.data?.items ?? []}
           isLoading={myReviewsQuery.isLoading || resolveQuery.isLoading}
-          isError={tokenFailed || myReviewsQuery.isError}
+          isError={myReviewsQuery.isError}
           errorMessage={
-            tokenFailed
-              ? (resolveQuery.error instanceof Error ? resolveQuery.error.message : "Failed to resolve GitHub access.")
-              : (myReviewsQuery.error instanceof Error ? myReviewsQuery.error.message : "Failed to load your review queue.")
+            myReviewsQuery.error instanceof Error ? myReviewsQuery.error.message : "Failed to load your review queue."
           }
-          onRetry={() => (tokenFailed ? resolveQuery.refetch() : myReviewsQuery.refetch())}
-          retrying={tokenFailed ? resolveQuery.isFetching : myReviewsQuery.isFetching}
+          onRetry={() => myReviewsQuery.refetch()}
+          retrying={myReviewsQuery.isFetching}
           emptyNoun="pull requests awaiting your review"
           totalCount={myReviewsQuery.data?.total_count ?? 0}
           page={page}

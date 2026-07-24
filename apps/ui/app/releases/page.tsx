@@ -28,7 +28,7 @@ export default function ReleasesPage() {
   })
 
   const token = resolveQuery.data?.token ?? ""
-  const queriesEnabled = org.trim().length > 2 && resolveQuery.isSuccess
+  const queriesEnabled = org.trim().length > 2 && !resolveQuery.isLoading
 
   const releaseTimelineQuery = useQuery({
     queryKey: ["github.release-timeline", org, days],
@@ -69,17 +69,7 @@ export default function ReleasesPage() {
             </select>
           </div>
 
-          {resolveQuery.isError ? (
-            <SectionError
-              message={
-                resolveQuery.error instanceof Error
-                  ? resolveQuery.error.message
-                  : "Failed to resolve GitHub access."
-              }
-              onRetry={() => resolveQuery.refetch()}
-              retrying={resolveQuery.isFetching}
-            />
-          ) : releaseTimelineQuery.isLoading || resolveQuery.isLoading ? (
+          {releaseTimelineQuery.isLoading || resolveQuery.isLoading ? (
             <div className="px-4 py-8">
               <p className="text-sm text-muted-foreground animate-pulse">Loading…</p>
             </div>
