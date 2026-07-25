@@ -47,8 +47,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _MIN_PASSWORD_LEN = 12
-# bcrypt's hard limit -- bcrypt.hashpw/checkpw raise ValueError on any input over 72 bytes
-# rather than truncating, so this must be validated before either is ever called.
+# bcrypt's hard limit -- input past this point is silently ignored (bcrypt==4.2.1 pinned
+# here truncates rather than raising; only bcrypt>=5.0 raises ValueError). Left unchecked,
+# two different passwords that share the same first 72 bytes hash identically and are
+# accepted as the same password, so this must be validated (rejected, not truncated)
+# before hashing.
 _MAX_PASSWORD_LEN = 72
 _VERIFY_TOKEN_TTL = timedelta(hours=24)
 
