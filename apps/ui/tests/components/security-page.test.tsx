@@ -9,6 +9,7 @@ const analyticsOverviewMock = vi.fn();
 const analyticsHistoryMock = vi.fn();
 const securityMatrixMock = vi.fn();
 const secretScanningMock = vi.fn();
+const installationsListMock = vi.fn();
 
 // A minimal reactive store standing in for Next's router-driven searchParams so a
 // tab click's router.replace(...) actually triggers a re-render in the test, the
@@ -46,6 +47,9 @@ vi.mock("@/lib/api/client", () => ({
       matrix: (...args: unknown[]) => securityMatrixMock(...args),
       secretScanning: (...args: unknown[]) => secretScanningMock(...args),
     },
+    installations: {
+      list: (...args: unknown[]) => installationsListMock(...args),
+    },
   },
 }));
 
@@ -79,6 +83,8 @@ describe("SecurityPage", () => {
       summary: { fully_compliant_count: 0, critical_risk_count: 0, secret_hits_count: 0, vuln_by_severity: { critical: 0, high: 0, medium: 0, low: 0 } },
     });
     secretScanningMock.mockResolvedValue({ repository: "acme/demo", alerts: [] });
+    installationsListMock.mockReset();
+    installationsListMock.mockResolvedValue([]);
     mockSearchParams = new URLSearchParams();
     localStorage.clear();
   });
@@ -86,6 +92,17 @@ describe("SecurityPage", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("hides the GitHub Token field when an installation covers the entered org", async () => {
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "acme", account_type: "Organization", installation_id: 42, created_at: "2026-07-20T00:00:00Z" },
+    ]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
   });
 
   it("allows running a scan with no token entered (GitHub App fallback)", async () => {

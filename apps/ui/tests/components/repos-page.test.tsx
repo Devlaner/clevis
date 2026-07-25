@@ -7,6 +7,7 @@ const tokensUpsertMock = vi.fn();
 const reposListMock = vi.fn();
 const reposStatsMock = vi.fn();
 const reposPullsMock = vi.fn();
+const installationsListMock = vi.fn();
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({}),
@@ -22,6 +23,9 @@ vi.mock("@/lib/api/client", () => ({
       list: (...args: unknown[]) => reposListMock(...args),
       stats: (...args: unknown[]) => reposStatsMock(...args),
       pulls: (...args: unknown[]) => reposPullsMock(...args),
+    },
+    installations: {
+      list: (...args: unknown[]) => installationsListMock(...args),
     },
   },
 }));
@@ -61,6 +65,8 @@ describe("ReposPage", () => {
       latest_release: null,
     });
     reposPullsMock.mockResolvedValue({ repository: "acme/demo", total: 0, pulls: [] });
+    installationsListMock.mockReset();
+    installationsListMock.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -71,6 +77,17 @@ describe("ReposPage", () => {
   it("keeps Load repositories disabled until an org is entered", () => {
     renderPage();
     expect(screen.getByRole("button", { name: /load repositories/i })).toBeDisabled();
+  });
+
+  it("hides the GitHub Token field when an installation covers the entered org", async () => {
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "acme", account_type: "Organization", installation_id: 42, created_at: "2026-07-20T00:00:00Z" },
+    ]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
   });
 
   it("keeps Load repositories disabled for a whitespace-only organization", () => {

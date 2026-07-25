@@ -14,7 +14,7 @@ import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { MiniSparkline } from "@/components/charts/mini-sparkline"
 import { relativeTime } from "@/lib/format"
 import { useInView } from "@/lib/use-in-view"
-import type { RepoSummary } from "@/lib/api/types"
+import type { InstallationMeta, RepoSummary } from "@/lib/api/types"
 
 type SortKey = "pushed" | "stars" | "name"
 
@@ -183,6 +183,12 @@ export default function ReposPage() {
     setOwner(scopeOrgLogin)
   }, [scopeOrgLogin])
 
+  const { data: installs = [] } = useQuery<InstallationMeta[]>({
+    queryKey: ["installations"],
+    queryFn: () => api.installations.list(),
+  })
+  const hasInstallationForOwner = installs.some((i) => i.account_login === owner)
+
   const resolveMutation = useMutation({
     mutationFn: (org: string) => api.tokens.resolve(org),
     onSuccess: (data, org) => {
@@ -259,6 +265,7 @@ export default function ReposPage() {
                 onKeyDown={(e) => e.key === "Enter" && owner.trim() && !listMutation.isPending && loadRepos()}
               />
             </div>
+            {!hasInstallationForOwner && (
             <div>
               <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
                 GitHub Token
@@ -280,6 +287,7 @@ export default function ReposPage() {
                 onKeyDown={(e) => e.key === "Enter" && owner.trim() && !listMutation.isPending && loadRepos()}
               />
             </div>
+            )}
             <Button
               onClick={loadRepos}
               disabled={listMutation.isPending || !owner.trim()}

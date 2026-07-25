@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { useMutation } from "@tanstack/react-query"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import Link from "next/link"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -12,7 +12,7 @@ import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { formatBytes, relativeTime, classifyStaleness, stalenessColor } from "@/lib/format"
-import type { CacheEntry } from "@/lib/api/types"
+import type { CacheEntry, InstallationMeta } from "@/lib/api/types"
 
 interface CachePanelProps {
   owner: string
@@ -32,6 +32,12 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
   const [tokenSaved, setTokenSaved] = useState(false)
   const [actor, setActor] = useState("")
   const [clearArmed, setClearArmed] = useState(false)
+
+  const { data: installs = [] } = useQuery<InstallationMeta[]>({
+    queryKey: ["installations"],
+    queryFn: () => api.installations.list(),
+  })
+  const hasInstallationForOwner = installs.some((i) => i.account_login === owner)
 
   // Auto-resolve saved token for this owner
   const resolveMutation = useMutation({
@@ -123,26 +129,28 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
           <span className="section-label">Configuration</span>
         </div>
         <div className="p-4 flex flex-col gap-3">
-          <div>
-            <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
-              GitHub Token
-              <span className="text-[0.6875rem] text-muted-foreground font-normal">
-                optional if the GitHub App is connected for this org
-              </span>
-              {tokenSaved && (
-                <span className="inline-flex items-center gap-1 text-[0.6875rem] text-primary">
-                  <Key className="size-3" />saved
+          {!hasInstallationForOwner && (
+            <div>
+              <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
+                GitHub Token
+                <span className="text-[0.6875rem] text-muted-foreground font-normal">
+                  optional if the GitHub App is connected for this org
                 </span>
-              )}
-            </label>
-            <Input
-              placeholder="ghp_... (leave blank to use the connected GitHub App)"
-              type="password"
-              value={token}
-              onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}
-              className="font-mono"
-            />
-          </div>
+                {tokenSaved && (
+                  <span className="inline-flex items-center gap-1 text-[0.6875rem] text-primary">
+                    <Key className="size-3" />saved
+                  </span>
+                )}
+              </label>
+              <Input
+                placeholder="ghp_... (leave blank to use the connected GitHub App)"
+                type="password"
+                value={token}
+                onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}
+                className="font-mono"
+              />
+            </div>
+          )}
           {!tokenSaved && token && (
             <Button
               variant="outline"

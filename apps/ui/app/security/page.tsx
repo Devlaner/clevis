@@ -17,7 +17,7 @@ import { AreaTimeChart } from "@/components/charts/area-time-chart"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
-import type { CheckResult } from "@/lib/api/types"
+import type { CheckResult, InstallationMeta } from "@/lib/api/types"
 
 const TABS = [
   { id: "all", label: "All" },
@@ -101,6 +101,12 @@ export default function SecurityPage() {
   useEffect(() => {
     setOwner(scopeOrgLogin)
   }, [scopeOrgLogin])
+
+  const { data: installs = [] } = useQuery<InstallationMeta[]>({
+    queryKey: ["installations"],
+    queryFn: () => api.installations.list(),
+  })
+  const hasInstallationForOwner = installs.some((i) => i.account_login === owner)
 
   const resolveMutation = useMutation({
     mutationFn: (org: string) => api.tokens.resolve(org),
@@ -222,27 +228,29 @@ export default function SecurityPage() {
                 onKeyDown={(e) => e.key === "Enter" && owner && !scan.isPending && runScan()}
               />
             </div>
-            <div>
-              <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
-                GitHub Token
-                <span className="text-[0.6875rem] text-muted-foreground font-normal">
-                  optional if the GitHub App is connected for this org
-                </span>
-                {tokenSaved && (
-                  <span className="inline-flex items-center gap-1 text-[0.6875rem] text-primary">
-                    <Key className="size-3" />saved
+            {!hasInstallationForOwner && (
+              <div>
+                <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
+                  GitHub Token
+                  <span className="text-[0.6875rem] text-muted-foreground font-normal">
+                    optional if the GitHub App is connected for this org
                   </span>
-                )}
-              </label>
-              <Input
-                placeholder="ghp_... (leave blank to use the connected GitHub App)"
-                type="password"
-                value={token}
-                onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}
-                className="font-mono"
-                onKeyDown={(e) => e.key === "Enter" && owner && !scan.isPending && runScan()}
-              />
-            </div>
+                  {tokenSaved && (
+                    <span className="inline-flex items-center gap-1 text-[0.6875rem] text-primary">
+                      <Key className="size-3" />saved
+                    </span>
+                  )}
+                </label>
+                <Input
+                  placeholder="ghp_... (leave blank to use the connected GitHub App)"
+                  type="password"
+                  value={token}
+                  onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}
+                  className="font-mono"
+                  onKeyDown={(e) => e.key === "Enter" && owner && !scan.isPending && runScan()}
+                />
+              </div>
+            )}
             <Button
               onClick={() => runScan()}
               disabled={scan.isPending || !owner}

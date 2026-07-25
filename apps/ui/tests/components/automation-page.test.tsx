@@ -6,6 +6,7 @@ const tokensResolveMock = vi.fn();
 const workflowsMock = vi.fn();
 const runsMock = vi.fn();
 const dispatchMock = vi.fn();
+const installationsListMock = vi.fn();
 
 vi.mock("@/lib/api/client", () => ({
   api: {
@@ -17,6 +18,9 @@ vi.mock("@/lib/api/client", () => ({
       workflows: (...args: unknown[]) => workflowsMock(...args),
       runs: (...args: unknown[]) => runsMock(...args),
       dispatch: (...args: unknown[]) => dispatchMock(...args),
+    },
+    installations: {
+      list: (...args: unknown[]) => installationsListMock(...args),
     },
   },
 }));
@@ -40,6 +44,8 @@ describe("AutomationPage", () => {
     workflowsMock.mockReset();
     runsMock.mockReset();
     dispatchMock.mockReset();
+    installationsListMock.mockReset();
+    installationsListMock.mockResolvedValue([]);
     localStorage.clear();
   });
 
@@ -52,6 +58,26 @@ describe("AutomationPage", () => {
     renderPage();
     expect(screen.queryByText("Workflows")).not.toBeInTheDocument();
     expect(workflowsMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the GitHub Token field when no installation covers the entered owner", async () => {
+    installationsListMock.mockResolvedValue([]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(screen.getByText("GitHub Token")).toBeInTheDocument();
+    });
+  });
+
+  it("hides the GitHub Token field when an installation covers the entered owner", async () => {
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "acme", account_type: "Organization", installation_id: 42, created_at: "2026-07-20T00:00:00Z" },
+    ]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
   });
 
   it("loads workflows and run history for the entered owner/repo", async () => {
