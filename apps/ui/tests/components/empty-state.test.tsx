@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
 
-import { EmptyStateInline, EmptyStatePage } from "@/components/empty-state";
+import { EmptyStateInline, EmptyStateNoAccount, EmptyStatePage } from "@/components/empty-state";
+
+afterEach(cleanup);
 
 describe("EmptyStateInline", () => {
   it("renders the noun with no qualifier", () => {
@@ -35,5 +37,18 @@ describe("EmptyStatePage", () => {
 
     const link = screen.getByRole("link", { name: "Configure" });
     expect(link).toHaveAttribute("href", "/security");
+  });
+});
+
+describe("EmptyStateNoAccount", () => {
+  it("renders the default copy when no message override is given", () => {
+    render(<EmptyStateNoAccount />);
+    expect(screen.getByText(/this page has nothing to query/)).toBeInTheDocument();
+  });
+
+  it("renders a custom message when one is provided", () => {
+    render(<EmptyStateNoAccount message="No account selected — type an organization below." />);
+    expect(screen.getByText("No account selected — type an organization below.")).toBeInTheDocument();
+    expect(screen.queryByText(/this page has nothing to query/)).not.toBeInTheDocument();
   });
 });
