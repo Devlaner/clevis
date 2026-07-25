@@ -56,12 +56,12 @@ test.describe("Mid-session 401", () => {
     await loginAsAdmin(page)
     await expect(page.getByRole("heading", { level: 1, name: "Overview" })).toBeVisible()
 
-    // Force the next API call to look like an expired/revoked session. /jobs auto-fetches
-    // GET /jobs on mount (see app/jobs/page.tsx), so navigating there reliably triggers it.
-    // Scoped to the API host specifically — a bare "**/jobs" pattern would also match the
-    // UI's own page navigation request to http://localhost:3000/jobs.
-    await page.route(`${E2E_API_BASE}/jobs`, (route) => route.fulfill({ status: 401, body: "{}" }))
-    await page.goto("/jobs")
+    // Force the next API call to look like an expired/revoked session. /audit auto-fetches
+    // GET /audit on mount (see app/audit/page.tsx), so navigating there reliably triggers it.
+    // Scoped to the API host specifically — a bare "**/audit" pattern would also match the
+    // UI's own page navigation request to http://localhost:3000/audit.
+    await page.route(`${E2E_API_BASE}/audit`, (route) => route.fulfill({ status: 401, body: "{}" }))
+    await page.goto("/audit")
 
     // Regression check for #75/#115: AuthGuard must call logout() (clearing local auth state)
     // before redirecting, otherwise /login's "already authenticated" check bounces straight

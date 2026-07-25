@@ -83,12 +83,34 @@ def test_setup_rejects_short_password(auth_client):
     assert resp.status_code == 422
 
 
+def test_setup_rejects_password_over_72_bytes(auth_client):
+    # Regression test: bcrypt silently truncates input past 72 bytes rather than raising
+    # (bcrypt==4.2.1 pinned here) -- unvalidated, two different passwords sharing the same
+    # first 72 bytes would hash identically. Must be a clean 422, not silent truncation.
+    resp = auth_client.post("/auth/setup", json={"email": "a@b.com", "password": "x" * 73})
+    assert resp.status_code == 422
+
+
 def test_setup_rejects_duplicate(auth_client):
     _setup_owner(auth_client)
     resp = auth_client.post(
         "/auth/setup", json={"email": "other@example.com", "password": "supersecret1234"}
     )
     assert resp.status_code == 409
+
+
+def test_setup_applies_a_per_ip_rate_limit(auth_client):
+    # Regression test for issue #279: /auth/setup was missing the rate_limit() dependency
+    # applied to every sibling auth endpoint (register/login/verify-email/resend-verification).
+    _setup_owner(auth_client)  # call 1 (201)
+    for _ in range(9):  # calls 2-10 (409, setup already complete) -- still count toward the limit
+        auth_client.post(
+            "/auth/setup", json={"email": "other@example.com", "password": "supersecret1234"}
+        )
+    resp = auth_client.post(  # call 11 -- exceeds the default max_requests=10
+        "/auth/setup", json={"email": "another@example.com", "password": "supersecret1234"}
+    )
+    assert resp.status_code == 429
 
 
 def test_setup_advisory_lock_serializes_concurrent_holders(_engine):
@@ -167,6 +189,12 @@ def test_register_before_setup_rejected(auth_client):
 def test_register_rejects_short_password(auth_client):
     _setup_owner(auth_client)
     resp = auth_client.post("/auth/register", json={"email": "a@b.com", "password": "tooshort"})
+    assert resp.status_code == 422
+
+
+def test_register_rejects_password_over_72_bytes(auth_client):
+    _setup_owner(auth_client)
+    resp = auth_client.post("/auth/register", json={"email": "a@b.com", "password": "x" * 73})
     assert resp.status_code == 422
 
 
@@ -346,6 +374,18 @@ def test_login_wrong_password(auth_client):
     _setup_owner(auth_client)
     resp = auth_client.post(
         "/auth/login", json={"email": "owner@example.com", "password": "wrongpassword12"}
+    )
+    assert resp.status_code == 401
+
+
+def test_login_rejects_password_over_72_bytes(auth_client):
+    # Regression test: since setup()/register() now reject any password over 72 bytes,
+    # no real stored password can be that long -- an oversized login guess must always
+    # fail with 401. Without this, bcrypt's silent truncation (bcrypt==4.2.1 pinned here)
+    # would let an oversized guess match on nothing more than a shared 72-byte prefix.
+    _setup_owner(auth_client)
+    resp = auth_client.post(
+        "/auth/login", json={"email": "owner@example.com", "password": "x" * 200}
     )
     assert resp.status_code == 401
 

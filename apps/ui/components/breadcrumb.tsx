@@ -12,7 +12,6 @@ const ROUTE_LABELS: Record<string, string> = {
   "/pulls":         "pull requests",
   "/releases":      "releases",
   "/audit":         "audit log",
-  "/jobs":          "job queue",
   "/settings":      "settings",
   "/my/prs":        "my prs",
   "/my/reviews":    "my reviews",

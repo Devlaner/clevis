@@ -13,7 +13,7 @@ import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
-import type { RunSummary, WorkflowSummary } from "@/lib/api/types"
+import type { InstallationMeta, RunSummary, WorkflowSummary } from "@/lib/api/types"
 
 // > 0, not > 1 -- valid GitHub org logins can be a single character (see the
 // token-resolve effect below, and activity/page.tsx).
@@ -48,10 +48,32 @@ export default function AutomationPage() {
     if (scopeLogin) setOwner(scopeLogin)
   }, [scopeLogin])
 
+  const { data: installs = [] } = useQuery<InstallationMeta[]>({
+    queryKey: ["installations"],
+    queryFn: () => api.installations.list(),
+  })
+  // list() above only covers the caller's *personal* installations -- an org's App
+  // installation requires the separate org-scoped endpoint. Errors (403/404, e.g. the
+  // org isn't a recognized Clevis org yet) are treated as "not installed" rather than
+  // surfaced, matching this query's only purpose here (a soft signal to hide the token
+  // field, not something the user needs an error for).
+  const orgInstallsQuery = useQuery<InstallationMeta[]>({
+    queryKey: ["installations.org", owner.trim()],
+    queryFn: () => api.installations.listForOrg(owner.trim()),
+    enabled: owner.trim().length > 0,
+    retry: false,
+  })
+  const hasInstallationForOwner =
+    installs.some((i) => i.account_login === owner) || (orgInstallsQuery.data?.length ?? 0) > 0
+
   const resolveMutation = useMutation({
     mutationFn: (org: string) => api.tokens.resolve(org),
     onSuccess: (data, org) => {
-      if (shouldApplyResolvedToken(org, owner)) {
+      // Skip applying a legacy saved token once an installation covers this owner --
+      // otherwise it'd be silently used (the token field, and its "saved" indicator,
+      // are hidden in that case) and could override the installation-token path the
+      // hidden field implies is now authoritative.
+      if (shouldApplyResolvedToken(org, owner) && !hasInstallationForOwner) {
         setToken(data.token)
         setTokenSaved(true)
       }
@@ -169,26 +191,28 @@ export default function AutomationPage() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
-                GitHub Token
-                <span className="text-[0.6875rem] text-muted-foreground font-normal">
-                  optional if the GitHub App is connected for this org
-                </span>
-                {tokenSaved && (
-                  <span className="inline-flex items-center gap-1 text-[0.6875rem] text-primary">
-                    <Key className="size-3" />saved
+            {!hasInstallationForOwner && (
+              <div>
+                <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
+                  GitHub Token
+                  <span className="text-[0.6875rem] text-muted-foreground font-normal">
+                    optional if the GitHub App is connected for this org
                   </span>
-                )}
-              </label>
-              <Input
-                placeholder="ghp_... (leave blank to use the connected GitHub App)"
-                type="password"
-                value={token}
-                onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}
-                className="font-mono"
-              />
-            </div>
+                  {tokenSaved && (
+                    <span className="inline-flex items-center gap-1 text-[0.6875rem] text-primary">
+                      <Key className="size-3" />saved
+                    </span>
+                  )}
+                </label>
+                <Input
+                  placeholder="ghp_... (leave blank to use the connected GitHub App)"
+                  type="password"
+                  value={token}
+                  onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}
+                  className="font-mono"
+                />
+              </div>
+            )}
             {!tokenSaved && token && owner && (
               <Button variant="outline" onClick={() => saveTokenMutation.mutate()} disabled={saveTokenMutation.isPending}>
                 <Key className="size-3.5" />

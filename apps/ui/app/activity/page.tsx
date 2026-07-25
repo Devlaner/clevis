@@ -1,13 +1,13 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import Link from "next/link"
 import { useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
 import { ActivityList } from "@/components/activity-list"
 import { EventFeed } from "@/components/event-feed"
 import { HeatmapCalendar } from "@/components/charts/heatmap-calendar"
 import { SectionError } from "@/components/section-error"
+import { EmptyStateNoAccount } from "@/components/empty-state"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import { api } from "@/lib/api/client"
@@ -178,14 +178,7 @@ export default function ActivityPage() {
             {feedTab === "feed" && hasOrg && <RefreshCountdown resetKey={lastAttemptAt} seconds={EVENTS_REFRESH_SECONDS} />}
           </div>
           {!hasOrg ? (
-            <div className="px-4 py-8">
-              <p className="text-sm text-muted-foreground">
-                No account selected yet. Pick one from the profile menu, or{" "}
-                <Link href="/security" className="text-primary hover:underline">
-                  configure →
-                </Link>
-              </p>
-            </div>
+            <EmptyStateNoAccount bare />
           ) : feedTab === "feed" && eventsQuery.isError ? (
             <SectionError
               message={eventsQuery.error instanceof Error ? eventsQuery.error.message : "Failed to load events."}
