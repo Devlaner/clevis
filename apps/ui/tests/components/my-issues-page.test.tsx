@@ -48,7 +48,7 @@ describe("MyIssuesPage", () => {
   it("shows a no-default-org message when nothing is configured", async () => {
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText(/No default organization selected/)).toBeInTheDocument();
+      expect(screen.getByText(/No account selected/)).toBeInTheDocument();
     });
     expect(myIssuesMock).not.toHaveBeenCalled();
   });

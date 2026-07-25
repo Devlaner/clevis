@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Warning, Key, CircleNotch, Lock, Star, GitPullRequest, ArrowSquareOut } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
+import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { MiniSparkline } from "@/components/charts/mini-sparkline"
 import { relativeTime } from "@/lib/format"
@@ -174,10 +175,13 @@ export default function ReposPage() {
   const [search, setSearch] = useState("")
   const [sort, setSort] = useState<SortKey>("pushed")
 
+  const { scope } = useActiveScope()
+  const scopeOrgLogin = scope?.kind === "org" ? scope.login : ""
+  // Repo listing is org-only (/orgs/{org}/repos) — pre-fill from an org scope, and
+  // clear (not just skip) when switching to personal so a stale org doesn't linger.
   useEffect(() => {
-    const defaultOrg = localStorage.getItem("default_org") || ""
-    if (defaultOrg) setOwner(defaultOrg)
-  }, [])
+    setOwner(scopeOrgLogin)
+  }, [scopeOrgLogin])
 
   const resolveMutation = useMutation({
     mutationFn: (org: string) => api.tokens.resolve(org),

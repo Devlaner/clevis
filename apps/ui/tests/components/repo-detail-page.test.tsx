@@ -297,14 +297,14 @@ describe("RepoDetailPage", () => {
     await waitFor(() => expect(container.textContent).toContain("Latest release —"));
   });
 
-  it("remembers this org as the default before following the full-report link", async () => {
+  it("remembers this org as the active scope before following the full-report link", async () => {
     localStorage.clear();
     renderPage();
     fireEvent.click(screen.getByRole("tab", { name: /security/i }));
 
     fireEvent.click(screen.getByRole("link", { name: /org-wide report/i }));
 
-    expect(localStorage.getItem("default_org")).toBe("acme");
+    expect(localStorage.getItem("active_scope")).toBe(JSON.stringify({ kind: "org", login: "acme" }));
   });
 
   it("wires every tab to a panel that actually exists in the document, for all three tabs", () => {

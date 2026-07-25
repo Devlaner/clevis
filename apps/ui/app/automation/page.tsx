@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { PageHeader } from "@/components/page-header"
 import { Warning, Key, CircleNotch, Play, CheckCircle, XCircle, CircleDashed } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
+import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { CHART_COLORS } from "@/lib/charts/theme"
@@ -37,10 +38,11 @@ export default function AutomationPage() {
   const [ref, setRef] = useState("main")
   const [dispatchArmed, setDispatchArmed] = useState(false)
 
+  const { scope } = useActiveScope()
+  const scopeLogin = scope?.login ?? ""
   useEffect(() => {
-    const defaultOrg = localStorage.getItem("default_org") || ""
-    if (defaultOrg) setOwner(defaultOrg)
-  }, [])
+    if (scopeLogin) setOwner(scopeLogin)
+  }, [scopeLogin])
 
   const resolveMutation = useMutation({
     mutationFn: (org: string) => api.tokens.resolve(org),

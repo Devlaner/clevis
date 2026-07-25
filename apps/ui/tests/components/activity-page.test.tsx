@@ -79,7 +79,7 @@ describe("ActivityPage", () => {
   it("shows a configure prompt when no org is set", async () => {
     renderPage();
 
-    expect(await screen.findByText(/No organization configured yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/No account selected yet/)).toBeInTheDocument();
   });
 
   it("renders the event feed and the jobs side panel when an org is configured", async () => {
@@ -134,7 +134,7 @@ describe("ActivityPage", () => {
     // API resolve an installation token server-side) instead of showing the "not
     // configured" prompt, which would be a false negative for App-only orgs.
     await waitFor(() => expect(githubEventsMock).toHaveBeenCalledWith("acme", ""));
-    expect(screen.queryByText(/No organization configured yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No account selected yet/)).not.toBeInTheDocument();
     expect(await screen.findByText(/no events yet/)).toBeInTheDocument();
   });
 

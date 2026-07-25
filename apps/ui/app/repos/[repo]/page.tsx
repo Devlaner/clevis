@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { SectionError } from "@/components/section-error"
 import { GitPullRequest, ArrowSquareOut, Star, GitFork, Eye, ShieldCheck, ShieldWarning, Shield } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
+import { setActiveScope } from "@/lib/active-scope"
 import { parseOwnerRepo } from "@/lib/repo-segment"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { AreaTimeChart } from "@/components/charts/area-time-chart"
@@ -315,7 +316,7 @@ export default function RepoDetailPage() {
           <span className="section-label">Repository security status</span>
           <Link
             href="/security"
-            onClick={() => localStorage.setItem("default_org", owner)}
+            onClick={() => setActiveScope({ kind: "org", login: owner })}
             className="text-xs text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1"
           >
             Org-wide report <ArrowSquareOut className="size-3" />

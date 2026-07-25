@@ -11,6 +11,7 @@ import { SectionError } from "@/components/section-error"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import { api } from "@/lib/api/client"
+import { useActiveScope } from "@/lib/active-scope"
 import type { PullSummary } from "@/lib/api/types"
 
 const EVENTS_REFRESH_SECONDS = 30
@@ -51,10 +52,8 @@ export default function ActivityPage() {
     refetchInterval: 15_000,
   })
 
-  const [org, setOrg] = useState("")
-  useEffect(() => {
-    setOrg(localStorage.getItem("default_org") || "")
-  }, [])
+  const { scope } = useActiveScope()
+  const org = scope?.login ?? ""
 
   const [feedTab, setFeedTab] = useState<PrBoardTab>("feed")
 
@@ -181,9 +180,9 @@ export default function ActivityPage() {
           {!hasOrg ? (
             <div className="px-4 py-8">
               <p className="text-sm text-muted-foreground">
-                No organization configured yet.{" "}
+                No account selected yet. Pick one from the profile menu, or{" "}
                 <Link href="/security" className="text-primary hover:underline">
-                  Configure →
+                  configure →
                 </Link>
               </p>
             </div>

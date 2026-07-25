@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Warning, Key, ShieldWarning } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
+import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { DonutChart } from "@/components/charts/donut-chart"
 import { AreaTimeChart } from "@/components/charts/area-time-chart"
@@ -92,10 +93,14 @@ export default function SecurityPage() {
     router.replace(`?${params.toString()}`, { scroll: false })
   }
 
+  const { scope } = useActiveScope()
+  const scopeOrgLogin = scope?.kind === "org" ? scope.login : ""
+  // Security scanning is org-only (the backend 422s for a personal account) — pre-fill
+  // from an org scope, and clear (not just skip) when switching to personal so a stale
+  // org doesn't linger.
   useEffect(() => {
-    const defaultOrg = localStorage.getItem("default_org") || ""
-    if (defaultOrg) setOwner(defaultOrg)
-  }, [])
+    setOwner(scopeOrgLogin)
+  }, [scopeOrgLogin])
 
   const resolveMutation = useMutation({
     mutationFn: (org: string) => api.tokens.resolve(org),
