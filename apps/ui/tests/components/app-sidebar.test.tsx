@@ -379,18 +379,10 @@ describe("AppSidebar coming-soon badges", () => {
     vi.restoreAllMocks();
   });
 
-  it.each(["Pull Requests"])(
-    "shows a 'Soon' badge on the unshipped '%s' nav item",
-    async (title) => {
-      renderSidebar();
-      const link = await screen.findByRole("link", { name: new RegExp(title) });
-      expect(link).toHaveTextContent("Soon");
-    },
-  );
-
   it.each([
     "Overview",
     "Activity",
+    "Pull Requests",
     "Releases",
     "Repositories",
     "Health & Security",
