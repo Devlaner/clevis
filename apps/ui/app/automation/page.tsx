@@ -15,7 +15,9 @@ import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import type { RunSummary, WorkflowSummary } from "@/lib/api/types"
 
-const MIN_OWNER_LEN_FOR_REPO_LOOKUP = 2
+// > 0, not > 1 -- valid GitHub org logins can be a single character (see the
+// token-resolve effect below, and activity/page.tsx).
+const MIN_OWNER_LEN_FOR_REPO_LOOKUP = 1
 
 function runDurationSeconds(run: RunSummary): number | null {
   return run.duration_ms == null ? null : Math.round(run.duration_ms / 1000)
@@ -143,8 +145,9 @@ export default function AutomationPage() {
               <Input placeholder="e.g. octocat" value={owner} onChange={(e) => setOwner(e.target.value)} />
             </div>
             <div>
-              <label className="text-xs font-medium text-foreground block mb-1.5">Repository</label>
+              <label htmlFor="repository" className="text-xs font-medium text-foreground block mb-1.5">Repository</label>
               <select
+                id="repository"
                 value={repo}
                 onChange={(e) => setRepo(e.target.value)}
                 disabled={!owner.trim() || reposListQuery.isLoading}

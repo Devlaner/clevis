@@ -97,6 +97,19 @@ describe("AutomationPage", () => {
     expect(screen.getByRole("combobox")).not.toBeDisabled();
   });
 
+  it("clears a selected repository when the owner changes, disabling Load workflows until a new one is picked", async () => {
+    // Regression test (CodeRabbit finding on PR #300): a stale repo name from the old
+    // owner must not be submittable against the new owner's dropdown options.
+    renderPage();
+    await enterOwnerAndSelectRepo("acme", "demo");
+    expect(screen.getByRole("combobox")).toHaveValue("demo");
+
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "other-org" } });
+
+    await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue(""));
+    expect(screen.getByRole("button", { name: "Load workflows" })).toBeDisabled();
+  });
+
   it("shows a 'Failed to load repositories' placeholder when the repo list fetch errors", async () => {
     reposListMock.mockRejectedValue(new Error("GitHub API unreachable"));
     renderPage();
