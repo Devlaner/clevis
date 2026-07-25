@@ -6,6 +6,7 @@ const tokensResolveMock = vi.fn();
 const workflowsMock = vi.fn();
 const runsMock = vi.fn();
 const dispatchMock = vi.fn();
+const reposListMock = vi.fn();
 
 vi.mock("@/lib/api/client", () => ({
   api: {
@@ -17,6 +18,9 @@ vi.mock("@/lib/api/client", () => ({
       workflows: (...args: unknown[]) => workflowsMock(...args),
       runs: (...args: unknown[]) => runsMock(...args),
       dispatch: (...args: unknown[]) => dispatchMock(...args),
+    },
+    repos: {
+      list: (...args: unknown[]) => reposListMock(...args),
     },
   },
 }));
@@ -34,12 +38,36 @@ function renderPage() {
   );
 }
 
+const DEMO_REPO = {
+  name: "demo",
+  full_name: "acme/demo",
+  private: false,
+  description: null,
+  language: null,
+  stargazers_count: 0,
+  forks_count: 0,
+  watchers_count: 0,
+  open_issues_count: 0,
+  pushed_at: null,
+  default_branch: "main",
+  html_url: "https://github.com/acme/demo",
+};
+
+/** Types the owner, waits for the repo dropdown to populate, then selects `name`. */
+async function enterOwnerAndSelectRepo(owner: string, name: string) {
+  fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: owner } });
+  await waitFor(() => expect(screen.getByRole("option", { name })).toBeInTheDocument());
+  fireEvent.change(screen.getByRole("combobox"), { target: { value: name } });
+}
+
 describe("AutomationPage", () => {
   beforeEach(() => {
     tokensResolveMock.mockReset();
     workflowsMock.mockReset();
     runsMock.mockReset();
     dispatchMock.mockReset();
+    reposListMock.mockReset();
+    reposListMock.mockResolvedValue({ org: "acme", total: 1, repos: [DEMO_REPO] });
     localStorage.clear();
   });
 
@@ -54,7 +82,22 @@ describe("AutomationPage", () => {
     expect(workflowsMock).not.toHaveBeenCalled();
   });
 
-  it("loads workflows and run history for the entered owner/repo", async () => {
+  it("disables the repository dropdown until an owner is entered", () => {
+    renderPage();
+    expect(screen.getByRole("combobox")).toBeDisabled();
+    expect(reposListMock).not.toHaveBeenCalled();
+  });
+
+  it("populates the repository dropdown from the entered owner's repo list", async () => {
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+
+    await waitFor(() => expect(reposListMock).toHaveBeenCalledWith("acme", ""));
+    await waitFor(() => expect(screen.getByRole("option", { name: "demo" })).toBeInTheDocument());
+    expect(screen.getByRole("combobox")).not.toBeDisabled();
+  });
+
+  it("loads workflows and run history for the selected owner/repo", async () => {
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
     workflowsMock.mockResolvedValue({
       repository: "acme/demo",
@@ -71,13 +114,17 @@ describe("AutomationPage", () => {
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
-    fireEvent.change(screen.getByPlaceholderText("e.g. hello-world"), { target: { value: "demo" } });
+    await enterOwnerAndSelectRepo("acme", "demo");
+    // Waiting for the repo dropdown to populate above gives the token-resolve mock time
+    // to settle too, so by the time "Load workflows" is clicked the resolved token is
+    // already applied -- unlike the free-text-field version of this test, which could
+    // click through before that resolution landed.
+    await waitFor(() => expect(screen.getByText("saved")).toBeInTheDocument());
     fireEvent.click(screen.getByText("Load workflows"));
 
     await waitFor(() => {
-      expect(workflowsMock).toHaveBeenCalledWith("acme", "demo", "");
-      expect(runsMock).toHaveBeenCalledWith("acme", "demo", "");
+      expect(workflowsMock).toHaveBeenCalledWith("acme", "demo", "ghp_test");
+      expect(runsMock).toHaveBeenCalledWith("acme", "demo", "ghp_test");
     });
 
     await waitFor(() => {
@@ -96,8 +143,7 @@ describe("AutomationPage", () => {
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
-    fireEvent.change(screen.getByPlaceholderText("e.g. hello-world"), { target: { value: "demo" } });
+    await enterOwnerAndSelectRepo("acme", "demo");
     fireEvent.click(screen.getByText("Load workflows"));
 
     await waitFor(() => expect(screen.getByText("CI")).toBeInTheDocument());
@@ -125,8 +171,7 @@ describe("AutomationPage", () => {
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
-    fireEvent.change(screen.getByPlaceholderText("e.g. hello-world"), { target: { value: "demo" } });
+    await enterOwnerAndSelectRepo("acme", "demo");
     fireEvent.click(screen.getByText("Load workflows"));
 
     await waitFor(() => {
@@ -143,8 +188,7 @@ describe("AutomationPage", () => {
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
-    fireEvent.change(screen.getByPlaceholderText("e.g. hello-world"), { target: { value: "demo" } });
+    await enterOwnerAndSelectRepo("acme", "demo");
     fireEvent.click(screen.getByText("Load workflows"));
 
     await waitFor(() => expect(screen.getByText("Loading…")).toBeInTheDocument());
@@ -153,22 +197,6 @@ describe("AutomationPage", () => {
 
     await waitFor(() => {
       expect(screen.getByText("No workflows found in this repository.")).toBeInTheDocument();
-    });
-  });
-
-  it("submits the load request when Enter is pressed in the repository field", async () => {
-    workflowsMock.mockResolvedValue({ repository: "acme/demo", workflows: [] });
-    runsMock.mockResolvedValue({ repository: "acme/demo", runs: [] });
-
-    renderPage();
-
-    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
-    const repoInput = screen.getByPlaceholderText("e.g. hello-world");
-    fireEvent.change(repoInput, { target: { value: "demo" } });
-    fireEvent.keyDown(repoInput, { key: "Enter" });
-
-    await waitFor(() => {
-      expect(workflowsMock).toHaveBeenCalledWith("acme", "demo", "");
     });
   });
 
@@ -194,8 +222,7 @@ describe("AutomationPage", () => {
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
-    fireEvent.change(screen.getByPlaceholderText("e.g. hello-world"), { target: { value: "demo" } });
+    await enterOwnerAndSelectRepo("acme", "demo");
     fireEvent.change(screen.getByPlaceholderText(/ghp_/), { target: { value: "ghp_manual123456789012345678901234" } });
 
     await waitFor(() => expect(screen.getByText("Save token for this org")).toBeInTheDocument());
@@ -219,8 +246,7 @@ describe("AutomationPage", () => {
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
-    fireEvent.change(screen.getByPlaceholderText("e.g. hello-world"), { target: { value: "demo" } });
+    await enterOwnerAndSelectRepo("acme", "demo");
     fireEvent.click(screen.getByText("Load workflows"));
 
     await waitFor(() => expect(screen.getByText("CI")).toBeInTheDocument());
