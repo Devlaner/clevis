@@ -118,7 +118,7 @@ export default function SecurityPage() {
     retry: false,
   })
   const hasInstallationForOwner =
-    installs.some((i) => i.account_login === owner) || (orgInstallsQuery.data?.length ?? 0) > 0
+    installs.some((i) => i.account_login === owner.trim()) || (orgInstallsQuery.data?.length ?? 0) > 0
 
   const resolveMutation = useMutation({
     mutationFn: (org: string) => api.tokens.resolve(org),

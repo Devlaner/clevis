@@ -84,6 +84,20 @@ describe("AutomationPage", () => {
     });
   });
 
+  it("hides the GitHub Token field when a personal installation covers the entered owner with trailing whitespace", async () => {
+    // Regression test (CodeRabbit finding on PR #299): the personal-installation match
+    // compared account_login against raw owner state, so "acme " (untrimmed) never
+    // matched an "acme" installation and incorrectly left the token field visible.
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "acme", account_type: "Organization", installation_id: 42, created_at: "2026-07-20T00:00:00Z" },
+    ]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme " } });
+    await waitFor(() => {
+      expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
+  });
+
   it("hides the GitHub Token field when an org-level installation covers the entered owner", async () => {
     // Regression test: api.installations.list() only ever returns the caller's *personal*
     // installations -- an org's App installation must be checked via the separate
