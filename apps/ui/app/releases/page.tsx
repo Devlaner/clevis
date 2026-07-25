@@ -1,10 +1,9 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import Link from "next/link"
 import { useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
-import { EmptyStateInline } from "@/components/empty-state"
+import { EmptyStateInline, EmptyStateNoAccount } from "@/components/empty-state"
 import { SectionError } from "@/components/section-error"
 import { relativeTime } from "@/lib/format"
 import { api } from "@/lib/api/client"
@@ -44,16 +43,7 @@ export default function ReleasesPage() {
     <>
       <PageHeader title="Releases" description="Release history across your organization." />
 
-      {orgChecked && !org && (
-        <div className="card mb-6">
-          <p className="px-4 py-6 text-sm text-muted-foreground">
-            No account selected yet — this page has nothing to query. Pick an organization or your personal
-            account from the profile menu, or connect one in{" "}
-            <Link href="/settings" className="text-primary hover:underline">Settings</Link> first if you
-            haven&rsquo;t already.
-          </p>
-        </div>
-      )}
+      {orgChecked && !org && <EmptyStateNoAccount />}
 
       {org && (
         <div className="card">
