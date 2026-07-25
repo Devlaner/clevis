@@ -91,6 +91,20 @@ def test_setup_rejects_duplicate(auth_client):
     assert resp.status_code == 409
 
 
+def test_setup_applies_a_per_ip_rate_limit(auth_client):
+    # Regression test for issue #279: /auth/setup was missing the rate_limit() dependency
+    # applied to every sibling auth endpoint (register/login/verify-email/resend-verification).
+    _setup_owner(auth_client)  # call 1 (201)
+    for _ in range(9):  # calls 2-10 (409, setup already complete) -- still count toward the limit
+        auth_client.post(
+            "/auth/setup", json={"email": "other@example.com", "password": "supersecret1234"}
+        )
+    resp = auth_client.post(  # call 11 -- exceeds the default max_requests=10
+        "/auth/setup", json={"email": "another@example.com", "password": "supersecret1234"}
+    )
+    assert resp.status_code == 429
+
+
 def test_setup_advisory_lock_serializes_concurrent_holders(_engine):
     # Regression test for issue #218: two concurrent /auth/setup calls with *different*
     # emails both pass the count()==0 check before either commits, and (unlike the
