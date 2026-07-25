@@ -14,6 +14,7 @@ import { useActiveScope } from "@/lib/active-scope"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import { SectionError } from "@/components/section-error"
+import { EmptyStateNoAccount } from "@/components/empty-state"
 import type { MyViewIssueSummary, MyViewPRSummary } from "@/lib/api/types"
 
 const MY_VIEW_TABS = [
@@ -152,16 +153,7 @@ export default function OverviewPage() {
     <>
       <PageHeader title="Overview" description="Your GitHub organization at a glance." />
 
-      {orgChecked && !org && (
-        <div className="card mb-6">
-          <p className="px-4 py-6 text-sm text-muted-foreground">
-            No account selected yet — this page has nothing to query. Pick an organization or your personal
-            account from the profile menu, or connect one in{" "}
-            <Link href="/settings" className="text-primary hover:underline">Settings</Link> first if you
-            haven&rsquo;t already.
-          </p>
-        </div>
-      )}
+      {orgChecked && !org && <EmptyStateNoAccount />}
 
       {org && orgQueryIsError && (
         <div className="card mb-6">
