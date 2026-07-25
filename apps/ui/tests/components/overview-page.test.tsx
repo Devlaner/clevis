@@ -310,7 +310,7 @@ describe("OverviewPage cockpit", () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText(/No default organization selected yet/)).toBeInTheDocument();
+      expect(screen.getByText(/No account selected yet/)).toBeInTheDocument();
     });
     const settingsLink = screen.getByRole("link", { name: "Settings" });
     expect(settingsLink).toHaveAttribute("href", "/settings");

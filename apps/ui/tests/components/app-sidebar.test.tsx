@@ -58,6 +58,8 @@ function renderSidebar() {
 
 // Mutable per-test fixture for the /me/orgs response; reset in beforeEach.
 let orgMemberships: { org_login: string; role: "admin" | "member" }[] = [];
+// Mutable per-test fixture for the /me/installations response; reset in beforeEach.
+let installations: { id: number; account_login: string; account_type: string; installation_id: number | null; created_at: string }[] = [];
 // Mutable per-test fixture for the cockpit response driving the health dot/badge.
 let cockpitResponse: {
   latest_score: number | null;
@@ -70,6 +72,7 @@ describe("AppSidebar Invite members button", () => {
     replace.mockClear();
     localStorage.setItem(TOKEN_KEY, makeJwt());
     orgMemberships = [];
+    installations = [];
     cockpitResponse = { latest_score: null, recent_events: [] };
 
     vi.stubGlobal(
@@ -97,6 +100,9 @@ describe("AppSidebar Invite members button", () => {
         }
         if (url.endsWith("/me/orgs")) {
           return Promise.resolve(jsonResponse(orgMemberships));
+        }
+        if (url.endsWith("/me/installations")) {
+          return Promise.resolve(jsonResponse(installations));
         }
         if (url.endsWith("/tokens/resolve")) {
           return Promise.resolve(jsonResponse({ detail: "No saved token for this org" }, 404));
@@ -182,6 +188,7 @@ describe("AppSidebar health dot and unread badge", () => {
     localStorage.setItem(TOKEN_KEY, makeJwt());
     localStorage.setItem("default_org", "acme");
     orgMemberships = [{ org_login: "acme", role: "admin" }];
+    installations = [];
     cockpitResponse = { latest_score: null, recent_events: [] };
 
     vi.stubGlobal(
@@ -209,6 +216,9 @@ describe("AppSidebar health dot and unread badge", () => {
         }
         if (url.endsWith("/me/orgs")) {
           return Promise.resolve(jsonResponse(orgMemberships));
+        }
+        if (url.endsWith("/me/installations")) {
+          return Promise.resolve(jsonResponse(installations));
         }
         if (url.endsWith("/tokens/resolve")) {
           return Promise.resolve(jsonResponse({ detail: "No saved token for this org" }, 404));
@@ -307,6 +317,7 @@ describe("AppSidebar coming-soon badges", () => {
     replace.mockClear();
     localStorage.setItem(TOKEN_KEY, makeJwt());
     orgMemberships = [];
+    installations = [];
     cockpitResponse = { latest_score: null, recent_events: [] };
 
     vi.stubGlobal(
@@ -334,6 +345,9 @@ describe("AppSidebar coming-soon badges", () => {
         }
         if (url.endsWith("/me/orgs")) {
           return Promise.resolve(jsonResponse(orgMemberships));
+        }
+        if (url.endsWith("/me/installations")) {
+          return Promise.resolve(jsonResponse(installations));
         }
         if (url.endsWith("/tokens/resolve")) {
           return Promise.resolve(jsonResponse({ detail: "No saved token for this org" }, 404));
@@ -395,4 +409,116 @@ describe("AppSidebar coming-soon badges", () => {
       expect(link).not.toHaveTextContent("Soon");
     },
   );
+});
+
+describe("AppSidebar scope switcher", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    replace.mockClear();
+    localStorage.setItem(TOKEN_KEY, makeJwt());
+    orgMemberships = [{ org_login: "acme", role: "admin" }];
+    installations = [];
+    cockpitResponse = { latest_score: null, recent_events: [] };
+
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return Promise.resolve(
+            jsonResponse({ id: 1, email: "user@example.com", name: "User", is_workspace_admin: false }),
+          );
+        }
+        if (url.endsWith("/me/orgs")) {
+          return Promise.resolve(jsonResponse(orgMemberships));
+        }
+        if (url.endsWith("/me/installations")) {
+          return Promise.resolve(jsonResponse(installations));
+        }
+        if (url.endsWith("/tokens/resolve")) {
+          return Promise.resolve(jsonResponse({ detail: "No saved token for this org" }, 404));
+        }
+        if (url.includes("/me/analytics/cockpit/")) {
+          return Promise.resolve(
+            jsonResponse({
+              repo_count: 0,
+              member_count: 0,
+              latest_score: cockpitResponse.latest_score,
+              score_trend: [],
+              recent_events: cockpitResponse.recent_events,
+              open_pr_count: 0,
+              pr_merge_rate_4w: [],
+              commit_activity_4w: [],
+              total_cache_size_bytes: 0,
+              cache_job_success_rate: 0,
+            }),
+          );
+        }
+        return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+      }),
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("lists the personal account and org memberships, marking the active scope", async () => {
+    installations = [
+      { id: 1, account_login: "octocat", account_type: "User", installation_id: 5, created_at: "2026-01-01T00:00:00Z" },
+    ];
+    localStorage.setItem("active_scope", JSON.stringify({ kind: "org", login: "acme" }));
+    renderSidebar();
+
+    fireEvent.click(screen.getByRole("button", { name: /user/i }));
+
+    const acmeRow = await screen.findByRole("button", { name: /acme/i });
+    const personalRow = await screen.findByRole("button", { name: /octocat/i });
+    expect(acmeRow.querySelector("svg")).not.toBeNull();
+    expect(personalRow.querySelector("svg")).toBeNull();
+  });
+
+  it("switches the active scope when a different option is selected", async () => {
+    installations = [
+      { id: 1, account_login: "octocat", account_type: "User", installation_id: 5, created_at: "2026-01-01T00:00:00Z" },
+    ];
+    localStorage.setItem("active_scope", JSON.stringify({ kind: "org", login: "acme" }));
+    renderSidebar();
+
+    fireEvent.click(screen.getByRole("button", { name: /user/i }));
+    const personalRow = await screen.findByRole("button", { name: /octocat/i });
+    fireEvent.click(personalRow);
+
+    await waitFor(() =>
+      expect(localStorage.getItem("active_scope")).toBe(JSON.stringify({ kind: "personal", login: "octocat" })),
+    );
+  });
+
+  it("shows a connect-personal-account prompt when no personal installation exists", async () => {
+    vi.stubEnv("NEXT_PUBLIC_GITHUB_APP_SLUG", "clevis");
+    installations = [];
+    renderSidebar();
+
+    fireEvent.click(screen.getByRole("button", { name: /user/i }));
+
+    const connectLink = await screen.findByRole("link", { name: /connect your personal github account/i });
+    expect(connectLink).toHaveAttribute("href", "https://github.com/apps/clevis/installations/new");
+  });
 });
