@@ -203,12 +203,12 @@ def _handle_clear_actions_cache(conn: psycopg.Connection, job_id: int, payload_r
     if resp.status_code >= 500:
         # 5xx is presumed transient (GitHub-side issue) — worth retrying, unlike 4xx.
         log.warning("job %d got a %d from GitHub (attempt %d)", job_id, resp.status_code, retry_count + 1)
-        _requeue_for_retry(conn, job_id, retry_count, _github_error_message(resp))
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(_github_error_message(resp)))
         return
 
     if resp.status_code >= 300:
         log.error("job %d failed: GitHub API error %d", job_id, resp.status_code)
-        _mark_failed(conn, job_id, _github_error_message(resp), retry_count)
+        _mark_failed(conn, job_id, sanitize_error(_github_error_message(resp)), retry_count)
         return
 
     _mark_done(conn, job_id, {"ok": True, "status": resp.status_code}, retry_count)
