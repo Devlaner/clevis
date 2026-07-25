@@ -46,7 +46,6 @@ const groups = [
     { title: "Collaborators",    href: "/collaborators" },
     { title: "Automation",       href: "/automation" },
     { title: "Audit Log",        href: "/audit" },
-    { title: "Job Queue",        href: "/jobs" },
   ],
   [
     { title: "My PRs",     href: "/my/prs" },

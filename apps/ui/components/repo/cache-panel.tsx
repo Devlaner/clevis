@@ -344,10 +344,10 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                 Cache clear queued — Job #{clearMutation.data.job_id}
               </p>
               <Link
-                href={`/jobs?id=${clearMutation.data.job_id}`}
+                href={`/audit?job_id=${clearMutation.data.job_id}`}
                 className="text-xs text-muted-foreground hover:text-foreground transition-colors"
               >
-                View in Job Queue →
+                View in Audit Log →
               </Link>
             </div>
           ) : (

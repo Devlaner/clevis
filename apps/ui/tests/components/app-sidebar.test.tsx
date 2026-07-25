@@ -397,7 +397,6 @@ describe("AppSidebar coming-soon badges", () => {
     "Collaborators",
     "Automation",
     "Audit Log",
-    "Job Queue",
     "My PRs",
     "My Reviews",
     "My Issues",
