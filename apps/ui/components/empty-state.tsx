@@ -1,8 +1,11 @@
+import Link from "next/link"
+
 /**
- * Two empty state variants — no icons, no centered layouts, just text.
+ * Empty state variants — no icons, no centered layouts, just text.
  *
- * <EmptyStateInline>  — inside a card/table where data would be
- * <EmptyStatePage>    — when a whole feature section has no data yet
+ * <EmptyStateInline>    — inside a card/table where data would be
+ * <EmptyStatePage>      — when a whole feature section has no data yet
+ * <EmptyStateNoAccount> — no org/personal account selected in the profile menu
  */
 
 interface EmptyStateInlineProps {
@@ -44,6 +47,23 @@ export function EmptyStatePage({ message, action }: EmptyStatePageProps) {
       </p>
     </div>
   )
+}
+
+interface EmptyStateNoAccountProps {
+  /** Skip the outer card wrapper -- for use inside a panel that's already a card. */
+  bare?: boolean
+}
+
+export function EmptyStateNoAccount({ bare = false }: EmptyStateNoAccountProps) {
+  const message = (
+    <p className="px-4 py-6 text-sm text-muted-foreground">
+      No account selected yet — this page has nothing to query. Pick an organization or your personal
+      account from the profile menu, or connect one in{" "}
+      <Link href="/settings" className="text-primary hover:underline">Settings</Link> first if you
+      haven&rsquo;t already.
+    </p>
+  )
+  return bare ? message : <div className="card mb-6">{message}</div>
 }
 
 /**

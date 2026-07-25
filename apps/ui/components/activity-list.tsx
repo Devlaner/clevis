@@ -71,7 +71,7 @@ export function ActivityList({ jobs, isLoading, limit }: ActivityListProps) {
       ))}
       {limit && jobs.length > limit && (
         <div className="px-4 py-2.5">
-          <Link href="/jobs" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+          <Link href="/audit" className="text-xs text-muted-foreground hover:text-foreground transition-colors">
             View all {jobs.length} jobs →
           </Link>
         </div>

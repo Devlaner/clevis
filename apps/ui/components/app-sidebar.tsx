@@ -35,7 +35,7 @@ const groups = [
   [
     { title: "Overview",         href: "/" },
     { title: "Activity",         href: "/activity", showUnreadBadge: true },
-    { title: "Pull Requests",    href: "/pulls", comingSoon: true },
+    { title: "Pull Requests",    href: "/pulls" },
     { title: "Releases",         href: "/releases" },
   ],
   [
@@ -46,7 +46,6 @@ const groups = [
     { title: "Collaborators",    href: "/collaborators" },
     { title: "Automation",       href: "/automation" },
     { title: "Audit Log",        href: "/audit" },
-    { title: "Job Queue",        href: "/jobs" },
   ],
   [
     { title: "My PRs",     href: "/my/prs" },
@@ -354,11 +353,6 @@ export function AppSidebar() {
                           {"showUnreadBadge" in item && item.showUnreadBadge && unreadCount > 0 && (
                             <span className="ml-auto text-[0.625rem] font-medium bg-primary/20 text-primary rounded-full px-1.5 py-0.5 tabular-nums">
                               {unreadCount}
-                            </span>
-                          )}
-                          {"comingSoon" in item && item.comingSoon && (
-                            <span className="ml-auto text-[0.625rem] font-medium text-sidebar-foreground/40 border border-sidebar-border/60 rounded-full px-1.5 py-0.5">
-                              Soon
                             </span>
                           )}
                         </SidebarMenuButton>
