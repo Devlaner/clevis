@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _MIN_PASSWORD_LEN = 12
+# bcrypt's hard limit -- input past this point is silently ignored (bcrypt==4.2.1 pinned
+# here truncates rather than raising; only bcrypt>=5.0 raises ValueError). Left unchecked,
+# two different passwords that share the same first 72 bytes hash identically and are
+# accepted as the same password, so this must be validated (rejected, not truncated)
+# before hashing.
+_MAX_PASSWORD_LEN = 72
 _VERIFY_TOKEN_TTL = timedelta(hours=24)
 
 
@@ -83,10 +89,19 @@ def _hash_password(password: str) -> str:
 
 
 def _verify_password(password: str, password_hash: str | None) -> bool:
-    if not password_hash:
-        bcrypt.checkpw(password.encode(), _DUMMY_PASSWORD_HASH.encode())
+    password_bytes = password.encode()
+    # No account's real password can be over _MAX_PASSWORD_LEN bytes -- setup()/register()
+    # reject it before hashing -- so an oversized guess is always wrong. Still run a real
+    # (truncated) bcrypt call rather than short-circuiting, so response timing doesn't
+    # reveal the oversized-password case any more than it reveals a nonexistent email below.
+    if len(password_bytes) > _MAX_PASSWORD_LEN:
+        password_bytes = password_bytes[:_MAX_PASSWORD_LEN]
+        bcrypt.checkpw(password_bytes, (password_hash or _DUMMY_PASSWORD_HASH).encode())
         return False
-    return bcrypt.checkpw(password.encode(), password_hash.encode())
+    if not password_hash:
+        bcrypt.checkpw(password_bytes, _DUMMY_PASSWORD_HASH.encode())
+        return False
+    return bcrypt.checkpw(password_bytes, password_hash.encode())
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -201,6 +216,11 @@ def setup(body: SetupRequest, db: Session = Depends(get_db)):
             status_code=422,
             detail=f"Password must be at least {_MIN_PASSWORD_LEN} characters",
         )
+    if len(body.password.encode()) > _MAX_PASSWORD_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Password must be at most {_MAX_PASSWORD_LEN} bytes",
+        )
     user = User(
         email=body.email,
         name=body.name,
@@ -232,6 +252,11 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=422,
             detail=f"Password must be at least {_MIN_PASSWORD_LEN} characters",
+        )
+    if len(body.password.encode()) > _MAX_PASSWORD_LEN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Password must be at most {_MAX_PASSWORD_LEN} bytes",
         )
     if db.query(User).filter(User.email == body.email).first():
         raise HTTPException(status_code=409, detail="An account with this email already exists")
