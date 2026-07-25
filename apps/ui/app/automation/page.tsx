@@ -66,7 +66,7 @@ export default function AutomationPage() {
   }, [owner])
 
   const reposListQuery = useQuery({
-    queryKey: ["repos.list", owner.trim()],
+    queryKey: ["repos.list", owner.trim(), token],
     queryFn: () => api.repos.list(owner.trim(), token),
     enabled: owner.trim().length >= MIN_OWNER_LEN_FOR_REPO_LOOKUP,
     retry: false,

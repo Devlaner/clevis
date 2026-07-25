@@ -97,6 +97,26 @@ describe("AutomationPage", () => {
     expect(screen.getByRole("combobox")).not.toBeDisabled();
   });
 
+  it("shows a 'Failed to load repositories' placeholder when the repo list fetch errors", async () => {
+    reposListMock.mockRejectedValue(new Error("GitHub API unreachable"));
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "Failed to load repositories" })).toBeInTheDocument();
+    });
+  });
+
+  it("shows a 'No repositories found' placeholder when the owner has zero repos", async () => {
+    reposListMock.mockResolvedValue({ org: "acme", total: 0, repos: [] });
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "No repositories found" })).toBeInTheDocument();
+    });
+  });
+
   it("loads workflows and run history for the selected owner/repo", async () => {
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
     workflowsMock.mockResolvedValue({
