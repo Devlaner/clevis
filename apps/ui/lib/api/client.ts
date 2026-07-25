@@ -312,6 +312,12 @@ export const api = {
   },
   installations: {
     list: () => get<InstallationMeta[]>("/me/installations"),
+    // Org-connected installations, not personal ones -- list() above only ever returns
+    // the caller's personal (User-type) installations (GET /me/installations), never an
+    // org's. Requires the caller to already be a recognized Clevis org member (404 if the
+    // org isn't connected yet, 403 if not a member) -- callers should treat either as
+    // "not installed" rather than surfacing the error.
+    listForOrg: (orgLogin: string) => get<InstallationMeta[]>(`/orgs/${encodeURIComponent(orgLogin)}/installations`),
     lookup: (installationId: number) =>
       get<InstallationLookup>(`/me/installations/lookup/${installationId}`),
     sync: (
