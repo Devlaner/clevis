@@ -83,6 +83,13 @@ def test_setup_rejects_short_password(auth_client):
     assert resp.status_code == 422
 
 
+def test_setup_rejects_password_over_72_bytes(auth_client):
+    # Regression test for issue: bcrypt.hashpw raises ValueError (unhandled 500) for any
+    # password over 72 bytes -- must be a clean 422 instead.
+    resp = auth_client.post("/auth/setup", json={"email": "a@b.com", "password": "x" * 73})
+    assert resp.status_code == 422
+
+
 def test_setup_rejects_duplicate(auth_client):
     _setup_owner(auth_client)
     resp = auth_client.post(
@@ -167,6 +174,12 @@ def test_register_before_setup_rejected(auth_client):
 def test_register_rejects_short_password(auth_client):
     _setup_owner(auth_client)
     resp = auth_client.post("/auth/register", json={"email": "a@b.com", "password": "tooshort"})
+    assert resp.status_code == 422
+
+
+def test_register_rejects_password_over_72_bytes(auth_client):
+    _setup_owner(auth_client)
+    resp = auth_client.post("/auth/register", json={"email": "a@b.com", "password": "x" * 73})
     assert resp.status_code == 422
 
 
@@ -346,6 +359,17 @@ def test_login_wrong_password(auth_client):
     _setup_owner(auth_client)
     resp = auth_client.post(
         "/auth/login", json={"email": "owner@example.com", "password": "wrongpassword12"}
+    )
+    assert resp.status_code == 401
+
+
+def test_login_password_over_72_bytes_returns_401_not_500(auth_client):
+    # Regression test for issue: bcrypt.checkpw raises ValueError (unhandled 500) for any
+    # password over 72 bytes -- an oversized login attempt must cleanly fail with 401,
+    # not crash, even though it can never match a real (<=72 byte) stored password.
+    _setup_owner(auth_client)
+    resp = auth_client.post(
+        "/auth/login", json={"email": "owner@example.com", "password": "x" * 200}
     )
     assert resp.status_code == 401
 
