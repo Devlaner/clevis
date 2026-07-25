@@ -31,7 +31,7 @@ import secrets
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -222,7 +222,7 @@ def setup(body: SetupRequest, db: Session = Depends(get_db)):
             detail=f"Password must be at most {_MAX_PASSWORD_LEN} bytes",
         )
     user = User(
-        email=body.email,
+        email=body.email.lower(),
         name=body.name,
         password_hash=_hash_password(body.password),
         is_workspace_admin=True,
@@ -258,10 +258,10 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
             status_code=422,
             detail=f"Password must be at most {_MAX_PASSWORD_LEN} bytes",
         )
-    if db.query(User).filter(User.email == body.email).first():
+    if db.query(User).filter(func.lower(User.email) == body.email.lower()).first():
         raise HTTPException(status_code=409, detail="An account with this email already exists")
     user = User(
-        email=body.email,
+        email=body.email.lower(),
         name=body.name,
         password_hash=_hash_password(body.password),
         is_workspace_admin=False,
@@ -339,7 +339,7 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     # Per-account limit, in addition to the per-IP one above -- an attacker spread across
     # many source IPs targeting one victim's password wouldn't otherwise trip anything.
     check_account_rate_limit(f"login:{body.email.lower()}")
-    user = db.query(User).filter(User.email == body.email).first()
+    user = db.query(User).filter(func.lower(User.email) == body.email.lower()).first()
     # Call _verify_password unconditionally (not "not user or not _verify_password(...)")
     # -- that would short-circuit on a nonexistent user and skip bcrypt entirely, which is
     # exactly the timing side-channel _verify_password's dummy-hash path exists to close.

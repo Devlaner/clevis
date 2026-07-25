@@ -78,6 +78,14 @@ def test_setup_returns_token_and_owner(auth_client):
     assert body["user"]["email"] == "owner@example.com"
 
 
+def test_setup_stores_email_lowercased(auth_client):
+    resp = auth_client.post(
+        "/auth/setup", json={"email": "Owner@Example.com", "password": "supersecret1234"}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["user"]["email"] == "owner@example.com"
+
+
 def test_setup_rejects_short_password(auth_client):
     resp = auth_client.post("/auth/setup", json={"email": "a@b.com", "password": "tooshort"})
     assert resp.status_code == 422
@@ -230,6 +238,26 @@ def test_register_concurrent_same_email_returns_409_not_500(auth_client, db):
     assert db.query(User).filter(User.email == "race@example.com").count() == 1
 
 
+def test_register_rejects_duplicate_email_different_case(auth_client):
+    # Regression test for issue #268: emails are effectively case-insensitive in real
+    # mailboxes -- "Dupe@Example.com" and "dupe@example.com" must not both be able to
+    # register, unlike before this fix where they'd create two independent accounts.
+    _setup_owner(auth_client, email="dupe@example.com")
+    resp = auth_client.post(
+        "/auth/register", json={"email": "Dupe@Example.com", "password": "supersecret1234"}
+    )
+    assert resp.status_code == 409
+
+
+def test_register_stores_email_lowercased(auth_client):
+    _setup_owner(auth_client)
+    resp = auth_client.post(
+        "/auth/register", json={"email": "MixedCase@Example.com", "password": "supersecret1234"}
+    )
+    assert resp.status_code == 201
+    assert resp.json()["user"]["email"] == "mixedcase@example.com"
+
+
 def test_register_disabled_returns_403(auth_client):
     _setup_owner(auth_client)
     with patch("src.routers.auth.get_config", return_value="false"):
@@ -365,6 +393,17 @@ def test_login_valid(auth_client):
     _setup_owner(auth_client)
     resp = auth_client.post(
         "/auth/login", json={"email": "owner@example.com", "password": "supersecret1234"}
+    )
+    assert resp.status_code == 200
+    assert "access_token" in resp.json()
+
+
+def test_login_valid_with_different_case_email(auth_client):
+    # Regression test for issue #268: login must match the stored (lowercased) email
+    # regardless of the case the client submits.
+    _setup_owner(auth_client, email="owner@example.com")
+    resp = auth_client.post(
+        "/auth/login", json={"email": "Owner@Example.com", "password": "supersecret1234"}
     )
     assert resp.status_code == 200
     assert "access_token" in resp.json()

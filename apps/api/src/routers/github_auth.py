@@ -22,6 +22,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import RedirectResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.core.auth import create_access_token, set_session_cookie
@@ -65,12 +66,12 @@ def find_or_create_user(db: Session, identity: github_oauth.GitHubIdentity) -> U
         db.refresh(user)
         return user
 
-    if db.query(User).filter(User.email == identity.email).first() is not None:
+    if db.query(User).filter(func.lower(User.email) == identity.email.lower()).first() is not None:
         raise EmailAlreadyRegistered(identity.email)
 
     is_workspace_admin = db.query(User).count() == 0
     user = User(
-        email=identity.email,
+        email=identity.email.lower(),
         name=identity.name,
         password_hash=None,
         is_workspace_admin=is_workspace_admin,

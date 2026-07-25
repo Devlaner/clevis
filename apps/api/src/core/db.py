@@ -13,6 +13,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -109,9 +110,16 @@ class SavedToken(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (
+        # Case-insensitive uniqueness (see migration 0019) -- Postgres can't express "unique
+        # ignoring case" through a plain column constraint, so this is a functional index
+        # instead. Callers must query/insert via a lowercase comparison (see src.routers.auth,
+        # src.routers.github_auth); this index alone doesn't normalize existing values.
+        Index("uq_users_email_lower", text("lower(email)"), unique=True),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    email: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Null for users who only sign in with GitHub (no email/password credential).
     password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
