@@ -52,15 +52,23 @@ export function EmptyStatePage({ message, action }: EmptyStatePageProps) {
 interface EmptyStateNoAccountProps {
   /** Skip the outer card wrapper -- for use inside a panel that's already a card. */
   bare?: boolean
+  /** Override the default "this page has nothing to query" copy -- for pages (like
+   * Repos) where a manual search still works without an active scope, so the default
+   * wording would be misleading. */
+  message?: string
 }
 
-export function EmptyStateNoAccount({ bare = false }: EmptyStateNoAccountProps) {
+export function EmptyStateNoAccount({ bare = false, message: messageOverride }: EmptyStateNoAccountProps) {
   const message = (
     <p className="px-4 py-6 text-sm text-muted-foreground">
-      No account selected yet — this page has nothing to query. Pick an organization or your personal
-      account from the profile menu, or connect one in{" "}
-      <Link href="/settings" className="text-primary hover:underline">Settings</Link> first if you
-      haven&rsquo;t already.
+      {messageOverride ?? (
+        <>
+          No account selected yet — this page has nothing to query. Pick an organization or your personal
+          account from the profile menu, or connect one in{" "}
+          <Link href="/settings" className="text-primary hover:underline">Settings</Link> first if you
+          haven&rsquo;t already.
+        </>
+      )}
     </p>
   )
   return bare ? message : <div className="card mb-6">{message}</div>

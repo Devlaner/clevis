@@ -274,7 +274,9 @@ export default function ReposPage() {
         description="Browse an organization's repositories — activity, open PRs, and cache access."
       />
 
-      {scopeChecked && !scope && <EmptyStateNoAccount />}
+      {scopeChecked && !scope && (
+        <EmptyStateNoAccount message="No account selected — pick an organization from the profile menu to prefill the search below, or just type one in directly." />
+      )}
 
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Config panel */}

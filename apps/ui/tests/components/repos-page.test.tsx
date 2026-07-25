@@ -85,7 +85,7 @@ describe("ReposPage", () => {
 
   it("shows a 'no account selected' prompt when no active scope is set, without blocking manual org entry", async () => {
     renderPage();
-    expect(await screen.findByText(/No account selected yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/No account selected/)).toBeInTheDocument();
     // Unlike the fully scope-driven pages (My PRs, etc.), this page's org field is a
     // manual search tool that works independent of the active scope -- the prompt is
     // informational only, not a replacement for the form.
@@ -96,7 +96,7 @@ describe("ReposPage", () => {
     localStorage.setItem("active_scope", JSON.stringify({ kind: "org", login: "acme" }));
     renderPage();
     await waitFor(() => expect(screen.getByPlaceholderText("e.g. octocat")).toHaveValue("acme"));
-    expect(screen.queryByText(/No account selected yet/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No account selected/)).not.toBeInTheDocument();
   });
 
   it("hides the GitHub Token field when an installation covers the entered org", async () => {
