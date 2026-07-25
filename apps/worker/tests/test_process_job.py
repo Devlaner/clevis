@@ -91,6 +91,31 @@ def test_process_job_marks_failed_on_4xx_http_error():
     assert conn.committed is True
 
 
+def test_process_job_marks_failed_with_status_code_only_when_error_body_is_not_json():
+    """_github_error_message must fall back to a bare status code (not crash) when
+    GitHub's error body isn't valid JSON."""
+    conn = _FakeConn()
+
+    mock_response = MagicMock()
+    mock_response.status_code = 404
+    mock_response.text = "not found"
+    mock_response.json.side_effect = ValueError("not json")
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.delete = MagicMock(return_value=mock_response)
+        mock_client_cls.return_value = mock_client
+
+        process_job(conn, 9, "github.clear_actions_cache", _payload())
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='failed'" in sql
+    assert params[0] == "GitHub API error: 404"
+    assert conn.committed is True
+
+
 def test_process_job_marks_failed_when_token_decryption_fails():
     """A payload with a token that fails to decrypt is a permanent failure, not a retry."""
     conn = _FakeConn()
