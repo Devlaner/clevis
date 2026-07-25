@@ -10,6 +10,7 @@ import { AreaTimeChart } from "@/components/charts/area-time-chart"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { ArrowRight, Warning } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
+import { useActiveScope } from "@/lib/active-scope"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import { SectionError } from "@/components/section-error"
@@ -74,10 +75,10 @@ function LiveStatCard({ label, loading, configured, value, trend }: {
 }
 
 export default function OverviewPage() {
-  const [org, setOrg] = useState("")
+  const { scope } = useActiveScope()
+  const org = scope?.login ?? ""
   const [orgChecked, setOrgChecked] = useState(false)
   useEffect(() => {
-    setOrg(localStorage.getItem("default_org") || "")
     setOrgChecked(true)
   }, [])
 
@@ -154,9 +155,10 @@ export default function OverviewPage() {
       {orgChecked && !org && (
         <div className="card mb-6">
           <p className="px-4 py-6 text-sm text-muted-foreground">
-            No default organization selected yet — this page has nothing to query. Set one in{" "}
-            <Link href="/settings" className="text-primary hover:underline">Settings</Link>, or connect a GitHub
-            org there first if you haven&rsquo;t already.
+            No account selected yet — this page has nothing to query. Pick an organization or your personal
+            account from the profile menu, or connect one in{" "}
+            <Link href="/settings" className="text-primary hover:underline">Settings</Link> first if you
+            haven&rsquo;t already.
           </p>
         </div>
       )}

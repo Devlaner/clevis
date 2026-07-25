@@ -20,17 +20,9 @@ import type { InstallationMeta, MyOrgMembership, SavedTokenMeta } from "@/lib/ap
 function ProfileSection() {
   const { user, updateUser, logout } = useAuth()
   const [name, setName] = useState(user?.name || "")
-  const [org, setOrg] = useState("")
-  const [orgTouched, setOrgTouched] = useState(false)
   const [saved, setSaved] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [revokeArmed, setRevokeArmed] = useState(false)
-
-  // Same query key as OrgMembershipsSection below -- React Query dedupes the fetch.
-  const { data: memberships = [] } = useQuery<MyOrgMembership[]>({
-    queryKey: ["my-orgs"],
-    queryFn: () => api.orgs.mine(),
-  })
 
   const revokeSessions = useMutation({
     mutationFn: () => api.auth.revokeSessions(),
@@ -49,19 +41,7 @@ function ProfileSection() {
 
   useEffect(() => {
     setName(user?.name || "")
-    setOrg(localStorage.getItem("default_org") || "")
-    setOrgTouched(false)
   }, [user])
-
-  // Auto-select a default org once we know what the user actually has access to, instead
-  // of leaving this blank and requiring them to know/type the exact GitHub login. Only
-  // kicks in if they haven't manually changed the dropdown and the stored value (if any)
-  // no longer matches a real membership.
-  useEffect(() => {
-    if (orgTouched || memberships.length === 0) return
-    if (memberships.some((m) => m.org_login === org)) return
-    setOrg(memberships[0].org_login)
-  }, [memberships, org, orgTouched])
 
   async function save() {
     setIsSaving(true)
@@ -70,7 +50,6 @@ function ProfileSection() {
         const updated = await api.auth.patchMe(name.trim())
         updateUser({ name: updated.name })
       }
-      localStorage.setItem("default_org", org.trim())
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
     } finally {
@@ -104,33 +83,9 @@ function ProfileSection() {
           <Input value={user?.email || ""} disabled className="opacity-60 cursor-not-allowed" />
           <p className="text-xs text-muted-foreground mt-1">Email cannot be changed.</p>
         </div>
-        <div>
-          <label className="text-xs font-medium text-foreground block mb-1.5">Default organization</label>
-          {memberships.length === 0 ? (
-            <>
-              <Input value="" disabled placeholder="No organizations connected yet" />
-              <p className="text-xs text-muted-foreground mt-1">
-                Connect an org below (or ask an admin for an invite) before Overview, Activity, and other
-                org-scoped pages will show any data.
-              </p>
-            </>
-          ) : (
-            <>
-              <select
-                value={org}
-                onChange={(e) => { setOrg(e.target.value); setOrgTouched(true) }}
-                className="h-8 w-full border border-border bg-transparent px-2 font-mono text-xs"
-              >
-                {memberships.map((m) => (
-                  <option key={m.org_login} value={m.org_login}>{m.org_login}</option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground mt-1">
-                Drives Overview, Activity, and other org-scoped pages.
-              </p>
-            </>
-          )}
-        </div>
+        <p className="text-xs text-muted-foreground -mt-1">
+          Switch between your organizations and personal GitHub account from the profile menu in the sidebar.
+        </p>
         <Button onClick={save} disabled={isSaving} className="mt-1 w-fit">
           {buttonContent}
         </Button>

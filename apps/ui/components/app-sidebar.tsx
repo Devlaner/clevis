@@ -4,7 +4,7 @@ import { usePathname, useRouter } from "next/navigation"
 import { useEffect, useRef, useState } from "react"
 import Link from "next/link"
 import { useQuery } from "@tanstack/react-query"
-import { GearSix, Check, SignOut, UserPlus } from "@phosphor-icons/react"
+import { GearSix, Check, SignOut, UserPlus, ArrowSquareOut, User } from "@phosphor-icons/react"
 import {
   Sidebar,
   SidebarContent,
@@ -18,7 +18,8 @@ import {
 } from "@/components/ui/sidebar"
 import { useAuth } from "@/lib/auth-context"
 import { api } from "@/lib/api/client"
-import type { MyOrgMembership } from "@/lib/api/types"
+import { useActiveScope, type ActiveScope } from "@/lib/active-scope"
+import type { InstallationMeta, MyOrgMembership } from "@/lib/api/types"
 
 const ACTIVITY_LAST_SEEN_KEY = "activity_last_seen_at"
 
@@ -60,13 +61,27 @@ interface Profile {
   email: string
 }
 
+interface ScopeOption {
+  scope: ActiveScope
+  label: string
+  sublabel: string
+}
+
 function ProfileDropdown({
   profile,
+  scopeOptions,
+  activeScope,
+  onSelectScope,
+  personalInstallUrl,
   inviteHref,
   onClose,
   onSignOut,
 }: {
   profile: Profile
+  scopeOptions: ScopeOption[]
+  activeScope: ActiveScope | null
+  onSelectScope: (scope: ActiveScope) => void
+  personalInstallUrl: string | null
   inviteHref: string
   onClose: () => void
   onSignOut: () => void
@@ -86,7 +101,7 @@ function ProfileDropdown({
         </p>
       </div>
 
-      {/* Workspace row */}
+      {/* Current identity */}
       <div className="p-1.5">
         <div className="flex items-center gap-2.5 px-2 py-2">
           <div className="size-7 rounded-md bg-primary/15 border border-primary/20 flex items-center justify-center shrink-0">
@@ -102,9 +117,44 @@ function ProfileDropdown({
               {profile.org || "Members"}
             </p>
           </div>
-          <Check className="size-3.5 text-primary shrink-0" />
         </div>
       </div>
+
+      {/* Scope switcher — personal account + orgs you belong to */}
+      {(scopeOptions.length > 0 || personalInstallUrl) && (
+        <div className="px-1.5 pb-1.5 border-b border-sidebar-border/60">
+          <p className="px-2 pt-1 pb-1.5 text-[0.6875rem] font-medium uppercase tracking-wide text-sidebar-foreground/40">
+            Switch account
+          </p>
+          {scopeOptions.map((opt) => {
+            const isActive =
+              activeScope?.kind === opt.scope.kind && activeScope.login === opt.scope.login
+            return (
+              <button
+                key={`${opt.scope.kind}:${opt.scope.login}`}
+                onClick={() => { onSelectScope(opt.scope); onClose() }}
+                className="flex w-full items-center gap-2 px-2 py-1.5 text-left rounded-md hover:bg-sidebar-accent/60 transition-colors"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-[0.8125rem] text-sidebar-foreground leading-none truncate">{opt.label}</p>
+                  <p className="text-[0.6875rem] text-sidebar-foreground/40 mt-0.5 leading-none">{opt.sublabel}</p>
+                </div>
+                {isActive && <Check className="size-3.5 text-primary shrink-0" />}
+              </button>
+            )
+          })}
+          {personalInstallUrl && (
+            <a
+              href={personalInstallUrl}
+              className="flex items-center gap-2 px-2 py-1.5 text-left rounded-md hover:bg-sidebar-accent/60 transition-colors text-sidebar-foreground/70 hover:text-sidebar-foreground"
+            >
+              <User className="size-3.5 shrink-0" />
+              <span className="text-[0.8125rem] flex-1">Connect your personal GitHub account</span>
+              <ArrowSquareOut className="size-3 shrink-0" />
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Settings + Invite members buttons */}
       <div className="px-1.5 pb-1.5 flex gap-1.5">
@@ -148,30 +198,50 @@ export function AppSidebar() {
   const [open, setOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
-  const defaultOrg = typeof window !== "undefined" ? (localStorage.getItem("default_org") || "") : ""
+  const { scope, setScope } = useActiveScope()
+  const scopeLogin = scope?.login ?? ""
 
   // Same query key as the /collaborators redirect page so TanStack Query dedupes
   // the request when both are mounted. Only route the "Invite members" link at an
   // org where the user is actually an admin — mirrors the /collaborators fallback
-  // logic (prefer default_org, else the first admin org, else /settings).
+  // logic (prefer the active org scope, else the first admin org, else /settings).
   const { data: memberships = [], isLoading: membershipsLoading } = useQuery<MyOrgMembership[]>({
     queryKey: ["my-orgs"],
     queryFn: () => api.orgs.mine(),
   })
 
-  // Profile org display reflects real org membership data, not just whatever the user
-  // once typed into the localStorage-backed "default org" field in Settings.
-  const displayOrg = memberships.find((m) => m.org_login === defaultOrg)?.org_login || memberships[0]?.org_login || ""
+  const { data: installs = [] } = useQuery<InstallationMeta[]>({
+    queryKey: ["installations"],
+    queryFn: () => api.installations.list(),
+  })
+  const personalInstall = installs.find((i) => i.account_type === "User")
+  const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG
+  const personalInstallUrl = !personalInstall && slug ? `https://github.com/apps/${slug}/installations/new` : null
+
+  const scopeOptions: ScopeOption[] = [
+    ...(personalInstall
+      ? [{ scope: { kind: "personal", login: personalInstall.account_login } as ActiveScope, label: personalInstall.account_login, sublabel: "Personal account" }]
+      : []),
+    ...memberships.map((m) => ({
+      scope: { kind: "org", login: m.org_login } as ActiveScope,
+      label: m.org_login,
+      sublabel: `Organization · ${m.role}`,
+    })),
+  ]
+
+  // Profile identity row reflects the active scope, falling back to real
+  // membership/installation data if nothing has been picked yet.
+  const displayLogin = scopeLogin || personalInstall?.account_login || memberships[0]?.org_login || ""
   const profile: Profile = {
     name: user?.name || user?.email || "Guest",
-    org: displayOrg || "no organization connected",
+    org: displayLogin || "no organization connected",
     email: user?.email || "",
   }
 
   const adminOrgs = memberships.filter((m) => m.role === "admin")
   const inviteTarget = membershipsLoading
     ? undefined
-    : adminOrgs.find((m) => m.org_login === defaultOrg) || adminOrgs[0]
+    : adminOrgs.find((m) => scope?.kind === "org" && m.org_login === scope.login) || adminOrgs[0]
   const inviteHref = inviteTarget
     ? `/settings/org/${encodeURIComponent(inviteTarget.org_login)}/members`
     : "/settings"
@@ -179,18 +249,18 @@ export function AppSidebar() {
   // Same resolve-then-use pattern as the Overview page — falls back to a saved
   // PAT for orgs without a GitHub App installation.
   const tokenQuery = useQuery({
-    queryKey: ["tokens.resolve", defaultOrg],
-    queryFn: () => api.tokens.resolve(defaultOrg),
-    enabled: defaultOrg.trim().length > 2,
+    queryKey: ["tokens.resolve", scopeLogin],
+    queryFn: () => api.tokens.resolve(scopeLogin),
+    enabled: scopeLogin.trim().length > 2,
     retry: false,
   })
 
   // Same query key as the Overview page's cockpit query so TanStack Query dedupes
   // the request when both are mounted (same dedup pattern as ["my-orgs"] above).
   const { data: cockpit } = useQuery({
-    queryKey: ["analytics.cockpit", defaultOrg],
-    queryFn: () => api.analytics.cockpit(defaultOrg, tokenQuery.data?.token),
-    enabled: defaultOrg.trim().length > 2 && !tokenQuery.isLoading,
+    queryKey: ["analytics.cockpit", scopeLogin],
+    queryFn: () => api.analytics.cockpit(scopeLogin, tokenQuery.data?.token),
+    enabled: scopeLogin.trim().length > 2 && !tokenQuery.isLoading,
     retry: false,
     refetchInterval: 30_000,
   })
@@ -245,6 +315,10 @@ export function AppSidebar() {
         {open && (
           <ProfileDropdown
             profile={profile}
+            scopeOptions={scopeOptions}
+            activeScope={scope}
+            onSelectScope={setScope}
+            personalInstallUrl={personalInstallUrl}
             inviteHref={inviteHref}
             onClose={() => setOpen(false)}
             onSignOut={() => { logout(); setOpen(false); router.replace("/login") }}
