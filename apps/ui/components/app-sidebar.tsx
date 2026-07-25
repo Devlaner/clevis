@@ -169,7 +169,7 @@ function ProfileDropdown({
         <Link
           href={inviteHref}
           onClick={onClose}
-          title={inviteHref === "/settings" ? "Set a default organization in Settings first" : undefined}
+          title={inviteHref === "/settings" ? "Switch to an organization you admin from the profile menu first" : undefined}
           className="flex items-center gap-1.5 px-2.5 py-1.5 text-[0.75rem] font-medium text-sidebar-foreground/70 hover:text-sidebar-foreground bg-sidebar-accent/60 hover:bg-sidebar-accent border border-sidebar-border/60 transition-colors flex-1 justify-center"
         >
           <UserPlus className="size-3" />
@@ -251,7 +251,7 @@ export function AppSidebar() {
   const tokenQuery = useQuery({
     queryKey: ["tokens.resolve", scopeLogin],
     queryFn: () => api.tokens.resolve(scopeLogin),
-    enabled: scopeLogin.trim().length > 2,
+    enabled: scopeLogin.trim().length > 0,
     retry: false,
   })
 
@@ -260,7 +260,7 @@ export function AppSidebar() {
   const { data: cockpit } = useQuery({
     queryKey: ["analytics.cockpit", scopeLogin],
     queryFn: () => api.analytics.cockpit(scopeLogin, tokenQuery.data?.token),
-    enabled: scopeLogin.trim().length > 2 && !tokenQuery.isLoading,
+    enabled: scopeLogin.trim().length > 0 && !tokenQuery.isLoading,
     retry: false,
     refetchInterval: 30_000,
   })

@@ -95,10 +95,11 @@ export default function SecurityPage() {
 
   const { scope } = useActiveScope()
   const scopeOrgLogin = scope?.kind === "org" ? scope.login : ""
-  // Security scanning is org-only (the backend 422s for a personal account) — only
-  // pre-fill from an org scope, leave the field blank (but still editable) for personal.
+  // Security scanning is org-only (the backend 422s for a personal account) — pre-fill
+  // from an org scope, and clear (not just skip) when switching to personal so a stale
+  // org doesn't linger.
   useEffect(() => {
-    if (scopeOrgLogin) setOwner(scopeOrgLogin)
+    setOwner(scopeOrgLogin)
   }, [scopeOrgLogin])
 
   const resolveMutation = useMutation({

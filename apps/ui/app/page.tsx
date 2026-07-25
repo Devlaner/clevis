@@ -88,7 +88,7 @@ export default function OverviewPage() {
   const resolveQuery = useQuery({
     queryKey: ["tokens.resolve", org],
     queryFn: () => api.tokens.resolve(org),
-    enabled: org.trim().length > 2,
+    enabled: org.trim().length > 0,
     retry: false,
   })
   const configured = !!resolveQuery.data?.token
@@ -101,7 +101,7 @@ export default function OverviewPage() {
   const cockpitQuery = useQuery({
     queryKey: ["analytics.cockpit", org],
     queryFn: () => api.analytics.cockpit(org, resolveQuery.data?.token),
-    enabled: org.trim().length > 2 && !resolveQuery.isLoading,
+    enabled: org.trim().length > 0 && !resolveQuery.isLoading,
     retry: false,
     refetchInterval: 30_000,
   })
@@ -111,7 +111,7 @@ export default function OverviewPage() {
   const myViewQuery = useQuery({
     queryKey: ["analytics.my-view", org],
     queryFn: () => api.analytics.myView(org, resolveQuery.data?.token),
-    enabled: org.trim().length > 2 && !resolveQuery.isLoading,
+    enabled: org.trim().length > 0 && !resolveQuery.isLoading,
     retry: false,
   })
   const myView = myViewQuery.data

@@ -177,10 +177,10 @@ export default function ReposPage() {
 
   const { scope } = useActiveScope()
   const scopeOrgLogin = scope?.kind === "org" ? scope.login : ""
-  // Repo listing is org-only (/orgs/{org}/repos) — only pre-fill from an org scope,
-  // leave the field blank (but still editable) for personal.
+  // Repo listing is org-only (/orgs/{org}/repos) — pre-fill from an org scope, and
+  // clear (not just skip) when switching to personal so a stale org doesn't linger.
   useEffect(() => {
-    if (scopeOrgLogin) setOwner(scopeOrgLogin)
+    setOwner(scopeOrgLogin)
   }, [scopeOrgLogin])
 
   const resolveMutation = useMutation({

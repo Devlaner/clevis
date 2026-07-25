@@ -18,18 +18,23 @@ export default function MyPRsPage() {
   useEffect(() => {
     setOrgChecked(true)
   }, [])
+  // Switching accounts changes the query key but not the page number — reset to
+  // page 1 so a stale offset doesn't query the new account out of range.
+  useEffect(() => {
+    setPage(1)
+  }, [org])
 
   const resolveQuery = useQuery({
     queryKey: ["tokens.resolve", org],
     queryFn: () => api.tokens.resolve(org),
-    enabled: org.trim().length > 2,
+    enabled: org.trim().length > 0,
     retry: false,
   })
 
   const myPrsQuery = useQuery({
     queryKey: ["analytics.my-prs", org, page],
     queryFn: () => api.analytics.myPrs(org, page, PER_PAGE, resolveQuery.data?.token),
-    enabled: org.trim().length > 2 && !resolveQuery.isLoading,
+    enabled: org.trim().length > 0 && !resolveQuery.isLoading,
     retry: false,
   })
 
