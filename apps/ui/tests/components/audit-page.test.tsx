@@ -119,6 +119,31 @@ describe("AuditPage", () => {
     expect(screen.getAllByText("—").length).toBe(2);
   });
 
+  it("shows a distinct 'failed to load' indicator, not a plain dash, when the jobs query fails for a row with a job_id", async () => {
+    auditListMock.mockResolvedValue([
+      { id: 1, actor: "u@e.com", action: "cache.clear.queued", target: "acme/demo", payload: JSON.stringify({ job_id: 42 }), created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    jobsListMock.mockRejectedValue(new Error("GitHub API unreachable"));
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("1 entries")).toBeInTheDocument());
+    expect(screen.getByText("failed to load")).toBeInTheDocument();
+    expect(screen.queryByText("—")).not.toBeInTheDocument();
+  });
+
+  it("still shows a plain dash for rows with no job_id even when the jobs query fails", async () => {
+    auditListMock.mockResolvedValue([
+      { id: 1, actor: "u@e.com", action: "installation.connected", target: "acme", payload: "{}", created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    jobsListMock.mockRejectedValue(new Error("GitHub API unreachable"));
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("1 entries")).toBeInTheDocument());
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
   it("does not crash on a malformed (non-JSON) payload", async () => {
     auditListMock.mockResolvedValue([
       { id: 1, actor: "u@e.com", action: "cache.clear.queued", target: "acme/demo", payload: "not json", created_at: "2026-01-01T00:00:00Z" },

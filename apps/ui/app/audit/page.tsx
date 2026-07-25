@@ -51,7 +51,7 @@ export default function AuditPage() {
 
   // Reused across every row rather than one query per row -- same list the old Jobs
   // page polled, just fetched once here and matched by id.
-  const { data: jobs = [] } = useQuery({
+  const { data: jobs = [], isError: isJobsError } = useQuery({
     queryKey: ["jobs"],
     queryFn: api.jobs.list,
     refetchInterval: 15_000,
@@ -131,6 +131,8 @@ export default function AuditPage() {
                       <td className="px-4 py-2.5 font-mono">
                         {job ? (
                           <span className={`font-medium ${JOB_STATUS_COLOR[job.status]}`}>{job.status}</span>
+                        ) : jobId !== null && isJobsError ? (
+                          <span className="text-destructive" title="Failed to load job status">failed to load</span>
                         ) : (
                           <span className="text-muted-foreground">—</span>
                         )}
