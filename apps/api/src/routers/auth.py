@@ -197,7 +197,7 @@ def setup_required(db: Session = Depends(get_db)):
     return {"setup_required": count == 0}
 
 
-@router.post("/setup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/setup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(rate_limit())])
 def setup(body: SetupRequest, db: Session = Depends(get_db)):
     """First-run only. Returns 409 if any user already exists."""
     # Two concurrent /auth/setup calls with *different* emails can both pass the
