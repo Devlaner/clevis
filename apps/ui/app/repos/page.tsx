@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import Link from "next/link"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
+import { EmptyStateNoAccount } from "@/components/empty-state"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -183,6 +184,14 @@ export default function ReposPage() {
     setOwner(scopeOrgLogin)
   }, [scopeOrgLogin])
 
+  // Same pattern as the other pages that gate on useActiveScope() (see app/page.tsx,
+  // app/my/prs/page.tsx, etc.) -- deferred a tick so this doesn't flash before
+  // useActiveScope's first read of localStorage resolves.
+  const [scopeChecked, setScopeChecked] = useState(false)
+  useEffect(() => {
+    setScopeChecked(true)
+  }, [])
+
   const { data: installs = [] } = useQuery<InstallationMeta[]>({
     queryKey: ["installations"],
     queryFn: () => api.installations.list(),
@@ -264,6 +273,8 @@ export default function ReposPage() {
         title="Repositories"
         description="Browse an organization's repositories — activity, open PRs, and cache access."
       />
+
+      {scopeChecked && !scope && <EmptyStateNoAccount />}
 
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Config panel */}
