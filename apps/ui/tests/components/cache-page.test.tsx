@@ -269,6 +269,49 @@ describe("CachePage", () => {
     expect(await screen.findByText(/could not clear caches/i)).toBeInTheDocument();
   });
 
+  it("clears a single row's cache via its own key-scoped Clear key action, without affecting others", async () => {
+    cacheListMock.mockResolvedValue({
+      actions_caches: [
+        {
+          id: 1,
+          key: "api-cache-key",
+          ref: "refs/heads/main",
+          size_in_bytes: 1024,
+          created_at: "2026-01-01T00:00:00Z",
+          last_accessed_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 9 });
+
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: /load caches/i }));
+    await waitFor(() => expect(screen.getByText("api-cache-key")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
+    const clearKeyButton = screen.getByRole("button", { name: /^clear key$/i });
+    await waitFor(() => expect(clearKeyButton).not.toBeDisabled());
+    fireEvent.click(clearKeyButton);
+
+    expect(cacheClearMock).not.toHaveBeenCalled();
+    const confirmButton = await screen.findByRole("button", { name: /confirm clear key/i });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() =>
+      expect(cacheClearMock).toHaveBeenCalledWith("acme", "demo", {
+        token: "",
+        actor: "me@example.com",
+        dry_run: false,
+        key: "api-cache-key",
+        ref: "refs/heads/main",
+      }),
+    );
+
+    // The global "Clear" button, not this row's, must stay unarmed by the row action.
+    expect(screen.getByRole("button", { name: /^clear$/i })).toBeInTheDocument();
+  });
+
   it("clears the stale cache table and clear result when navigating to a different repo under the same owner", async () => {
     cacheListMock.mockResolvedValue({
       actions_caches: [

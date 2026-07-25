@@ -32,6 +32,9 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
   const [tokenSaved, setTokenSaved] = useState(false)
   const [actor, setActor] = useState("")
   const [clearArmed, setClearArmed] = useState(false)
+  // null = clearing every cache for this repo (the existing global buttons); set to a
+  // specific { key, ref } when the user clicks a row's own "Clear" action instead.
+  const [clearTarget, setClearTarget] = useState<{ key: string; ref: string } | null>(null)
 
   // Auto-resolve saved token for this owner
   const resolveMutation = useMutation({
@@ -74,6 +77,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
     listMutation.reset()
     clearMutation.reset()
     setClearArmed(false)
+    setClearTarget(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [owner, repo])
 
@@ -97,7 +101,13 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
 
   const clearMutation = useMutation({
     mutationFn: (dryRun: boolean) =>
-      api.cache.clear(owner, repo, { token, actor, dry_run: dryRun }),
+      api.cache.clear(owner, repo, {
+        token,
+        actor,
+        dry_run: dryRun,
+        key: clearTarget?.key,
+        ref: clearTarget?.ref,
+      }),
   })
 
   const isLoading = listMutation.isPending || clearMutation.isPending
@@ -188,7 +198,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
           <div className="grid grid-cols-2 gap-2">
             <Button
               variant="outline"
-              onClick={() => { setClearArmed(false); clearMutation.mutate(true) }}
+              onClick={() => { setClearArmed(false); setClearTarget(null); clearMutation.mutate(true) }}
               disabled={isLoading || !actor}
             >
               <Eye className="size-3.5" />
@@ -197,23 +207,26 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
             <Button
               variant="destructive"
               onClick={() => {
-                if (clearArmed) {
+                if (clearArmed && clearTarget === null) {
                   setClearArmed(false)
                   clearMutation.mutate(false)
                 } else {
+                  setClearTarget(null)
                   setClearArmed(true)
                 }
               }}
               disabled={isLoading || !actor}
             >
               <Trash className="size-3.5" />
-              {clearArmed ? "Confirm clear" : "Clear"}
+              {clearArmed && clearTarget === null ? "Confirm clear" : "Clear"}
             </Button>
           </div>
           {clearArmed && (
             <p className="text-xs text-yellow-400/80 flex items-center gap-1.5">
               <Warning className="size-3 shrink-0" />
-              Click again to permanently delete these caches — this can&rsquo;t be undone.
+              {clearTarget
+                ? <>Click the row&rsquo;s confirm action again to permanently delete <span className="font-mono">{clearTarget.key}</span> — this can&rsquo;t be undone.</>
+                : "Click again to permanently delete these caches — this can’t be undone."}
             </p>
           )}
           {clearMutation.isError && (
@@ -292,12 +305,14 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                   <th className="text-right text-muted-foreground font-medium px-4 py-2">Size</th>
                   <th className="text-right text-muted-foreground font-medium px-4 py-2">Created</th>
                   <th className="text-right text-muted-foreground font-medium px-4 py-2">Last accessed</th>
+                  <th className="px-4 py-2" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {caches.map((c) => {
                   const staleness = classifyStaleness(c.last_accessed_at)
                   const { text: staleText, dot: staleDot } = stalenessColor[staleness]
+                  const isThisRowArmed = clearArmed && clearTarget?.key === c.key && clearTarget?.ref === c.ref
                   return (
                     <tr key={c.id} className="hover:bg-muted/40 transition-colors">
                       <td className="px-4 py-2.5 font-mono text-foreground/80 max-w-[14rem] truncate">{c.key}</td>
@@ -313,6 +328,25 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                           <span className={`inline-block size-1.5 rounded-full ${staleDot}`} />
                           {relativeTime(c.last_accessed_at)}
                         </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <Button
+                          variant="outline"
+                          className="h-6 px-2 text-[0.6875rem]"
+                          disabled={isLoading || !actor}
+                          onClick={() => {
+                            if (isThisRowArmed) {
+                              setClearArmed(false)
+                              clearMutation.mutate(false)
+                            } else {
+                              setClearTarget({ key: c.key, ref: c.ref })
+                              setClearArmed(true)
+                            }
+                          }}
+                        >
+                          <Trash className="size-3" />
+                          {isThisRowArmed ? "Confirm clear key" : "Clear key"}
+                        </Button>
                       </td>
                     </tr>
                   )
