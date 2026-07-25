@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -139,7 +139,22 @@ describe("PullRequestsPage", () => {
     renderPage();
 
     expect(await screen.findByText("GitHub API unreachable")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
+    const retryButton = screen.getByRole("button", { name: /retry/i });
+    expect(retryButton).toBeInTheDocument();
+
+    reposListMock.mockResolvedValue({ org: "acme", total: 0, repos: [] });
+    fireEvent.click(retryButton);
+
+    await waitFor(() => expect(screen.getByText("No open pull requests")).toBeInTheDocument());
+  });
+
+  it("shows a generic error message when the repo list rejects with a non-Error value", async () => {
+    localStorage.setItem("default_org", "acme");
+    reposListMock.mockRejectedValue("string rejection, not an Error instance");
+
+    renderPage();
+
+    expect(await screen.findByText("Failed to load repositories.")).toBeInTheDocument();
   });
 
   it("falls back to 'unknown' when a pull request has no author", async () => {
