@@ -43,11 +43,12 @@ def upgrade() -> None:
         )
     ).fetchall()
     if collisions:
-        emails = ", ".join(row[0] for row in collisions)
         raise RuntimeError(
-            "Cannot enforce case-insensitive email uniqueness: multiple existing users "
-            f"share an email address differing only by case ({emails}). Resolve these "
-            "duplicate accounts manually (merge or rename one) before re-running this migration."
+            "Cannot enforce case-insensitive email uniqueness: "
+            f"{len(collisions)} email address(es) are shared by multiple existing users, "
+            "differing only by case. Query \"SELECT lower(email) FROM users GROUP BY "
+            "lower(email) HAVING COUNT(*) > 1\" to find them, then resolve these duplicate "
+            "accounts manually (merge or rename one) before re-running this migration."
         )
     conn.execute(sa.text("UPDATE users SET email = lower(email) WHERE email <> lower(email)"))
     op.drop_constraint("users_email_key", "users", type_="unique")
