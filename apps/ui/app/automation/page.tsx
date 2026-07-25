@@ -15,6 +15,10 @@ import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import type { InstallationMeta, RunSummary, WorkflowSummary } from "@/lib/api/types"
 
+// > 0, not > 1 -- valid GitHub org logins can be a single character (see the
+// token-resolve effect below, and activity/page.tsx).
+const MIN_OWNER_LEN_FOR_REPO_LOOKUP = 1
+
 function runDurationSeconds(run: RunSummary): number | null {
   return run.duration_ms == null ? null : Math.round(run.duration_ms / 1000)
 }
@@ -85,6 +89,20 @@ export default function AutomationPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [owner])
 
+  const reposListQuery = useQuery({
+    queryKey: ["repos.list", owner.trim(), token],
+    queryFn: () => api.repos.list(owner.trim(), token),
+    enabled: owner.trim().length >= MIN_OWNER_LEN_FOR_REPO_LOOKUP,
+    retry: false,
+  })
+  const repoOptions = reposListQuery.data?.repos ?? []
+
+  // Clear a previously entered/selected repo when the owner changes, so a stale repo
+  // name from the old owner isn't submitted against the new one's dropdown options.
+  useEffect(() => {
+    setRepo("")
+  }, [owner])
+
   const saveTokenMutation = useMutation({
     mutationFn: () => api.tokens.upsert(owner.trim(), token.trim()),
     onSuccess: () => setTokenSaved(true),
@@ -149,13 +167,29 @@ export default function AutomationPage() {
               <Input placeholder="e.g. octocat" value={owner} onChange={(e) => setOwner(e.target.value)} />
             </div>
             <div>
-              <label className="text-xs font-medium text-foreground block mb-1.5">Repository</label>
-              <Input
-                placeholder="e.g. hello-world"
+              <label htmlFor="repository" className="text-xs font-medium text-foreground block mb-1.5">Repository</label>
+              <select
+                id="repository"
                 value={repo}
                 onChange={(e) => setRepo(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && owner.trim() && repo.trim() && !isLoading && loadMutation.mutate()}
-              />
+                disabled={!owner.trim() || reposListQuery.isLoading}
+                className="h-8 w-full min-w-0 rounded-md border border-input bg-transparent px-2.5 py-1 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 dark:bg-input/30"
+              >
+                <option value="" disabled>
+                  {!owner.trim()
+                    ? "Enter an owner first"
+                    : reposListQuery.isLoading
+                      ? "Loading repositories…"
+                      : reposListQuery.isError
+                        ? "Failed to load repositories"
+                        : repoOptions.length === 0
+                          ? "No repositories found"
+                          : "Select a repository"}
+                </option>
+                {repoOptions.map((r) => (
+                  <option key={r.name} value={r.name}>{r.name}</option>
+                ))}
+              </select>
             </div>
             {!hasInstallationForOwner && (
               <div>
