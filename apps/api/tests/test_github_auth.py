@@ -88,6 +88,17 @@ def test_refuses_to_auto_link_an_existing_email_registered_account(db):
     assert db.query(User).count() == 1
 
 
+def test_refuses_to_auto_link_when_existing_email_differs_only_by_case(db):
+    # Regression test for issue #268: the email-collision check must be case-insensitive,
+    # same as the users.email uniqueness constraint itself.
+    existing = User(email="owner@example.com", name="Owner", password_hash="x", is_workspace_admin=True)
+    db.add(existing)
+    db.commit()
+
+    with pytest.raises(EmailAlreadyRegistered):
+        find_or_create_user(db, _identity(github_user_id=555, email="Owner@Example.com"))
+
+
 def test_unrelated_email_still_creates_a_new_user(db):
     existing = User(email="owner@example.com", name="Owner", password_hash="x", is_workspace_admin=True)
     db.add(existing)
