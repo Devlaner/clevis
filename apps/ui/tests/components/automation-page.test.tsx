@@ -7,6 +7,7 @@ const workflowsMock = vi.fn();
 const runsMock = vi.fn();
 const dispatchMock = vi.fn();
 const installationsListMock = vi.fn();
+const installationsListForOrgMock = vi.fn();
 
 vi.mock("@/lib/api/client", () => ({
   api: {
@@ -21,6 +22,7 @@ vi.mock("@/lib/api/client", () => ({
     },
     installations: {
       list: (...args: unknown[]) => installationsListMock(...args),
+      listForOrg: (...args: unknown[]) => installationsListForOrgMock(...args),
     },
   },
 }));
@@ -46,6 +48,8 @@ describe("AutomationPage", () => {
     dispatchMock.mockReset();
     installationsListMock.mockReset();
     installationsListMock.mockResolvedValue([]);
+    installationsListForOrgMock.mockReset();
+    installationsListForOrgMock.mockResolvedValue([]);
     localStorage.clear();
   });
 
@@ -69,7 +73,7 @@ describe("AutomationPage", () => {
     });
   });
 
-  it("hides the GitHub Token field when an installation covers the entered owner", async () => {
+  it("hides the GitHub Token field when a personal installation covers the entered owner", async () => {
     installationsListMock.mockResolvedValue([
       { id: 1, account_login: "acme", account_type: "Organization", installation_id: 42, created_at: "2026-07-20T00:00:00Z" },
     ]);
@@ -77,6 +81,30 @@ describe("AutomationPage", () => {
     fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
     await waitFor(() => {
       expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
+  });
+
+  it("hides the GitHub Token field when an org-level installation covers the entered owner", async () => {
+    // Regression test: api.installations.list() only ever returns the caller's *personal*
+    // installations -- an org's App installation must be checked via the separate
+    // org-scoped endpoint, or this would never hide the field for the primary (org) case.
+    installationsListForOrgMock.mockResolvedValue([
+      { id: 2, account_login: "acme", account_type: "Organization", installation_id: 99, created_at: "2026-07-20T00:00:00Z" },
+    ]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(installationsListForOrgMock).toHaveBeenCalledWith("acme");
+      expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
+  });
+
+  it("still shows the GitHub Token field when the org-installation lookup errors (e.g. not a recognized org member)", async () => {
+    installationsListForOrgMock.mockRejectedValue(new Error("403"));
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(screen.getByText("GitHub Token")).toBeInTheDocument();
     });
   });
 

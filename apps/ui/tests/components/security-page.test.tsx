@@ -10,6 +10,7 @@ const analyticsHistoryMock = vi.fn();
 const securityMatrixMock = vi.fn();
 const secretScanningMock = vi.fn();
 const installationsListMock = vi.fn();
+const installationsListForOrgMock = vi.fn();
 
 // A minimal reactive store standing in for Next's router-driven searchParams so a
 // tab click's router.replace(...) actually triggers a re-render in the test, the
@@ -49,6 +50,7 @@ vi.mock("@/lib/api/client", () => ({
     },
     installations: {
       list: (...args: unknown[]) => installationsListMock(...args),
+      listForOrg: (...args: unknown[]) => installationsListForOrgMock(...args),
     },
   },
 }));
@@ -85,6 +87,8 @@ describe("SecurityPage", () => {
     secretScanningMock.mockResolvedValue({ repository: "acme/demo", alerts: [] });
     installationsListMock.mockReset();
     installationsListMock.mockResolvedValue([]);
+    installationsListForOrgMock.mockReset();
+    installationsListForOrgMock.mockResolvedValue([]);
     mockSearchParams = new URLSearchParams();
     localStorage.clear();
   });
@@ -102,6 +106,30 @@ describe("SecurityPage", () => {
     fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
     await waitFor(() => {
       expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
+  });
+
+  it("hides the GitHub Token field when an org-level installation covers the entered org", async () => {
+    // Regression test: api.installations.list() only ever returns the caller's *personal*
+    // installations -- an org's App installation must be checked via the separate
+    // org-scoped endpoint, or this would never hide the field for the primary (org) case.
+    installationsListForOrgMock.mockResolvedValue([
+      { id: 2, account_login: "acme", account_type: "Organization", installation_id: 99, created_at: "2026-07-20T00:00:00Z" },
+    ]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(installationsListForOrgMock).toHaveBeenCalledWith("acme");
+      expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
+  });
+
+  it("still shows the GitHub Token field when the org-installation lookup errors (e.g. not a recognized org member)", async () => {
+    installationsListForOrgMock.mockRejectedValue(new Error("403"));
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(screen.getByText("GitHub Token")).toBeInTheDocument();
     });
   });
 

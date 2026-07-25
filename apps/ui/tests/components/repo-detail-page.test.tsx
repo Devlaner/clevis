@@ -10,6 +10,7 @@ const reposStatsMock = vi.fn();
 const reposPullsMock = vi.fn();
 const reposSecurityMock = vi.fn();
 const installationsListMock = vi.fn();
+const installationsListForOrgMock = vi.fn();
 
 let currentRepoParam = "acme~demo";
 
@@ -34,6 +35,7 @@ vi.mock("@/lib/api/client", () => ({
     },
     installations: {
       list: (...args: unknown[]) => installationsListMock(...args),
+      listForOrg: (...args: unknown[]) => installationsListForOrgMock(...args),
     },
   },
 }));
@@ -72,6 +74,8 @@ describe("RepoDetailPage", () => {
     reposSecurityMock.mockReset();
     installationsListMock.mockReset();
     installationsListMock.mockResolvedValue([]);
+    installationsListForOrgMock.mockReset();
+    installationsListForOrgMock.mockResolvedValue([]);
     tokensResolveMock.mockRejectedValue(new Error("no saved token"));
     reposStatsMock.mockResolvedValue({
       repository: "acme/demo",
@@ -206,6 +210,36 @@ describe("RepoDetailPage", () => {
 
     await waitFor(() => {
       expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
+  });
+
+  it("hides the GitHub Token field on the Actions Cache tab when an org-level installation covers the repo's owner", async () => {
+    // Regression test: api.installations.list() only ever returns the caller's *personal*
+    // installations -- an org's App installation must be checked via the separate
+    // org-scoped endpoint, or this would never hide the field for the primary (org) case.
+    installationsListForOrgMock.mockResolvedValue([
+      { id: 2, account_login: "acme", account_type: "Organization", installation_id: 99, created_at: "2026-07-20T00:00:00Z" },
+    ]);
+    cacheListMock.mockResolvedValue({ repository: "acme/demo", total: 0, actions_caches: [] });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /actions cache/i }));
+
+    await waitFor(() => {
+      expect(installationsListForOrgMock).toHaveBeenCalledWith("acme");
+      expect(screen.queryByText("GitHub Token")).not.toBeInTheDocument();
+    });
+  });
+
+  it("still shows the GitHub Token field on the Actions Cache tab when the org-installation lookup errors (e.g. not a recognized org member)", async () => {
+    installationsListForOrgMock.mockRejectedValue(new Error("403"));
+    cacheListMock.mockResolvedValue({ repository: "acme/demo", total: 0, actions_caches: [] });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("tab", { name: /actions cache/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("GitHub Token")).toBeInTheDocument();
     });
   });
 
