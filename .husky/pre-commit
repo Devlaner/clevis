@@ -1,2 +1,2 @@
 #!/usr/bin/env sh
-cd apps/ui && bun run typecheck
+cd apps/ui && bun run typecheck && bun run lint && bun run build

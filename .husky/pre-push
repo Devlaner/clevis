@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# pytest hits a real Postgres (see AGENTS.md) — make sure one is reachable
+# (e.g. `docker compose up db`) before pushing.
+(cd apps/ui && bun run test && bun run build) && pytest -q
