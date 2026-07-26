@@ -153,6 +153,11 @@ Migration files live in `apps/api/alembic/versions/`. Use zero-padded 4-digit pr
 
 Conventional Commits are enforced via commitlint + husky. Format: `type(scope): subject`. Types: `feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `ci`. Merge commits are excluded from linting.
 
+**Git hooks (husky, `.husky/`):**
+- `commit-msg` — commitlint against Conventional Commits.
+- `pre-commit` — `cd apps/ui && bun run typecheck && bun run lint && bun run build`.
+- `pre-push` — `cd apps/ui && bun run test && bun run build`, then `pytest -q` from the repo root (needs a reachable Postgres — see Running locally).
+
 ## Guardrails for AI Agents
 
 These apply to every AI tool working in this repo, not just Claude Code.
@@ -184,6 +189,12 @@ No dropping or truncating tables. No bypassing `require_org_role("admin")` on pr
 ### 4. Don't scope-creep
 
 A bug fix doesn't need surrounding cleanup. Don't touch files outside what was asked. Don't add abstractions for hypothetical future requirements. Most damage from AI agents in a mature codebase comes from unrequested "improvements," not from wrong facts — keep changes scoped to the task.
+
+### 5. Complete setup before your first commit or push
+
+**Mandatory:** before touching this repo, run the full One-time setup block (see Development setup above) — `pip install -r apps/api/requirements.txt`, `pip install -r requirements-test.txt`, `pip install -e packages/checks`, `cd apps/ui && bun install`. The `pre-commit` hook shells out to `bun run typecheck && bun run lint && bun run build`; without `bun install` first it fails with confusing "command not found" / missing-`node_modules` errors rather than a real typecheck/lint/build result. Before your first `git push`, also make sure a local Postgres is reachable (`docker compose up db`, with `DB_*`/`DATABASE_URL` set) — `pre-push` runs `pytest -q`, which hits a real database.
+
+Never bypass a failing hook with `--no-verify`, `HUSKY=0`, or by editing/deleting files under `.husky/` — fix the underlying failure (usually a missing dependency or a real lint/type/test error) instead.
 
 ## AI Attribution Policy
 
