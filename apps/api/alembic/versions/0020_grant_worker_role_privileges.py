@@ -54,8 +54,8 @@ def downgrade() -> None:
         DO $$
         BEGIN
             IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'clevis_worker') THEN
-                REVOKE ALL ON jobs FROM clevis_worker;
-                REVOKE ALL ON app_config FROM clevis_worker;
+                REVOKE SELECT, UPDATE ON jobs FROM clevis_worker;
+                REVOKE SELECT ON app_config FROM clevis_worker;
             END IF;
         END
         $$;
