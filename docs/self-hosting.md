@@ -31,7 +31,16 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
 
 4. (Optional) Configure SMTP so self-registered accounts can verify their email: set `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` in `.env`. Without these, registration still works — accounts are created immediately — but they stay unverified and can't accept an org invitation until either SMTP is configured and the user clicks the emailed link, or they link a GitHub account instead (GitHub-verified emails are trusted immediately). Accounts created via first-run `/auth/setup` or "Sign in with GitHub" are always verified, regardless of SMTP.
 
-5. Start the stack:
+5. (Optional) Give the worker its own Postgres credential, separate from the API's `DB_USER`/`DB_PASSWORD`: set `WORKER_DB_PASSWORD` in `.env`. This is a prerequisite for a future Row-Level Security migration (issue #190) and has no effect otherwise — the worker keeps working exactly as before if left unset. It only takes effect via the `db` container's first-ever startup (`docker-entrypoint-initdb.d` scripts only run once, against a fresh, empty data volume). If you're setting this on an **existing** deployment (a `db` volume that's already initialized), run this once by hand instead:
+
+   ```bash
+   docker compose exec db psql -U "$DB_USER" -d "$DB_NAME" -c \
+     "CREATE ROLE clevis_worker WITH LOGIN PASSWORD '<same value as WORKER_DB_PASSWORD>'; GRANT CONNECT ON DATABASE \"$DB_NAME\" TO clevis_worker;"
+   ```
+
+   Then run `alembic upgrade head` (or restart the `api` container, which does this automatically) so migration `0020` grants `clevis_worker` the table privileges it needs, and restart the `worker` container to pick up the new credential.
+
+6. Start the stack:
 
    ```bash
    docker compose up --build -d
@@ -45,7 +54,7 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
    ghcr.io/<owner>/clevis-ui
    ```
 
-6. Verify it's up:
+7. Verify it's up:
 
    ```bash
    curl http://localhost:8080/healthz   # -> {"status": "ok"}
