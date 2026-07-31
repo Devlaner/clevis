@@ -35,10 +35,10 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
 
    ```bash
    docker compose exec db psql -U "$DB_USER" -d "$DB_NAME" -c \
-     "CREATE ROLE clevis_worker WITH LOGIN PASSWORD '<same value as WORKER_DB_PASSWORD>'; GRANT CONNECT ON DATABASE \"$DB_NAME\" TO clevis_worker;"
+     "CREATE ROLE clevis_worker WITH LOGIN PASSWORD '<same value as WORKER_DB_PASSWORD>'; GRANT CONNECT ON DATABASE \"$DB_NAME\" TO clevis_worker; GRANT SELECT, UPDATE ON jobs TO clevis_worker; GRANT SELECT ON app_config TO clevis_worker;"
    ```
 
-   Then run `alembic upgrade head` (or restart the `api` container, which does this automatically) so migration `0020` grants `clevis_worker` the table privileges it needs, and restart the `worker` container to pick up the new credential.
+   Don't rely on re-running `alembic upgrade head` to grant these privileges — if migration `0020` already applied (as a no-op, since the role didn't exist yet), Alembic considers it done and won't re-run it. Run the `GRANT` statements above directly, then restart the `worker` container to pick up the new credential.
 
 6. Start the stack:
 

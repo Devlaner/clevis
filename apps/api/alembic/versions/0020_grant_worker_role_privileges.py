@@ -7,8 +7,10 @@ shared role would make RLS a no-op for the API too, so the worker needs a
 distinct role first. docker/postgres-init/01-create-worker-role.sh creates a
 `clevis_worker` login role on a fresh Postgres data volume when
 WORKER_DB_PASSWORD is set; this migration grants it exactly the privileges the
-worker currently needs (SELECT/INSERT/UPDATE on jobs, SELECT on app_config --
-the only two tables apps/worker/src/worker.py touches).
+worker currently needs (SELECT/UPDATE on jobs, SELECT on app_config -- the
+only two tables apps/worker/src/worker.py touches; it never inserts into
+jobs, only claims and updates existing rows via SELECT ... FOR UPDATE SKIP
+LOCKED, so INSERT is deliberately not granted).
 
 No-op, in both directions, when the clevis_worker role doesn't exist -- this
 migration is safe to run in every environment, including ones that haven't
@@ -37,8 +39,7 @@ def upgrade() -> None:
         DO $$
         BEGIN
             IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'clevis_worker') THEN
-                GRANT SELECT, INSERT, UPDATE ON jobs TO clevis_worker;
-                GRANT USAGE, SELECT ON SEQUENCE jobs_id_seq TO clevis_worker;
+                GRANT SELECT, UPDATE ON jobs TO clevis_worker;
                 GRANT SELECT ON app_config TO clevis_worker;
             END IF;
         END
@@ -54,7 +55,6 @@ def downgrade() -> None:
         BEGIN
             IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'clevis_worker') THEN
                 REVOKE ALL ON jobs FROM clevis_worker;
-                REVOKE ALL ON SEQUENCE jobs_id_seq FROM clevis_worker;
                 REVOKE ALL ON app_config FROM clevis_worker;
             END IF;
         END
