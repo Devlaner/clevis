@@ -2,4 +2,4 @@ httpx==0.28.1
 pydantic==2.11.9
 pydantic-settings==2.14.2
 psycopg[binary]==3.2.9
-cryptography==48.0.1
+cryptography==50.0.0
