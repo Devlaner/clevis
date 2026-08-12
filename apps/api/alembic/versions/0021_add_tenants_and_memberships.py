@@ -53,6 +53,11 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("personal_user_id IS NOT NULL"),
     )
+    # (id, org_id) as a composite unique constraint -- redundant with id's own PK
+    # uniqueness on its own, but required so a later composite FK from orgs.tenant_id
+    # can reference this exact column pair (see migration 0024's reciprocal-association
+    # fix on orgs.tenant_id).
+    op.create_unique_constraint("uq_tenants_id_org_id", "tenants", ["id", "org_id"])
 
     op.create_table(
         "memberships",
@@ -67,6 +72,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("memberships")
+    op.drop_constraint("uq_tenants_id_org_id", "tenants", type_="unique")
     op.drop_index("uq_tenants_personal_user_id", table_name="tenants")
     op.drop_index("uq_tenants_org_id", table_name="tenants")
     op.drop_table("tenants")

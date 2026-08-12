@@ -179,6 +179,12 @@ class Tenant(Base):
             unique=True,
             postgresql_where="personal_user_id IS NOT NULL",
         ),
+        # Lets orgs.tenant_id declare a composite FK to (id, org_id), enforcing that an
+        # org's tenant_id can only point at a tenant whose org_id reciprocally points back
+        # at that same org -- not a personal tenant, another org's tenant, or a tenant
+        # shared by multiple orgs. Redundant with id's own PK uniqueness in isolation, but
+        # required for the composite FK to be legal.
+        UniqueConstraint("id", "org_id", name="uq_tenants_id_org_id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
