@@ -31,7 +31,26 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
 
 4. (Optional) Configure SMTP so self-registered accounts can verify their email: set `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` in `.env`. Without these, registration still works — accounts are created immediately — but they stay unverified and can't accept an org invitation until either SMTP is configured and the user clicks the emailed link, or they link a GitHub account instead (GitHub-verified emails are trusted immediately). Accounts created via first-run `/auth/setup` or "Sign in with GitHub" are always verified, regardless of SMTP.
 
-5. Start the stack:
+5. (Optional) Give the worker its own Postgres credential, separate from the API's `DB_USER`/`DB_PASSWORD`: set `WORKER_DB_PASSWORD` in `.env`. This is a prerequisite for a future Row-Level Security migration (issue #190) and has no effect otherwise — the worker keeps working exactly as before if left unset. It only takes effect via the `db` container's first-ever startup (`docker-entrypoint-initdb.d` scripts only run once, against a fresh, empty data volume). If you're setting this on an **existing** deployment (a `db` volume that's already initialized), run this once by hand instead:
+
+   ```bash
+   # 1. docker compose up -d db recreates the db container so it picks up
+   #    WORKER_DB_PASSWORD from .env, then re-runs the same init script the
+   #    fresh-volume path uses (safe to re-run; it's a no-op if the role
+   #    already exists) — this avoids retyping the password into a raw SQL
+   #    literal and avoids relying on host-shell vars .env doesn't export.
+   docker compose up -d db
+   docker compose exec db sh /docker-entrypoint-initdb.d/01-create-worker-role.sh
+
+   # 2. Grant it the table privileges migration 0020 would otherwise apply.
+   #    Runs inside the db container so it uses the container's own
+   #    POSTGRES_USER/POSTGRES_DB, not unexported host-shell variables.
+   docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "GRANT SELECT, UPDATE ON jobs TO clevis_worker; GRANT SELECT ON app_config TO clevis_worker;"'
+   ```
+
+   Don't rely on re-running `alembic upgrade head` for step 2 — if migration `0020` already applied (as a no-op, since the role didn't exist yet), Alembic considers it done and won't re-run it. Restart the `worker` container afterwards to pick up the new credential.
+
+6. Start the stack:
 
    ```bash
    docker compose up --build -d
@@ -45,7 +64,7 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
    ghcr.io/<owner>/clevis-ui
    ```
 
-6. Verify it's up:
+7. Verify it's up:
 
    ```bash
    curl http://localhost:8080/healthz   # -> {"status": "ok"}

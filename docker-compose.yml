@@ -22,8 +22,12 @@ services:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
+      # Consumed by docker/postgres-init/01-create-worker-role.sh on first init only
+      # (see issue #190) -- unset means the worker keeps sharing DB_USER/DB_PASSWORD.
+      WORKER_DB_PASSWORD: ${WORKER_DB_PASSWORD:-}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${DB_USER}"]
       interval: 5s
