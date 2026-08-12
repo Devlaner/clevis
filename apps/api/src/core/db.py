@@ -6,6 +6,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -156,6 +157,13 @@ class User(Base):
 
 class Org(Base):
     __tablename__ = "orgs"
+    __table_args__ = (
+        # Composite FK instead of a plain tenant_id -> tenants.id FK: requires that
+        # whatever tenant tenant_id names must itself have org_id = this exact org's id,
+        # so tenant_id can't point at a personal tenant, another org's tenant, or a tenant
+        # shared across multiple orgs (see migration 0024's docstring).
+        ForeignKeyConstraint(["tenant_id", "id"], ["tenants.id", "tenants.org_id"], name="fk_orgs_tenant_id_reciprocal"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # Nullable: not known for orgs backfilled from pre-existing installations; filled in
@@ -168,7 +176,7 @@ class Org(Base):
     # per org before this column exists; migration 0024 adds + backfills it). Stays nullable
     # until PR 4's dual-write lands and org_provisioning.py starts setting it on every new
     # org -- enforcing NOT NULL before then would break org creation entirely.
-    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class OrgMembership(Base):
