@@ -164,6 +164,41 @@ class OrgMembership(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+    __table_args__ = (
+        CheckConstraint(
+            "(kind = 'org' AND org_id IS NOT NULL AND personal_user_id IS NULL) "
+            "OR (kind = 'personal' AND org_id IS NULL AND personal_user_id IS NOT NULL)",
+            name="ck_tenants_kind_xor",
+        ),
+        Index("uq_tenants_org_id", "org_id", unique=True, postgresql_where="org_id IS NOT NULL"),
+        Index(
+            "uq_tenants_personal_user_id",
+            "personal_user_id",
+            unique=True,
+            postgresql_where="personal_user_id IS NOT NULL",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # "org" | "personal"
+    org_id: Mapped[int | None] = mapped_column(ForeignKey("orgs.id"), nullable=True)
+    personal_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_memberships_tenant_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)  # "admin" | "member"
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Invitation(Base):
     __tablename__ = "invitations"
 
