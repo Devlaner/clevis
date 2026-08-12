@@ -57,6 +57,11 @@ class GitHubInstallation(Base):
     # Exactly one of org_id / owner_user_id is set: org-connected installs vs. personal installs.
     org_id: Mapped[int | None] = mapped_column(ForeignKey("orgs.id"), nullable=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # Backfilled from org_id/owner_user_id by migration 0025. Stays nullable until PR 4's
+    # dual-write lands and installation-creation code starts setting it -- enforcing NOT
+    # NULL before then would break every new installation the moment this migration deploys
+    # (see the same reasoning documented on orgs.tenant_id and invitations.tenant_id below).
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -68,6 +73,11 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String, nullable=False)
     target: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable, no historical backfill (migration 0028) -- actor/target are free text, not
+    # FKs, so pre-migration rows can't be reliably attributed to a tenant. Per the design
+    # decision on #190, these stay visible only via a require_workspace_admin-gated view
+    # once RLS lands, never to ordinary tenant members.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -106,6 +116,9 @@ class SavedToken(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # Best-effort backfill by migration 0027, matched on org (free text, not an FK) against
+    # orgs.github_login -- stays nullable since legacy rows for a renamed/deleted org won't match.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
 
 
 class User(Base):
@@ -151,6 +164,11 @@ class Org(Base):
     github_org_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
     github_login: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # 1:1 pointer to this org's tenant row (migration 0022 backfills one 'org'-kind tenant
+    # per org before this column exists; migration 0024 adds + backfills it). Stays nullable
+    # until PR 4's dual-write lands and org_provisioning.py starts setting it on every new
+    # org -- enforcing NOT NULL before then would break org creation entirely.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
 
 
 class OrgMembership(Base):
@@ -217,6 +235,10 @@ class Invitation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Backfilled from org_id's tenant by migration 0026. Stays nullable until PR 4's
+    # dual-write lands and invitation-creation code starts setting it -- same reasoning as
+    # orgs.tenant_id above.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
 
 
 class ScanResult(Base):
@@ -235,6 +257,10 @@ class ScanResult(Base):
     # by org membership, not this column.
     scanned_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Best-effort backfill by migration 0027: matched via owner -> orgs.github_login first,
+    # falling back to scanned_by_user_id's personal tenant. Stays nullable -- some legacy
+    # rows (renamed/deleted org) won't match either path.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
 
 
 class AppConfig(Base):
