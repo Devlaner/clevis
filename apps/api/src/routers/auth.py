@@ -40,7 +40,7 @@ from src.core.auth import UserOut, clear_session_cookie, create_access_token, re
 from src.core.config import settings
 from src.core.db import Org, User, get_db
 from src.core.rate_limit import check_account_rate_limit, rate_limit
-from src.repositories import invitation_repo
+from src.repositories import invitation_repo, tenant_repo
 from src.services.email import EmailNotConfigured, send_verification_email
 
 logger = logging.getLogger(__name__)
@@ -237,6 +237,7 @@ def setup(body: SetupRequest, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=409, detail="Setup already complete") from None
     db.refresh(user)
+    tenant_repo.ensure_personal_tenant(db, user.id)
     token = create_access_token(user.id, user.email, user.is_workspace_admin, user.name, user.token_version)
     return {"access_token": token, "user": UserOut(id=user.id, email=user.email, name=user.name, is_workspace_admin=user.is_workspace_admin)}
 
@@ -281,6 +282,7 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     _send_verification_email_best_effort(user)
     db.commit()
     db.refresh(user)
+    tenant_repo.ensure_personal_tenant(db, user.id)
     token = create_access_token(user.id, user.email, user.is_workspace_admin, user.name, user.token_version)
     return {
         "access_token": token,

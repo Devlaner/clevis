@@ -29,6 +29,7 @@ from src.core.auth import create_access_token, set_session_cookie
 from src.core.config import settings
 from src.core.db import User, get_db
 from src.core.rate_limit import rate_limit
+from src.repositories import tenant_repo
 from src.services import github_oauth, org_provisioning
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ def find_or_create_user(db: Session, identity: github_oauth.GitHubIdentity) -> U
     db.add(user)
     db.commit()
     db.refresh(user)
+    tenant_repo.ensure_personal_tenant(db, user.id)
     return user
 
 
