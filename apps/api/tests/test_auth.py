@@ -78,6 +78,19 @@ def test_setup_returns_token_and_owner(auth_client):
     assert body["user"]["email"] == "owner@example.com"
 
 
+def test_setup_creates_a_personal_tenant_and_self_membership(auth_client, db):
+    from src.core.db import Membership, Tenant
+
+    body = _setup_owner(auth_client)
+    user_id = body["user"]["id"]
+
+    tenant = db.query(Tenant).filter(Tenant.kind == "personal", Tenant.personal_user_id == user_id).first()
+    assert tenant is not None
+    membership = db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
+    assert membership is not None
+    assert membership.role == "admin"
+
+
 def test_setup_stores_email_lowercased(auth_client):
     resp = auth_client.post(
         "/auth/setup", json={"email": "Owner@Example.com", "password": "supersecret1234"}
@@ -183,6 +196,23 @@ def test_register_creates_non_owner(auth_client):
     assert "access_token" in body
     assert body["user"]["is_workspace_admin"] is False
     assert body["user"]["email"] == "member@example.com"
+
+
+def test_register_creates_a_personal_tenant_and_self_membership(auth_client, db):
+    from src.core.db import Membership, Tenant
+
+    _setup_owner(auth_client)
+    resp = auth_client.post(
+        "/auth/register", json={"email": "member@example.com", "password": "supersecret1234"}
+    )
+    assert resp.status_code == 201
+    user_id = resp.json()["user"]["id"]
+
+    tenant = db.query(Tenant).filter(Tenant.kind == "personal", Tenant.personal_user_id == user_id).first()
+    assert tenant is not None
+    membership = db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
+    assert membership is not None
+    assert membership.role == "admin"
 
 
 def test_register_before_setup_rejected(auth_client):

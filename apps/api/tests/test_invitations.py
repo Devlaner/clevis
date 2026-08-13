@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import User, get_db
-from src.repositories import org_membership_repo, org_repo
+from src.repositories import invitation_repo, org_membership_repo, org_repo
 from src.routers.invitations import router as invitations_router
 
 
@@ -55,6 +55,21 @@ def test_create_invitation_admin_ok(db, acme_org):
     assert body["invitation"]["email"] == "bob@acme.com"
     assert body["invitation"]["status"] == "pending"
     assert "/invite/" in body["invite_link"]
+
+
+def test_create_invitation_sets_tenant_id(db, acme_org):
+    from src.core.db import Tenant
+
+    resp = _client(db, acme_org["admin"]).post("/orgs/acme/invitations", json={"email": "bob@acme.com"})
+    assert resp.status_code == 200
+    token = resp.json()["invite_link"].rsplit("/", 1)[-1]
+
+    invitation = invitation_repo.get_by_token(db, token)
+
+    assert invitation.tenant_id is not None
+    tenant = db.query(Tenant).filter(Tenant.id == invitation.tenant_id).first()
+    assert tenant.kind == "org"
+    assert tenant.org_id == acme_org["org"].id
 
 
 def test_create_invitation_rejects_duplicate_pending_invite(db, acme_org):

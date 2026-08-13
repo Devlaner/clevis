@@ -2,6 +2,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.db import OrgMembership
+from src.repositories import tenant_repo
 
 
 def get(db: Session, org_id: int, user_id: int) -> OrgMembership | None:
@@ -28,6 +29,8 @@ def get_or_create(db: Session, org_id: int, user_id: int, role: str) -> OrgMembe
             raise
         return membership
     db.refresh(membership)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    tenant_repo.get_or_create_membership(db, tenant_id=tenant.id, user_id=user_id, role=role)
     return membership
 
 
@@ -46,6 +49,8 @@ def update_role(db: Session, org_id: int, user_id: int, role: str) -> OrgMembers
     membership.role = role
     db.commit()
     db.refresh(membership)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    tenant_repo.update_membership_role(db, tenant_id=tenant.id, user_id=user_id, role=role)
     return membership
 
 
@@ -54,3 +59,5 @@ def delete(db: Session, org_id: int, user_id: int) -> None:
         OrgMembership.org_id == org_id, OrgMembership.user_id == user_id
     ).delete()
     db.commit()
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    tenant_repo.delete_membership(db, tenant_id=tenant.id, user_id=user_id)

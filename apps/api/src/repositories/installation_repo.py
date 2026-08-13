@@ -3,6 +3,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.db import GitHubInstallation
+from src.repositories import tenant_repo
+
+
+def _resolve_tenant_id(db: Session, org_id: int | None, owner_user_id: int | None) -> int:
+    if org_id is not None:
+        return tenant_repo.get_or_create_org_tenant(db, org_id).id
+    return tenant_repo.ensure_personal_tenant(db, owner_user_id).id
 
 
 def upsert(
@@ -25,11 +32,13 @@ def upsert(
 
     existing = query.first()
     token_ref = f"tok_{account_login}"
+    tenant_id = _resolve_tenant_id(db, org_id, owner_user_id)
     if existing:
         existing.account_type = account_type
         existing.auth_mode = auth_mode
         existing.installation_id = installation_id
         existing.token_ref = token_ref
+        existing.tenant_id = tenant_id
         db.commit()
         db.refresh(existing)
         return existing
@@ -42,6 +51,7 @@ def upsert(
         token_ref=token_ref,
         org_id=org_id,
         owner_user_id=owner_user_id,
+        tenant_id=tenant_id,
     )
     db.add(row)
     try:
@@ -57,6 +67,7 @@ def upsert(
         existing.auth_mode = auth_mode
         existing.installation_id = installation_id
         existing.token_ref = token_ref
+        existing.tenant_id = tenant_id
         db.commit()
         db.refresh(existing)
         return existing

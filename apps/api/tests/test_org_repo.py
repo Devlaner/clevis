@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from sqlalchemy.orm import Query
 
+from src.core.db import Tenant
 from src.repositories import org_repo
 
 
@@ -11,6 +12,31 @@ def test_creates_new_org(db):
     org = org_repo.get_or_create(db, github_login="acme", github_org_id=1)
     assert org.github_login == "acme"
     assert org.github_org_id == 1
+
+
+def test_creates_new_org_links_a_tenant(db):
+    org = org_repo.get_or_create(db, github_login="acme", github_org_id=1)
+    assert org.tenant_id is not None
+    tenant = db.query(Tenant).filter(Tenant.id == org.tenant_id).first()
+    assert tenant is not None
+    assert tenant.kind == "org"
+    assert tenant.org_id == org.id
+
+
+def test_existing_org_gets_lazily_backfilled_with_a_tenant(db):
+    # An org row created before dual-write existed (tenant_id NULL) must self-heal the
+    # next time it's resolved through get_or_create, not stay permanently untenanted.
+    from src.core.db import Org
+
+    org = Org(github_login="acme", github_org_id=1)
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+    assert org.tenant_id is None
+
+    resolved = org_repo.get_or_create(db, github_login="acme", github_org_id=1)
+
+    assert resolved.tenant_id is not None
 
 
 def test_idempotent_by_login(db):
