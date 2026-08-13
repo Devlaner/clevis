@@ -3,10 +3,11 @@
 import pytest
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import User, get_db
-from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
+from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role, require_personal_tenant
 from src.repositories import org_membership_repo, org_repo
 
 _OUTSIDER = UserOut(id=99999, email="outsider@e.com", name=None, is_workspace_admin=False)
@@ -113,3 +114,59 @@ def test_assert_owner_matches_org_rejects_a_different_org(db):
     with pytest.raises(HTTPException) as exc_info:
         assert_owner_matches_org("widgets-inc", OrgContext(org=org, membership=None))
     assert exc_info.value.status_code == 403
+
+
+# ── tenant-context session-variable wiring (issue #190, PR 5a) ─────────────────────
+#
+# require_org_role's HTTP-level behavior is already covered above through a real
+# request. These tests focus on the SET app.tenant_id / app.user_id side effect, which
+# the HTTP-level tests never assert on directly.
+
+def _current_setting(db, name: str) -> str | None:
+    value = db.execute(text("SELECT current_setting(:name, true)"), {"name": name}).scalar()
+    return value or None
+
+
+def test_require_org_role_sets_tenant_and_user_session_vars(db):
+    org = org_repo.get_or_create(db, github_login="widgets")
+    user = _make_user(db, "alice@example.com")
+    org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="admin")
+
+    dependency = require_org_role("member")
+    ctx = dependency(org_login="widgets", db=db, user=user)
+
+    assert ctx.org.id == org.id
+    assert _current_setting(db, "app.tenant_id") == str(org.tenant_id)
+    assert _current_setting(db, "app.user_id") == str(user.id)
+
+
+def test_require_org_role_does_not_set_session_vars_on_403(db):
+    org_repo.get_or_create(db, github_login="widgets")
+    user = _make_user(db, "bob@example.com")  # no membership
+
+    dependency = require_org_role("member")
+    with pytest.raises(HTTPException) as exc_info:
+        dependency(org_login="widgets", db=db, user=user)
+
+    assert exc_info.value.status_code == 403
+    assert _current_setting(db, "app.tenant_id") is None
+
+
+def test_require_personal_tenant_sets_session_vars(db):
+    user = _make_user(db, "carol@example.com")
+
+    ctx = require_personal_tenant(db=db, user=user)
+
+    assert ctx.tenant.kind == "personal"
+    assert ctx.tenant.personal_user_id == user.id
+    assert _current_setting(db, "app.tenant_id") == str(ctx.tenant.id)
+    assert _current_setting(db, "app.user_id") == str(user.id)
+
+
+def test_require_personal_tenant_is_idempotent(db):
+    user = _make_user(db, "dave@example.com")
+
+    first = require_personal_tenant(db=db, user=user)
+    second = require_personal_tenant(db=db, user=user)
+
+    assert second.tenant.id == first.tenant.id

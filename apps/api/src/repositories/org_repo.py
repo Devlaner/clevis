@@ -6,7 +6,7 @@ from src.core.db import Org
 from src.repositories import tenant_repo
 
 
-def _ensure_tenant_linked(db: Session, org: Org) -> Org:
+def ensure_tenant_linked(db: Session, org: Org) -> Org:
     if org.tenant_id is not None:
         return org
     tenant = tenant_repo.get_or_create_org_tenant(db, org.id)
@@ -44,7 +44,7 @@ def get_or_create(db: Session, github_login: str, github_org_id: int | None = No
             org.github_org_id = github_org_id
             db.commit()
             db.refresh(org)
-        return _ensure_tenant_linked(db, org)
+        return ensure_tenant_linked(db, org)
 
     if github_org_id is not None:
         # The org may have been renamed on GitHub since we last saw it -- github_org_id
@@ -56,7 +56,7 @@ def get_or_create(db: Session, github_login: str, github_org_id: int | None = No
                 org.github_login = github_login
                 db.commit()
                 db.refresh(org)
-            return _ensure_tenant_linked(db, org)
+            return ensure_tenant_linked(db, org)
 
     org = Org(github_login=github_login, github_org_id=github_org_id)
     db.add(org)
@@ -70,6 +70,6 @@ def get_or_create(db: Session, github_login: str, github_org_id: int | None = No
             org = get_by_org_id(db, github_org_id)
         if org is None:
             raise
-        return _ensure_tenant_linked(db, org)
+        return ensure_tenant_linked(db, org)
     db.refresh(org)
-    return _ensure_tenant_linked(db, org)
+    return ensure_tenant_linked(db, org)
