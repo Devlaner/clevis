@@ -15,14 +15,16 @@ from sqlalchemy.orm import Session
 from src.core.db import get_db
 
 
-def _current_setting_via_new_connection() -> str | None:
+def _session_context_via_new_connection() -> tuple[str | None, str | None]:
     gen = get_db()
     db = next(gen)
     try:
-        value = db.execute(text("SELECT current_setting('app.tenant_id', true)")).scalar()
+        tenant, user = db.execute(
+            text("SELECT current_setting('app.tenant_id', true), current_setting('app.user_id', true)")
+        ).one()
     finally:
         gen.close()
-    return value or None
+    return (tenant or None, user or None)
 
 
 def test_get_db_resets_tenant_context_before_connection_checkin():
@@ -38,8 +40,8 @@ def test_get_db_resets_tenant_context_before_connection_checkin():
     # depending on pool state, so poll a handful of connections -- if the reset didn't
     # happen, the leaked value would show up on at least one of them (LIFO pools strongly
     # favor immediate reuse of the just-returned connection in a single-threaded test).
-    seen = {_current_setting_via_new_connection() for _ in range(5)}
-    assert seen == {None}, f"app.tenant_id leaked into a reused connection: {seen}"
+    seen = {_session_context_via_new_connection() for _ in range(5)}
+    assert seen == {(None, None)}, f"session context leaked into a reused connection: {seen}"
 
 
 def test_get_db_invalidates_the_connection_if_the_reset_itself_fails():
