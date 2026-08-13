@@ -56,12 +56,20 @@ _MAX_PASSWORD_LEN = 72
 _VERIFY_TOKEN_TTL = timedelta(hours=24)
 
 
-def _send_verification_email_best_effort(user: User) -> None:
-    """Generates a fresh verification token/expiry on `user`, then tries to email it.
-    Caller is responsible for db.commit(). Never raises -- registration/resend must
-    succeed regardless of whether SMTP is configured or the send itself fails."""
+def _generate_verification_token(user: User) -> None:
+    """Sets a fresh verification token/expiry on `user`. Caller is responsible for
+    db.commit() *before* calling _send_verification_email_best_effort below -- kept as two
+    steps so the real network send only happens once the token is durably persisted; a
+    commit that fails after the email already went out would hand the user a live-looking
+    verification link for a token that was never actually saved (#323 code-review finding)."""
     user.email_verify_token = secrets.token_urlsafe(32)
     user.email_verify_token_expires_at = datetime.now(timezone.utc) + _VERIFY_TOKEN_TTL
+
+
+def _send_verification_email_best_effort(user: User) -> None:
+    """Tries to email the already-persisted verification token on `user` (see
+    _generate_verification_token). Never raises -- registration/resend must succeed
+    regardless of whether SMTP is configured or the send itself fails."""
     try:
         verify_url = f"{settings.cors_origins[0]}/verify-email?token={user.email_verify_token}"
         send_verification_email(user.email, verify_url)
@@ -283,13 +291,16 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists") from None
-    _send_verification_email_best_effort(user)
+    _generate_verification_token(user)
     # commit=False: land the personal tenant/membership in the same transaction as this
     # user, then commit once -- a failure between two separate commits could otherwise
     # leave a User row with no personal tenant (#323 CodeRabbit finding).
     tenant_repo.ensure_personal_tenant(db, user.id, commit=False)
     db.commit()
     db.refresh(user)
+    # Only send the real email after the commit above succeeds -- see
+    # _generate_verification_token's docstring for why the two are split.
+    _send_verification_email_best_effort(user)
     token = create_access_token(user.id, user.email, user.is_workspace_admin, user.name, user.token_version)
     return {
         "access_token": token,
@@ -330,8 +341,9 @@ def resend_verification(
     if user.email_verified:
         return {"ok": True, "already_verified": True}
     check_account_rate_limit(f"resend-verification:{user.email.lower()}")
-    _send_verification_email_best_effort(user)
+    _generate_verification_token(user)
     db.commit()
+    _send_verification_email_best_effort(user)
     return {"ok": True}
 
 

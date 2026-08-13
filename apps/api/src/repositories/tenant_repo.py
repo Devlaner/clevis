@@ -59,8 +59,16 @@ def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Te
     if commit:
         get_or_create_membership(db, tenant_id=tenant.id, user_id=user_id, role="admin")
     else:
-        db.add(Membership(tenant_id=tenant.id, user_id=user_id, role="admin"))
-        db.flush()
+        # Query first rather than inserting unconditionally: currently always a fresh
+        # user_id (see docstring), but staying idempotent here too means a future
+        # commit=False caller that reuses an existing user_id degrades to a no-op instead
+        # of hitting an uncaught IntegrityError on the membership's unique constraint.
+        existing_membership = (
+            db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
+        )
+        if existing_membership is None:
+            db.add(Membership(tenant_id=tenant.id, user_id=user_id, role="admin"))
+            db.flush()
     return tenant
 
 
