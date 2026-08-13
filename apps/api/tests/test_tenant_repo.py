@@ -175,3 +175,49 @@ def test_delete_membership_is_a_noop_when_missing(db):
     user = _make_user(db, "ivan@example.com")
 
     tenant_repo.delete_membership(db, tenant_id=tenant.id, user_id=user.id)  # must not raise
+
+
+# ── upsert_membership ─────────────────────────────────────────────────────────
+
+def test_upsert_membership_creates_when_missing(db):
+    org_id = _acme_org_id(db)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    user = _make_user(db, "judy@example.com")
+
+    membership = tenant_repo.upsert_membership(db, tenant_id=tenant.id, user_id=user.id, role="member")
+
+    assert membership.role == "member"
+
+
+def test_upsert_membership_fixes_a_stale_role(db):
+    org_id = _acme_org_id(db)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    user = _make_user(db, "kevin@example.com")
+    tenant_repo.get_or_create_membership(db, tenant_id=tenant.id, user_id=user.id, role="member")
+
+    membership = tenant_repo.upsert_membership(db, tenant_id=tenant.id, user_id=user.id, role="admin")
+
+    assert membership.role == "admin"
+
+
+def test_upsert_membership_recreates_a_row_deleted_between_its_two_internal_lookups(db):
+    # Regression test: upsert_membership's internal update_membership_role call can find
+    # nothing if a concurrent delete_membership races in between its get-or-create and its
+    # role-reconciliation step. Must recreate the row rather than returning None despite
+    # the function's non-Optional Membership return type.
+    org_id = _acme_org_id(db)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    user = _make_user(db, "laura@example.com")
+    tenant_repo.get_or_create_membership(db, tenant_id=tenant.id, user_id=user.id, role="member")
+
+    original_update = tenant_repo.update_membership_role
+
+    def racy_update(db, tenant_id, user_id, role):
+        tenant_repo.delete_membership(db, tenant_id=tenant_id, user_id=user_id)
+        return original_update(db, tenant_id=tenant_id, user_id=user_id, role=role)
+
+    with patch.object(tenant_repo, "update_membership_role", racy_update):
+        membership = tenant_repo.upsert_membership(db, tenant_id=tenant.id, user_id=user.id, role="admin")
+
+    assert membership is not None
+    assert membership.role == "admin"

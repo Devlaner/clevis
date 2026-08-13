@@ -63,13 +63,10 @@ def require_org_role(min_role: Literal["member", "admin"]):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
         # org.tenant_id is nullable (see db.py's Org.tenant_id docstring) -- a legacy row
         # resolved here via get_by_login (not get_or_create) never gets org_repo's own
-        # self-healing dual-write, so guard the same way org_repo does.
-        tenant_id = org.tenant_id
-        if tenant_id is None:
-            tenant_id = tenant_repo.get_or_create_org_tenant(db, org.id).id
-            org.tenant_id = tenant_id
-            db.commit()
-        _set_tenant_session_context(db, tenant_id, user.id)
+        # self-healing dual-write, so reuse the exact same helper org_repo.get_or_create
+        # itself uses, rather than a separate hand-rolled copy of the same logic.
+        org = org_repo.ensure_tenant_linked(db, org)
+        _set_tenant_session_context(db, org.tenant_id, user.id)
         return OrgContext(org=org, membership=membership)
 
     return dependency

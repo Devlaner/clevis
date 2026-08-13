@@ -305,7 +305,13 @@ def get_db() -> Generator[Session, None, None]:
             db.execute(text("RESET app.tenant_id"))
             db.execute(text("RESET app.user_id"))
             db.commit()
-        except Exception:
-            logger.exception("failed to reset tenant session context before connection checkin")
-        finally:
             db.close()
+        except Exception:
+            # A failure partway through (e.g. a transient network drop after RESET but
+            # before commit) leaves it unclear whether the reset actually took -- closing
+            # normally here would return that connection to the pool for reuse anyway.
+            # invalidate() instead forces the pool to discard the underlying DBAPI
+            # connection rather than risk handing a possibly-still-tenant-scoped
+            # connection to an unrelated later request.
+            logger.exception("failed to reset tenant session context; invalidating connection instead of reusing it")
+            db.invalidate()

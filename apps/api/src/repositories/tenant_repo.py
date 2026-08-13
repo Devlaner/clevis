@@ -81,7 +81,11 @@ def upsert_membership(db: Session, tenant_id: int, user_id: int, role: str) -> M
     from a concurrent-insert race) can call this unconditionally and always end up in sync."""
     membership = get_or_create_membership(db, tenant_id, user_id, role)
     if membership.role != role:
-        membership = update_membership_role(db, tenant_id, user_id, role)
+        updated = update_membership_role(db, tenant_id, user_id, role)
+        # A concurrent delete_membership could remove the row between the get-or-create
+        # above and this update -- re-create it rather than returning None despite this
+        # function's Membership (non-Optional) return type.
+        membership = updated if updated is not None else get_or_create_membership(db, tenant_id, user_id, role)
     return membership
 
 

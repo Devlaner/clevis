@@ -7,7 +7,10 @@ pooled connection next. Uses the real engine/pool directly (not the savepoint-pe
 `db` fixture), since the bug is specifically about connection *reuse* across separate
 get_db() calls."""
 
+from unittest.mock import patch
+
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from src.core.db import get_db
 
@@ -37,3 +40,24 @@ def test_get_db_resets_tenant_context_before_connection_checkin():
     # favor immediate reuse of the just-returned connection in a single-threaded test).
     seen = {_current_setting_via_new_connection() for _ in range(5)}
     assert seen == {None}, f"app.tenant_id leaked into a reused connection: {seen}"
+
+
+def test_get_db_invalidates_the_connection_if_the_reset_itself_fails():
+    # If RESET/commit fails partway through, closing normally would return a connection
+    # to the pool whose reset status is uncertain -- get_db() must invalidate it instead
+    # of risking a dirty connection reaching an unrelated later request.
+    original_commit = Session.commit
+    calls = {"n": 0}
+
+    def failing_commit(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated failure during tenant-context reset")
+        return original_commit(self)
+
+    gen = get_db()
+    next(gen)
+    with patch.object(Session, "commit", failing_commit), patch.object(Session, "invalidate") as mock_invalidate:
+        gen.close()
+
+    mock_invalidate.assert_called_once()
