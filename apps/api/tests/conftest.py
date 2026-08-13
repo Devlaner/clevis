@@ -26,3 +26,9 @@ def db(_engine):
         # the same way get_db() does in production, or a leaked value leaks across tests.
         conn.execute(text("RESET app.tenant_id"))
         conn.execute(text("RESET app.user_id"))
+        # RESET is transactional like any other statement -- the execute() calls above
+        # auto-begin a new implicit transaction after rollback() ended the last one, and
+        # closing the connection without committing would roll the resets themselves back,
+        # leaving the leaked value intact on the pooled connection. Must commit for the
+        # reset to actually stick.
+        conn.commit()

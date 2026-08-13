@@ -317,6 +317,7 @@ def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirr
     # first call below goes down the new-row insert path, not the early-return path.
 
     reached_lock = threading.Event()
+    delete_started = threading.Event()
     release_lock = threading.Event()
     original_sync = org_membership_repo._sync_membership_mirror
 
@@ -336,6 +337,7 @@ def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirr
         session_b = SessionLocal()
         try:
             assert reached_lock.wait(timeout=5), "get_or_create never reached its locked section"
+            delete_started.set()
             org_membership_repo.delete(session_b, org_id=org_id, user_id=user_id)
             delete_result["finished"] = True
         finally:
@@ -350,6 +352,11 @@ def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirr
 
             delete_thread = threading.Thread(target=run_delete)
             delete_thread.start()
+            # Wait for the delete thread to actually reach delete() (not just start()) before
+            # checking it's blocked -- otherwise a slow scheduler could let the 0.3s timeout
+            # below expire before run_delete has even called delete(), passing "not
+            # delete_result" for the wrong reason instead of proving the lock blocked it.
+            assert delete_started.wait(timeout=5), "delete thread never reached delete()"
             delete_thread.join(timeout=0.3)
             assert not delete_result, "delete() must block while get_or_create holds the row lock"
 
