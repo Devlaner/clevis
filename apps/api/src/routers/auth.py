@@ -232,12 +232,16 @@ def setup(body: SetupRequest, db: Session = Depends(get_db)):
     )
     db.add(user)
     try:
-        db.commit()
+        # flush (not commit) so the personal tenant/membership below land in the same
+        # transaction as this user -- a failure between two separate commits could
+        # otherwise leave a User row with no personal tenant (#323 CodeRabbit finding).
+        db.flush()
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="Setup already complete") from None
+    tenant_repo.ensure_personal_tenant(db, user.id, commit=False)
+    db.commit()
     db.refresh(user)
-    tenant_repo.ensure_personal_tenant(db, user.id)
     token = create_access_token(user.id, user.email, user.is_workspace_admin, user.name, user.token_version)
     return {"access_token": token, "user": UserOut(id=user.id, email=user.email, name=user.name, is_workspace_admin=user.is_workspace_admin)}
 
@@ -280,9 +284,12 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists") from None
     _send_verification_email_best_effort(user)
+    # commit=False: land the personal tenant/membership in the same transaction as this
+    # user, then commit once -- a failure between two separate commits could otherwise
+    # leave a User row with no personal tenant (#323 CodeRabbit finding).
+    tenant_repo.ensure_personal_tenant(db, user.id, commit=False)
     db.commit()
     db.refresh(user)
-    tenant_repo.ensure_personal_tenant(db, user.id)
     token = create_access_token(user.id, user.email, user.is_workspace_admin, user.name, user.token_version)
     return {
         "access_token": token,

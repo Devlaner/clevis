@@ -23,27 +23,44 @@ def get_or_create_org_tenant(db: Session, org_id: int) -> Tenant:
     return tenant
 
 
-def ensure_personal_tenant(db: Session, user_id: int) -> Tenant:
+def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Tenant:
     """Get-or-create a user's personal tenant, plus its self-membership (role='admin') --
     mirrors migration 0023_backfill_personal_tenants.py, which backfilled both rows
     together for every pre-existing user. There's no concept of a personal tenant with
-    no membership, so both rows are ensured atomically here."""
+    no membership, so both rows are ensured atomically here.
+
+    commit=False is for the brand-new-user registration flows (auth.py, github_auth.py):
+    those callers flush the User row (not commit) and pass commit=False here so the tenant
+    and membership inserts land in the *same* transaction as the user, then commit once --
+    otherwise a failure between the user's commit and this function's own commit could leave
+    a User row with no personal tenant (CodeRabbit finding on #323). Skips the concurrent-
+    insert race handling in that mode: user_id was just flushed for the first time in this
+    still-open transaction, so no other transaction can already hold a personal tenant for
+    it. commit=True (default) keeps the original standalone behavior, used by
+    require_personal_tenant (rbac.py) and any other caller not paired with a user commit."""
     tenant = db.query(Tenant).filter(Tenant.kind == "personal", Tenant.personal_user_id == user_id).first()
     if tenant is None:
         tenant = Tenant(kind="personal", personal_user_id=user_id)
         db.add(tenant)
-        try:
-            db.commit()
-        except IntegrityError:
-            # Lost a race with a concurrent insert of the same user's personal tenant.
-            db.rollback()
-            tenant = db.query(Tenant).filter(Tenant.kind == "personal", Tenant.personal_user_id == user_id).first()
-            if tenant is None:
-                raise
+        if commit:
+            try:
+                db.commit()
+            except IntegrityError:
+                # Lost a race with a concurrent insert of the same user's personal tenant.
+                db.rollback()
+                tenant = db.query(Tenant).filter(Tenant.kind == "personal", Tenant.personal_user_id == user_id).first()
+                if tenant is None:
+                    raise
+            else:
+                db.refresh(tenant)
         else:
-            db.refresh(tenant)
+            db.flush()
 
-    get_or_create_membership(db, tenant_id=tenant.id, user_id=user_id, role="admin")
+    if commit:
+        get_or_create_membership(db, tenant_id=tenant.id, user_id=user_id, role="admin")
+    else:
+        db.add(Membership(tenant_id=tenant.id, user_id=user_id, role="admin"))
+        db.flush()
     return tenant
 
 

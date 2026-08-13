@@ -86,9 +86,13 @@ def find_or_create_user(db: Session, identity: github_oauth.GitHubIdentity) -> U
         email_verified=True,
     )
     db.add(user)
+    # flush (not commit): land the personal tenant/membership in the same transaction as
+    # this user, then commit once -- a failure between two separate commits could otherwise
+    # leave a User row with no personal tenant (#323 CodeRabbit finding).
+    db.flush()
+    tenant_repo.ensure_personal_tenant(db, user.id, commit=False)
     db.commit()
     db.refresh(user)
-    tenant_repo.ensure_personal_tenant(db, user.id)
     return user
 
 

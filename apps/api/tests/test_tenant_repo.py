@@ -109,6 +109,48 @@ def test_ensure_personal_tenant_falls_back_on_concurrent_insert_race(db):
     assert result.id == existing.id
 
 
+def test_ensure_personal_tenant_commit_false_flushes_without_committing(db):
+    # commit=False is for auth.py/github_auth.py's brand-new-user registration flows: the
+    # tenant/membership must be visible to the still-open transaction (so a caller-side
+    # query against `db` sees them) without db having committed anything yet, so the
+    # caller can commit once, atomically, alongside its own User row.
+    user = _make_user(db, "dawn@example.com")
+
+    tenant = tenant_repo.ensure_personal_tenant(db, user.id, commit=False)
+
+    assert tenant.kind == "personal"
+    membership = (
+        db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user.id).first()
+    )
+    assert membership is not None
+    assert membership.role == "admin"
+    assert db.in_transaction()
+
+
+def test_ensure_personal_tenant_commit_false_is_atomic_with_the_caller(db):
+    # Regression test for a CodeRabbit finding on #323: ensure_personal_tenant used to
+    # always commit internally, separately from the caller's own User commit -- a failure
+    # between the two commits could leave a User row with no personal tenant. With
+    # commit=False, a failure before the caller's single commit must roll back the User
+    # row too, not just leave the tenant/membership missing.
+    user = User(email="edith@example.com", name=None, password_hash=None, is_workspace_admin=False)
+    db.add(user)
+    db.flush()
+    user_id = user.id
+
+    with patch("src.core.db.Membership.__init__", side_effect=RuntimeError("simulated failure")):
+        try:
+            tenant_repo.ensure_personal_tenant(db, user_id, commit=False)
+        except RuntimeError:
+            db.rollback()
+        else:
+            raise AssertionError("expected the simulated failure to propagate")
+
+    # The caller never got to its own db.commit() -- the User row must not be visible
+    # either, proving the two are atomic rather than the tenant failure leaving a stray user.
+    assert db.query(User).filter(User.id == user_id).first() is None
+
+
 # ── get_or_create_membership / update_membership_role / delete_membership ────
 
 def test_get_or_create_membership_creates_new(db):
