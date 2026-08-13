@@ -10,11 +10,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
-from src.core.db import Org, OrgMembership, get_db
-from src.repositories import org_membership_repo, org_repo
+from src.core.db import Org, OrgMembership, Tenant, get_db
+from src.repositories import org_membership_repo, org_repo, tenant_repo
 
 _ROLE_RANK = {"member": 0, "admin": 1}
 
@@ -23,6 +24,26 @@ _ROLE_RANK = {"member": 0, "admin": 1}
 class OrgContext:
     org: Org
     membership: OrgMembership
+
+
+@dataclass
+class PersonalTenantContext:
+    tenant: Tenant
+
+
+def _set_tenant_session_context(db: Session, tenant_id: int, user_id: int) -> None:
+    # Plain SET (not SET LOCAL): a request's Session lifetime doesn't cleanly map to one
+    # transaction, so a transaction-scoped SET LOCAL could stop applying mid-request. No
+    # RLS policy reads these yet (migration 0030 adds FORCE-free policies as scaffolding
+    # only) -- this just prepares the session variable for when that lands.
+    #
+    # SET does not accept bind parameters (it's a configuration command, not a regular
+    # query) -- Postgres rejects `SET app.tenant_id = $1` with a syntax error. Both values
+    # are always int (SQLAlchemy-mapped primary keys, never caller-supplied strings), so
+    # formatting them directly into the statement is safe; int() here is a defensive type
+    # check, not a workaround.
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(text(f"SET app.user_id = {int(user_id)}"))
 
 
 def require_org_role(min_role: Literal["member", "admin"]):
@@ -40,9 +61,31 @@ def require_org_role(min_role: Literal["member", "admin"]):
         membership = org_membership_repo.get(db, org.id, user.id)
         if membership is None or _ROLE_RANK.get(membership.role, -1) < _ROLE_RANK[min_role]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
+        # org.tenant_id is nullable (see db.py's Org.tenant_id docstring) -- a legacy row
+        # resolved here via get_by_login (not get_or_create) never gets org_repo's own
+        # self-healing dual-write, so guard the same way org_repo does.
+        tenant_id = org.tenant_id
+        if tenant_id is None:
+            tenant_id = tenant_repo.get_or_create_org_tenant(db, org.id).id
+            org.tenant_id = tenant_id
+            db.commit()
+        _set_tenant_session_context(db, tenant_id, user.id)
         return OrgContext(org=org, membership=membership)
 
     return dependency
+
+
+def require_personal_tenant(
+    db: Session = Depends(get_db),
+    user: UserOut = Depends(require_auth),
+) -> PersonalTenantContext:
+    """Dependency for routes unambiguously scoped to the caller's own personal tenant --
+    not for /me/... routes that can resolve to either an org or personal tenant depending
+    on an `owner` path param (see src.services.token_resolution.resolve_owner_token);
+    wiring those is a separate design decision, deferred out of issue #190's PR 5."""
+    tenant = tenant_repo.ensure_personal_tenant(db, user.id)
+    _set_tenant_session_context(db, tenant.id, user.id)
+    return PersonalTenantContext(tenant=tenant)
 
 
 def assert_owner_matches_org(owner: str, ctx: OrgContext) -> None:

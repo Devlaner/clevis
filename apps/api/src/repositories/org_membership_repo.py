@@ -13,9 +13,15 @@ def get(db: Session, org_id: int, user_id: int) -> OrgMembership | None:
     )
 
 
+def _sync_membership_mirror(db: Session, org_id: int, membership: OrgMembership) -> None:
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    tenant_repo.upsert_membership(db, tenant_id=tenant.id, user_id=membership.user_id, role=membership.role)
+
+
 def get_or_create(db: Session, org_id: int, user_id: int, role: str) -> OrgMembership:
     membership = get(db, org_id, user_id)
     if membership is not None:
+        _sync_membership_mirror(db, org_id, membership)
         return membership
     membership = OrgMembership(org_id=org_id, user_id=user_id, role=role)
     db.add(membership)
@@ -27,10 +33,10 @@ def get_or_create(db: Session, org_id: int, user_id: int, role: str) -> OrgMembe
         membership = get(db, org_id, user_id)
         if membership is None:
             raise
+        _sync_membership_mirror(db, org_id, membership)
         return membership
     db.refresh(membership)
-    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
-    tenant_repo.get_or_create_membership(db, tenant_id=tenant.id, user_id=user_id, role=role)
+    _sync_membership_mirror(db, org_id, membership)
     return membership
 
 
@@ -49,8 +55,7 @@ def update_role(db: Session, org_id: int, user_id: int, role: str) -> OrgMembers
     membership.role = role
     db.commit()
     db.refresh(membership)
-    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
-    tenant_repo.update_membership_role(db, tenant_id=tenant.id, user_id=user_id, role=role)
+    _sync_membership_mirror(db, org_id, membership)
     return membership
 
 

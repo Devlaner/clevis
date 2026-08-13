@@ -74,6 +74,17 @@ def get_or_create_membership(db: Session, tenant_id: int, user_id: int, role: st
     return membership
 
 
+def upsert_membership(db: Session, tenant_id: int, user_id: int, role: str) -> Membership:
+    """get_or_create_membership plus role reconciliation -- unlike get_or_create_membership
+    alone, this also fixes a stale role on an already-existing row, so callers that resolve
+    a membership through more than one code path (existing found / newly created / recovered
+    from a concurrent-insert race) can call this unconditionally and always end up in sync."""
+    membership = get_or_create_membership(db, tenant_id, user_id, role)
+    if membership.role != role:
+        membership = update_membership_role(db, tenant_id, user_id, role)
+    return membership
+
+
 def update_membership_role(db: Session, tenant_id: int, user_id: int, role: str) -> Membership | None:
     membership = (
         db.query(Membership)

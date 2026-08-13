@@ -58,11 +58,10 @@ class GitHubInstallation(Base):
     # Exactly one of org_id / owner_user_id is set: org-connected installs vs. personal installs.
     org_id: Mapped[int | None] = mapped_column(ForeignKey("orgs.id"), nullable=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    # Backfilled from org_id/owner_user_id by migration 0025. Stays nullable until PR 4's
-    # dual-write lands and installation-creation code starts setting it -- enforcing NOT
-    # NULL before then would break every new installation the moment this migration deploys
-    # (see the same reasoning documented on orgs.tenant_id and invitations.tenant_id below).
-    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    # Backfilled from org_id/owner_user_id by migration 0025, dual-written by installation_repo
+    # since PR 4, NOT NULL enforced by migration 0029 now that PR 4's dual-write covers every
+    # installation-creation path.
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -173,9 +172,13 @@ class Org(Base):
     github_login: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     # 1:1 pointer to this org's tenant row (migration 0022 backfills one 'org'-kind tenant
-    # per org before this column exists; migration 0024 adds + backfills it). Stays nullable
-    # until PR 4's dual-write lands and org_provisioning.py starts setting it on every new
-    # org -- enforcing NOT NULL before then would break org creation entirely.
+    # per org before this column exists; migration 0024 adds + backfills it; org_repo has
+    # dual-written it on every org since PR 4). Stays nullable permanently, unlike
+    # invitations/github_installations.tenant_id (migration 0029) -- creating a brand-new
+    # org requires the Org and its reciprocal Tenant row to each reference the other's
+    # not-yet-existing id, and Postgres NOT NULL can't be deferred like a FK can. See
+    # migration 0029's docstring. org_repo.get_or_create's self-healing dual-write plus
+    # docs/tenant-id-verification.md's checks are the ongoing guarantee instead.
     tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
@@ -243,10 +246,9 @@ class Invitation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    # Backfilled from org_id's tenant by migration 0026. Stays nullable until PR 4's
-    # dual-write lands and invitation-creation code starts setting it -- same reasoning as
-    # orgs.tenant_id above.
-    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    # Backfilled from org_id's tenant by migration 0026, dual-written by invitation_repo
+    # since PR 4, NOT NULL enforced by migration 0029.
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
 
 
 class ScanResult(Base):
