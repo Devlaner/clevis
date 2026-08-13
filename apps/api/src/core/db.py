@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from datetime import datetime
+import logging
 
 from sqlalchemy import (
     Boolean,
@@ -19,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from src.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -176,9 +179,9 @@ class Org(Base):
     # dual-written it on every org since PR 4). Stays nullable permanently, unlike
     # invitations/github_installations.tenant_id (migration 0029) -- creating a brand-new
     # org requires the Org and its reciprocal Tenant row to each reference the other's
-    # not-yet-existing id, and Postgres NOT NULL can't be deferred like a FK can. See
-    # migration 0029's docstring. org_repo.get_or_create's self-healing dual-write plus
-    # docs/tenant-id-verification.md's checks are the ongoing guarantee instead.
+    # not-yet-existing id, and Postgres NOT NULL can't be deferred like a FK can.
+    # org_repo.get_or_create's self-healing dual-write plus the verification queries in
+    # migration 0029's docstring are the ongoing guarantee instead.
     tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
@@ -290,4 +293,19 @@ def get_db() -> Generator[Session, None, None]:
     try:
         yield db
     finally:
-        db.close()
+        # require_org_role/require_personal_tenant (src.core.rbac) set app.tenant_id/
+        # app.user_id via plain SET (not SET LOCAL, since a request can commit more than
+        # once and SET LOCAL would stop applying after the first commit). Plain SET persists
+        # for the life of the physical connection, not just this request's Session -- since
+        # SQLAlchemy's connection pool only rolls back pending transactions on checkin, an
+        # already-committed SET would otherwise silently leak into whichever unrelated
+        # request reuses this connection next. Reset explicitly before returning to the pool.
+        try:
+            db.rollback()
+            db.execute(text("RESET app.tenant_id"))
+            db.execute(text("RESET app.user_id"))
+            db.commit()
+        except Exception:
+            logger.exception("failed to reset tenant session context before connection checkin")
+        finally:
+            db.close()
