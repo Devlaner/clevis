@@ -213,7 +213,10 @@ describe("OverviewPage cockpit", () => {
         {
           repo: "acme/api",
           title: "v2",
-          due_on: "2026-08-01T00:00:00Z",
+          // relativeTime() renders anything within 60s (or in the future) as "just now" --
+          // computed relative to test execution time so this doesn't go stale as real time
+          // passes (a hardcoded near-future date drifted into "N days ago" here before).
+          due_on: new Date(Date.now() + 60_000).toISOString(),
           open_issues: 2,
           closed_issues: 8,
           progress_pct: 80,
