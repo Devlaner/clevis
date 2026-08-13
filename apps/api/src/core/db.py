@@ -1,11 +1,13 @@
 from collections.abc import Generator
 from datetime import datetime
+import logging
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -18,6 +20,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from src.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -57,6 +61,10 @@ class GitHubInstallation(Base):
     # Exactly one of org_id / owner_user_id is set: org-connected installs vs. personal installs.
     org_id: Mapped[int | None] = mapped_column(ForeignKey("orgs.id"), nullable=True)
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # Backfilled from org_id/owner_user_id by migration 0025, dual-written by installation_repo
+    # since PR 4, NOT NULL enforced by migration 0029 now that PR 4's dual-write covers every
+    # installation-creation path.
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -68,6 +76,11 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String, nullable=False)
     target: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[str] = mapped_column(Text, nullable=False)
+    # Nullable, no historical backfill (migration 0028) -- actor/target are free text, not
+    # FKs, so pre-migration rows can't be reliably attributed to a tenant. Per the design
+    # decision on #190, these stay visible only via a require_workspace_admin-gated view
+    # once RLS lands, never to ordinary tenant members.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -106,6 +119,9 @@ class SavedToken(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+    # Best-effort backfill by migration 0027, matched on org (free text, not an FK) against
+    # orgs.github_login -- stays nullable since legacy rows for a renamed/deleted org won't match.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
 
 
 class User(Base):
@@ -143,6 +159,13 @@ class User(Base):
 
 class Org(Base):
     __tablename__ = "orgs"
+    __table_args__ = (
+        # Composite FK instead of a plain tenant_id -> tenants.id FK: requires that
+        # whatever tenant tenant_id names must itself have org_id = this exact org's id,
+        # so tenant_id can't point at a personal tenant, another org's tenant, or a tenant
+        # shared across multiple orgs (see migration 0024's docstring).
+        ForeignKeyConstraint(["tenant_id", "id"], ["tenants.id", "tenants.org_id"], name="fk_orgs_tenant_id_reciprocal"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # Nullable: not known for orgs backfilled from pre-existing installations; filled in
@@ -151,6 +174,15 @@ class Org(Base):
     github_org_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
     github_login: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # 1:1 pointer to this org's tenant row (migration 0022 backfills one 'org'-kind tenant
+    # per org before this column exists; migration 0024 adds + backfills it; org_repo has
+    # dual-written it on every org since PR 4). Stays nullable permanently, unlike
+    # invitations/github_installations.tenant_id (migration 0029) -- creating a brand-new
+    # org requires the Org and its reciprocal Tenant row to each reference the other's
+    # not-yet-existing id, and Postgres NOT NULL can't be deferred like a FK can.
+    # org_repo.get_or_create's self-healing dual-write plus the verification queries in
+    # migration 0029's docstring are the ongoing guarantee instead.
+    tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class OrgMembership(Base):
@@ -159,6 +191,47 @@ class OrgMembership(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)  # "admin" | "member"
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Tenant(Base):
+    __tablename__ = "tenants"
+    __table_args__ = (
+        CheckConstraint(
+            "(kind = 'org' AND org_id IS NOT NULL AND personal_user_id IS NULL) "
+            "OR (kind = 'personal' AND org_id IS NULL AND personal_user_id IS NOT NULL)",
+            name="ck_tenants_kind_xor",
+        ),
+        Index("uq_tenants_org_id", "org_id", unique=True, postgresql_where="org_id IS NOT NULL"),
+        Index(
+            "uq_tenants_personal_user_id",
+            "personal_user_id",
+            unique=True,
+            postgresql_where="personal_user_id IS NOT NULL",
+        ),
+        # Lets orgs.tenant_id declare a composite FK to (id, org_id), enforcing that an
+        # org's tenant_id can only point at a tenant whose org_id reciprocally points back
+        # at that same org -- not a personal tenant, another org's tenant, or a tenant
+        # shared by multiple orgs. Redundant with id's own PK uniqueness in isolation, but
+        # required for the composite FK to be legal.
+        UniqueConstraint("id", "org_id", name="uq_tenants_id_org_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)  # "org" | "personal"
+    org_id: Mapped[int | None] = mapped_column(ForeignKey("orgs.id"), nullable=True)
+    personal_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Membership(Base):
+    __tablename__ = "memberships"
+    __table_args__ = (UniqueConstraint("tenant_id", "user_id", name="uq_memberships_tenant_user"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False)  # "admin" | "member"
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -176,6 +249,9 @@ class Invitation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Backfilled from org_id's tenant by migration 0026, dual-written by invitation_repo
+    # since PR 4, NOT NULL enforced by migration 0029.
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
 
 
 class ScanResult(Base):
@@ -194,6 +270,10 @@ class ScanResult(Base):
     # by org membership, not this column.
     scanned_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Best-effort backfill by migration 0027: matched via owner -> orgs.github_login first,
+    # falling back to scanned_by_user_id's personal tenant. Stays nullable -- some legacy
+    # rows (renamed/deleted org) won't match either path.
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
 
 
 class AppConfig(Base):
@@ -213,4 +293,25 @@ def get_db() -> Generator[Session, None, None]:
     try:
         yield db
     finally:
-        db.close()
+        # require_org_role/require_personal_tenant (src.core.rbac) set app.tenant_id/
+        # app.user_id via plain SET (not SET LOCAL, since a request can commit more than
+        # once and SET LOCAL would stop applying after the first commit). Plain SET persists
+        # for the life of the physical connection, not just this request's Session -- since
+        # SQLAlchemy's connection pool only rolls back pending transactions on checkin, an
+        # already-committed SET would otherwise silently leak into whichever unrelated
+        # request reuses this connection next. Reset explicitly before returning to the pool.
+        try:
+            db.rollback()
+            db.execute(text("RESET app.tenant_id"))
+            db.execute(text("RESET app.user_id"))
+            db.commit()
+            db.close()
+        except Exception:
+            # A failure partway through (e.g. a transient network drop after RESET but
+            # before commit) leaves it unclear whether the reset actually took -- closing
+            # normally here would return that connection to the pool for reuse anyway.
+            # invalidate() instead forces the pool to discard the underlying DBAPI
+            # connection rather than risk handing a possibly-still-tenant-scoped
+            # connection to an unrelated later request.
+            logger.exception("failed to reset tenant session context; invalidating connection instead of reusing it")
+            db.invalidate()

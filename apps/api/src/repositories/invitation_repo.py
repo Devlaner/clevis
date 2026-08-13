@@ -4,11 +4,13 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from src.core.db import Invitation
+from src.repositories import tenant_repo
 
 INVITATION_LIFETIME = timedelta(days=7)
 
 
 def create(db: Session, org_id: int, email: str, invited_by_user_id: int) -> Invitation:
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
     invitation = Invitation(
         org_id=org_id,
         email=email,
@@ -16,6 +18,7 @@ def create(db: Session, org_id: int, email: str, invited_by_user_id: int) -> Inv
         status="pending",
         invited_by_user_id=invited_by_user_id,
         expires_at=datetime.now(timezone.utc) + INVITATION_LIFETIME,
+        tenant_id=tenant.id,
     )
     db.add(invitation)
     db.commit()

@@ -24,6 +24,48 @@ def test_upsert_creates_new_row(db):
     assert row.installation_id == 1
 
 
+def test_upsert_sets_tenant_id_for_org_scoped_installation(db):
+    from src.core.db import Tenant
+
+    org_id = _acme_org_id(db)
+    row = installation_repo.upsert(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=1, org_id=org_id
+    )
+    assert row.tenant_id is not None
+    tenant = db.query(Tenant).filter(Tenant.id == row.tenant_id).first()
+    assert tenant.kind == "org"
+    assert tenant.org_id == org_id
+
+
+def test_upsert_sets_tenant_id_for_personal_installation(db):
+    from src.core.db import Tenant, User
+
+    user = User(email="dev2@example.com", name=None, password_hash=None, is_workspace_admin=False)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    row = installation_repo.upsert(
+        db, account_login="octocat", account_type="User", auth_mode="app", installation_id=7, owner_user_id=user.id
+    )
+
+    assert row.tenant_id is not None
+    tenant = db.query(Tenant).filter(Tenant.id == row.tenant_id).first()
+    assert tenant.kind == "personal"
+    assert tenant.personal_user_id == user.id
+
+
+def test_upsert_update_branch_backfills_tenant_id(db):
+    org_id = _acme_org_id(db)
+    installation_repo.upsert(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=1, org_id=org_id
+    )
+    updated = installation_repo.upsert(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=2, org_id=org_id
+    )
+    assert updated.tenant_id is not None
+
+
 def test_upsert_updates_existing_row(db):
     org_id = _acme_org_id(db)
     installation_repo.upsert(

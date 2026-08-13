@@ -70,6 +70,30 @@ def test_second_user_is_member(db):
     assert second.is_workspace_admin is False
 
 
+def test_new_user_gets_a_personal_tenant_and_self_membership(db):
+    from src.core.db import Membership, Tenant
+
+    user = find_or_create_user(db, _identity())
+
+    tenant = db.query(Tenant).filter(Tenant.kind == "personal", Tenant.personal_user_id == user.id).first()
+    assert tenant is not None
+    membership = (
+        db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user.id).first()
+    )
+    assert membership is not None
+    assert membership.role == "admin"
+
+
+def test_returning_user_does_not_duplicate_the_personal_tenant(db):
+    from src.core.db import Tenant
+
+    first = find_or_create_user(db, _identity())
+    find_or_create_user(db, _identity(name="Octo Updated"))  # returning-user branch
+
+    tenants = db.query(Tenant).filter(Tenant.kind == "personal", Tenant.personal_user_id == first.id).all()
+    assert len(tenants) == 1
+
+
 def test_refuses_to_auto_link_an_existing_email_registered_account(db):
     # Regression test for the account-takeover fix: self-registration has no email
     # verification anywhere in this app, so silently linking a GitHub identity onto an

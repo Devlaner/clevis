@@ -29,6 +29,7 @@ from src.core.auth import create_access_token, set_session_cookie
 from src.core.config import settings
 from src.core.db import User, get_db
 from src.core.rate_limit import rate_limit
+from src.repositories import tenant_repo
 from src.services import github_oauth, org_provisioning
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,11 @@ def find_or_create_user(db: Session, identity: github_oauth.GitHubIdentity) -> U
         email_verified=True,
     )
     db.add(user)
+    # flush (not commit): land the personal tenant/membership in the same transaction as
+    # this user, then commit once -- a failure between two separate commits could otherwise
+    # leave a User row with no personal tenant (#323 CodeRabbit finding).
+    db.flush()
+    tenant_repo.ensure_personal_tenant(db, user.id, commit=False)
     db.commit()
     db.refresh(user)
     return user
