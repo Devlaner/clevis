@@ -70,9 +70,15 @@ def update_role(db: Session, org_id: int, user_id: int, role: str) -> OrgMembers
 
 
 def delete(db: Session, org_id: int, user_id: int) -> None:
+    # Delete the mirror before committing the OrgMembership delete -- committing first (the
+    # original ordering) released the DELETE's own implicit row lock before the mirror was
+    # touched, leaving a window where a concurrent get_or_create() could find the row gone,
+    # legitimately re-create a fresh OrgMembership + mirror, and then have this function's
+    # now-unblocked mirror delete remove that brand-new mirror out from under it. Same
+    # principle as update_role's lock-then-sync-then-commit ordering above.
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
     db.query(OrgMembership).filter(
         OrgMembership.org_id == org_id, OrgMembership.user_id == user_id
     ).delete()
-    db.commit()
-    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
     tenant_repo.delete_membership(db, tenant_id=tenant.id, user_id=user_id)
+    db.commit()
