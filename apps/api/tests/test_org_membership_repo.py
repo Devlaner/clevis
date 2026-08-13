@@ -296,6 +296,99 @@ def test_delete_blocks_a_concurrent_get_or_create_until_the_mirror_delete_commit
         session_a.close()
 
 
+def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirror_sync_commits():
+    """Regression test for a CodeRabbit finding on #323's 2nd review: get_or_create's
+    new-row path used to commit the freshly-inserted OrgMembership, then sync its mirror
+    with no lock held across that gap. A concurrent delete() landing in the gap would
+    remove the just-created row and find no mirror yet, then have this call resume and
+    create a mirror for a membership that's already revoked. Fixed by re-locking the row
+    immediately after the insert commits, before syncing -- same lock-then-sync ordering
+    as update_role's fix. Needs two genuinely separate connections, same reasoning as the
+    other concurrency tests in this file (the race only exists across real transactions)."""
+    setup = SessionLocal()
+    org = org_repo.get_or_create(setup, github_login="acme-lock-test-3")
+    user = User(email="judy@example.com", name=None, password_hash=None, is_workspace_admin=False)
+    setup.add(user)
+    setup.commit()
+    setup.refresh(user)
+    org_id, user_id = org.id, user.id
+    setup.close()
+    # No get_or_create() call yet for (org_id, user_id) -- the pair doesn't exist, so the
+    # first call below goes down the new-row insert path, not the early-return path.
+
+    reached_lock = threading.Event()
+    release_lock = threading.Event()
+    original_sync = org_membership_repo._sync_membership_mirror
+
+    def paused_sync(db, org_id, membership):
+        reached_lock.set()
+        assert release_lock.wait(timeout=5), "test setup never released the paused sync"
+        original_sync(db, org_id, membership)
+
+    create_result: dict[str, bool] = {}
+    delete_result: dict[str, bool] = {}
+
+    def run_get_or_create(session_a):
+        org_membership_repo.get_or_create(session_a, org_id=org_id, user_id=user_id, role="member")
+        create_result["finished"] = True
+
+    def run_delete():
+        session_b = SessionLocal()
+        try:
+            assert reached_lock.wait(timeout=5), "get_or_create never reached its locked section"
+            org_membership_repo.delete(session_b, org_id=org_id, user_id=user_id)
+            delete_result["finished"] = True
+        finally:
+            session_b.close()
+
+    session_a = SessionLocal()
+    try:
+        with patch.object(org_membership_repo, "_sync_membership_mirror", paused_sync):
+            create_thread = threading.Thread(target=run_get_or_create, args=(session_a,))
+            create_thread.start()
+            assert reached_lock.wait(timeout=5), "get_or_create never reached its locked section"
+
+            delete_thread = threading.Thread(target=run_delete)
+            delete_thread.start()
+            delete_thread.join(timeout=0.3)
+            assert not delete_result, "delete() must block while get_or_create holds the row lock"
+
+            release_lock.set()
+            create_thread.join(timeout=5)
+            delete_thread.join(timeout=5)
+        assert create_result.get("finished") is True
+        assert delete_result.get("finished") is True
+
+        # The delete landed after get_or_create's sync committed the mirror, so the final
+        # state must reflect the delete -- no leftover membership or mirror.
+        remaining = (
+            session_a.query(OrgMembership)
+            .filter(OrgMembership.org_id == org_id, OrgMembership.user_id == user_id)
+            .first()
+        )
+        assert remaining is None
+        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+        mirror = (
+            session_a.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
+        )
+        assert mirror is None
+    finally:
+        session_a.rollback()
+        session_a.query(OrgMembership).filter(OrgMembership.org_id == org_id).delete()
+        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+        if tenant is not None:
+            session_a.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
+            org_row = session_a.query(Org).filter(Org.id == org_id).first()
+            if org_row is not None:
+                org_row.tenant_id = None
+                session_a.commit()
+            session_a.query(Tenant).filter(Tenant.id == tenant.id).delete()
+        session_a.query(Org).filter(Org.id == org_id).delete()
+        session_a.query(User).filter(User.id == user_id).delete()
+        session_a.commit()
+        session_a.close()
+
+
 def test_dual_write_uses_the_same_tenant_for_every_membership_in_an_org(db):
     org = org_repo.get_or_create(db, github_login="acme")
     admin = _make_user(db, "erin@example.com")

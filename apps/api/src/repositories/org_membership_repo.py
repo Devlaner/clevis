@@ -37,7 +37,15 @@ def get_or_create(db: Session, org_id: int, user_id: int, role: str) -> OrgMembe
             raise
         _sync_membership_mirror(db, org_id, membership)
         return membership
-    db.refresh(membership)
+    # Re-lock the row we just committed before syncing its mirror -- the commit above
+    # released any lock, opening a window where a concurrent delete() could remove this
+    # row and find no mirror yet (nothing synced), then have this call resume and create a
+    # mirror for a membership that's already revoked (CodeRabbit finding on #323's 2nd
+    # review). If the re-lock finds the row already gone, retry from scratch instead of
+    # syncing a mirror for a membership that no longer exists.
+    membership = get(db, org_id, user_id, for_update=True)
+    if membership is None:
+        return get_or_create(db, org_id, user_id, role)
     _sync_membership_mirror(db, org_id, membership)
     return membership
 
