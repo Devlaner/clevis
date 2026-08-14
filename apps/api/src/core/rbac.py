@@ -14,8 +14,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
-from src.core.db import Org, OrgMembership, Tenant, get_db
-from src.repositories import org_membership_repo, org_repo, tenant_repo
+from src.core.db import Membership, Org, Tenant, get_db
+from src.repositories import org_repo, tenant_repo
 
 _ROLE_RANK = {"member": 0, "admin": 1}
 
@@ -23,7 +23,7 @@ _ROLE_RANK = {"member": 0, "admin": 1}
 @dataclass
 class OrgContext:
     org: Org
-    membership: OrgMembership
+    membership: Membership
 
 
 @dataclass
@@ -58,14 +58,17 @@ def require_org_role(min_role: Literal["member", "admin"]):
         org = org_repo.get_by_login(db, org_login)
         if org is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Org not found")
-        membership = org_membership_repo.get(db, org.id, user.id)
-        if membership is None or _ROLE_RANK.get(membership.role, -1) < _ROLE_RANK[min_role]:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
         # org.tenant_id is nullable (see db.py's Org.tenant_id docstring) -- a legacy row
         # resolved here via get_by_login (not get_or_create) never gets org_repo's own
         # self-healing dual-write, so reuse the exact same helper org_repo.get_or_create
-        # itself uses, rather than a separate hand-rolled copy of the same logic.
+        # itself uses, rather than a separate hand-rolled copy of the same logic. Resolved
+        # ahead of the role check (issue #190 step 6a) so the role lookup itself can read
+        # from `memberships` (tenant_id-keyed), the new source of truth for org RBAC, instead
+        # of the legacy `org_memberships` table (org_id-keyed) it used to read.
         org = org_repo.ensure_tenant_linked(db, org)
+        membership = tenant_repo.get_membership(db, org.tenant_id, user.id)
+        if membership is None or _ROLE_RANK.get(membership.role, -1) < _ROLE_RANK[min_role]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
         _set_tenant_session_context(db, org.tenant_id, user.id)
         return OrgContext(org=org, membership=membership)
 

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from src.core.auth import UserOut, require_auth
 from src.core.db import get_db
 from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
-from src.repositories import installation_repo, job_repo, org_membership_repo, org_repo, scan_results_repo
+from src.repositories import installation_repo, job_repo, org_repo, scan_results_repo, tenant_repo
 from src.routers.github import _cached_events
 from src.schemas.analytics import (
     AnalyticsInput,
@@ -86,8 +86,10 @@ def _user_can_read_history(db: Session, user: UserOut, owner: str) -> bool:
     personal scan against that owner before (scanned_by_user_id, for owners with
     no workspace Org/membership at all -- the raw-PAT-paste flow)."""
     org = org_repo.get_by_login(db, owner)
-    if org is not None and org_membership_repo.get(db, org.id, user.id) is not None:
-        return True
+    if org is not None:
+        org = org_repo.ensure_tenant_linked(db, org)
+        if tenant_repo.get_membership(db, org.tenant_id, user.id) is not None:
+            return True
     if installation_repo.get_for_user(db, owner_user_id=user.id, account_login=owner) is not None:
         return True
     return scan_results_repo.exists_for_user(db, owner=owner, user_id=user.id)

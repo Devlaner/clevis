@@ -30,7 +30,7 @@ import httpx
 from sqlalchemy.orm import Session
 
 from src.core.db import User
-from src.repositories import org_membership_repo, org_repo
+from src.repositories import org_membership_repo, org_repo, tenant_repo
 from src.services import github_oauth
 
 logger = logging.getLogger(__name__)
@@ -55,12 +55,11 @@ def sync_org_admin_memberships(db: Session, user: User, user_token: str) -> None
         if membership.role != "admin":
             org_membership_repo.update_role(db, org_id=org.id, user_id=user.id, role="admin")
 
-    for membership in org_membership_repo.list_for_user(db, user.id):
-        org = org_repo.get_by_id(db, membership.org_id)
-        if org is None or org.github_org_id is None:
+    for org, membership in tenant_repo.list_org_memberships_for_user(db, user.id):
+        if org.github_org_id is None:
             continue
         gh_role = gh_role_by_org_id.get(org.github_org_id)
         if gh_role is None:
-            org_membership_repo.delete(db, org_id=membership.org_id, user_id=user.id)
+            org_membership_repo.delete(db, org_id=org.id, user_id=user.id)
         elif gh_role == "member" and membership.role != "member":
-            org_membership_repo.update_role(db, org_id=membership.org_id, user_id=user.id, role="member")
+            org_membership_repo.update_role(db, org_id=org.id, user_id=user.id, role="member")
