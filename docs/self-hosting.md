@@ -50,7 +50,7 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
 
    Don't rely on re-running `alembic upgrade head` for step 2 — if migration `0020` already applied (as a no-op, since the role didn't exist yet), Alembic considers it done and won't re-run it. Restart the `worker` container afterwards to pick up the new credential.
 
-6. (Optional, ahead of a future cutover — issue #330) Provision a dedicated non-superuser Postgres role for the API: set `API_DB_PASSWORD` in `.env`. Setting this var alone has no runtime effect yet — nothing connects as this role until a later change switches the API's runtime connection over to it (see issue #330) — but the role and its grants (table, schema, and per-sequence privileges, matching exactly what RLS-gated tenant isolation will need) can be provisioned ahead of time. Same fresh-volume-only caveat as the worker's credential above. If you're setting this on an **existing** deployment, run this once by hand instead — unlike the worker (which only ever needs `SELECT`/`UPDATE` on `jobs` and `SELECT` on `app_config`), the API needs schema `USAGE`, table privileges on every table, and sequence privileges for every serial primary key, so bundle all three into one step rather than relying on `alembic upgrade head` to replay already-applied migrations:
+6. (Recommended) Give the API its own non-superuser Postgres credential, separate from `DB_USER`/`DB_PASSWORD`: set `API_DB_PASSWORD` in `.env`. Without this, the API connects as `DB_USER` — the `initdb` bootstrap superuser — which unconditionally bypasses Row-Level Security, so tenant isolation is enforced only at the application layer (issue #330). Same fresh-volume-only caveat as the worker's credential above. If you're setting this on an **existing** deployment, run this once by hand instead — unlike the worker (which only ever needs `SELECT`/`UPDATE` on `jobs` and `SELECT` on `app_config`), the API needs schema `USAGE`, table privileges on every table, and sequence privileges for every serial primary key, so bundle all three into one step rather than relying on `alembic upgrade head` to replay already-applied migrations:
 
    ```bash
    docker compose up -d db
@@ -63,7 +63,7 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
    "'
    ```
 
-   This bundles role creation with all three grant kinds in one atomic step, so an operator provisioning an existing deployment never ends up with a role that has `CONNECT` but no table/schema/sequence privileges (which would happen if the role were created by hand *after* migrations `0032` already ran, since Alembic won't replay an already-applied migration once the role exists).
+   This bundles role creation with all three grant kinds in one atomic step, so an operator provisioning an existing deployment never ends up with a role that has `CONNECT` but no table/schema/sequence privileges (which would happen if the role were created by hand *after* migrations `0032` already ran, since Alembic won't replay an already-applied migration once the role exists). Restart the `api` container afterwards to pick up the new credential.
 
 7. Start the stack:
 

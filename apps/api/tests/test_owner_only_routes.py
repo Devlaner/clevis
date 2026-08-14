@@ -5,6 +5,7 @@ per-org column to scope by), plus org-role enforcement for the actions-cache rou
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import User, get_db
@@ -31,6 +32,11 @@ def _client(router, db, user, prefix=""):
     app.include_router(router, prefix=prefix)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[require_auth] = lambda: user
+    # Issue #330: overriding require_auth for tests bypasses its real body, including the
+    # SET app.user_id side effect (src.core.db.set_session_user) RLS's self-access clauses
+    # (migration 0031) depend on -- set it here directly so tests exercise the same session
+    # context a real authenticated request would have.
+    db.execute(text(f"SET app.user_id = {user.id}"))
     return TestClient(app)
 
 
@@ -82,6 +88,13 @@ def test_tokens_resolve_non_owner_forbidden(db):
 
 def test_tokens_resolve_writes_audit_log(db):
     from src.core.db import AuditLog
+
+    # No org "acme" exists yet, so upsert_token's best-effort tenant lookup finds nothing
+    # and resolve_token's own fallback needs a real personal tenant for _OWNER -- that
+    # requires an actual users row (tenants.personal_user_id FK), which the require_auth
+    # override alone doesn't provide.
+    db.add(User(id=_OWNER.id, email=_OWNER.email, name=None, password_hash=None, is_workspace_admin=True))
+    db.commit()
 
     client = _client(tokens_router, db, _OWNER, prefix="/tokens")
     client.put("/tokens/acme", json={"token": "ghp_test", "label": "acme"})

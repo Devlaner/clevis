@@ -16,7 +16,7 @@ from src.core._crypto import decrypt_job_token, encrypt_job_token
 from src.core.auth import UserOut, require_workspace_admin
 from src.core.config import settings
 from src.core.db import SavedToken, get_db
-from src.repositories import audit_repo
+from src.repositories import audit_repo, org_repo, tenant_repo
 
 router = APIRouter()
 
@@ -68,12 +68,22 @@ def upsert_token(
         body.token.get_secret_value(),
         settings.job_secret_key.get_secret_value(),
     )
+    # Best-effort tenant_id resolution (issue #330): this legacy fallback lets an admin
+    # save a PAT for any org string, including one Clevis has never connected -- if a
+    # matching Org row exists, link its tenant now so RLS's WITH CHECK (strict equality,
+    # no OR-NULL escape -- see migration 0030's docstring) can accept the write; if not,
+    # tenant_id stays NULL (migration 0034 loosens WITH CHECK for exactly this case).
+    existing_org = org_repo.get_by_login_ci(db, org)
+    tenant_id = org_repo.ensure_tenant_linked(db, existing_org).tenant_id if existing_org else None
+
     row = db.query(SavedToken).filter_by(org=org).first()
     if row:
         row.encrypted_token = encrypted
         row.label = body.label
+        if row.tenant_id is None:
+            row.tenant_id = tenant_id
     else:
-        row = SavedToken(org=org, label=body.label, encrypted_token=encrypted)
+        row = SavedToken(org=org, label=body.label, encrypted_token=encrypted, tenant_id=tenant_id)
         db.add(row)
     db.commit()
     db.refresh(row)
@@ -94,7 +104,11 @@ def resolve_token(
         row.encrypted_token,
         settings.job_secret_key.get_secret_value(),
     )
-    audit_repo.write(db, user.email, "token.resolve", body.org, {})
+    # row.tenant_id is best-effort (see upsert_token) -- falls back to the acting admin's
+    # own personal tenant when the saved token predates a matching Org, or never had one,
+    # so this write always has a real tenant_id to satisfy audit_logs' strict RLS policy.
+    tenant_id = row.tenant_id or tenant_repo.ensure_personal_tenant(db, user.id).id
+    audit_repo.write(db, user.email, "token.resolve", body.org, {}, tenant_id=tenant_id)
     return VerifyTokenResponse(token=raw)
 
 

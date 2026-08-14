@@ -1,4 +1,4 @@
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,16 @@ def ensure_tenant_linked(db: Session, org: Org) -> Org:
     if org.tenant_id is not None:
         return org
     tenant = tenant_repo.get_or_create_org_tenant(db, org.id)
+    # Issue #330: under RLS, this UPDATE's WITH CHECK requires tenant_id to match
+    # app.tenant_id (see migration 0034) -- but no request-scoped caller could have set
+    # app.tenant_id to this value yet, since tenant.id was only just created above. Safe
+    # to set it here directly: it's this exact org's own brand-new tenant, not a
+    # caller-supplied value. SET LOCAL (not the plain SET rbac.py's
+    # set_tenant_session_context uses) scopes this to only the transaction this commit
+    # is about to close, so it doesn't leak into whatever the caller's session does next
+    # (e.g. a 403 rejection right after must leave no tenant context behind -- see
+    # test_rbac.py's test_require_org_role_does_not_set_session_vars_on_403).
+    db.execute(text(f"SET LOCAL app.tenant_id = {int(tenant.id)}"))
     org.tenant_id = tenant.id
     db.commit()
     db.refresh(org)

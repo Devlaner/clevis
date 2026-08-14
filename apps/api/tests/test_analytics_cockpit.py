@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import Job, User, get_db
-from src.repositories import scan_results_repo
+from src.repositories import org_repo, scan_results_repo
 from src.routers.analytics import router
 
 _HTTP_ERROR = httpx.HTTPStatusError(
@@ -93,8 +93,9 @@ def test_cockpit_no_token_available_returns_400(http):
 
 
 def test_cockpit_success_all_sources(http, db, mock_user):
-    scan_results_repo.insert(db, owner="acme", score=70, total_checks=5, failed_checks=1, checks=[])
-    scan_results_repo.insert(db, owner="acme", score=85, total_checks=5, failed_checks=0, checks=[])
+    org = org_repo.get_or_create(db, github_login="acme")
+    scan_results_repo.insert(db, owner="acme", score=70, total_checks=5, failed_checks=1, checks=[], tenant_id=org.tenant_id)
+    scan_results_repo.insert(db, owner="acme", score=85, total_checks=5, failed_checks=0, checks=[], tenant_id=org.tenant_id)
     for status in ("done", "done", "done", "failed"):
         job = Job(job_type="github.clear_actions_cache", payload="{}", status=status)
         db.add(job)
