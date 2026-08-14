@@ -31,11 +31,12 @@ class PersonalTenantContext:
     tenant: Tenant
 
 
-def _set_tenant_session_context(db: Session, tenant_id: int, user_id: int) -> None:
+def set_tenant_session_context(db: Session, tenant_id: int, user_id: int) -> None:
     # Plain SET (not SET LOCAL): a request's Session lifetime doesn't cleanly map to one
-    # transaction, so a transaction-scoped SET LOCAL could stop applying mid-request. No
-    # RLS policy reads these yet (migration 0030 adds FORCE-free policies as scaffolding
-    # only) -- this just prepares the session variable for when that lands.
+    # transaction, so a transaction-scoped SET LOCAL could stop applying mid-request. Read
+    # by migration 0030's RLS policies (tenant_id match) and migration 0031's widened
+    # self-access clause (user_id match, via src.core.db.set_session_user -- this function's
+    # narrower sibling for write paths that know the acting user but not a single tenant).
     #
     # SET does not accept bind parameters (it's a configuration command, not a regular
     # query) -- Postgres rejects `SET app.tenant_id = $1` with a syntax error. Both values
@@ -69,7 +70,7 @@ def require_org_role(min_role: Literal["member", "admin"]):
         membership = tenant_repo.get_membership(db, org.tenant_id, user.id)
         if membership is None or _ROLE_RANK.get(membership.role, -1) < _ROLE_RANK[min_role]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
-        _set_tenant_session_context(db, org.tenant_id, user.id)
+        set_tenant_session_context(db, org.tenant_id, user.id)
         return OrgContext(org=org, membership=membership)
 
     return dependency
@@ -84,7 +85,7 @@ def require_personal_tenant(
     on an `owner` path param (see src.services.token_resolution.resolve_owner_token);
     wiring those is a separate design decision, deferred out of issue #190's PR 5."""
     tenant = tenant_repo.ensure_personal_tenant(db, user.id)
-    _set_tenant_session_context(db, tenant.id, user.id)
+    set_tenant_session_context(db, tenant.id, user.id)
     return PersonalTenantContext(tenant=tenant)
 
 

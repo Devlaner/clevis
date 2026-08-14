@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import Membership, Org, User, get_db
-from src.core.rbac import OrgContext, require_org_role
+from src.core.rbac import OrgContext, require_org_role, set_tenant_session_context
 from src.repositories import audit_repo, installation_repo, org_membership_repo, org_repo, tenant_repo
 from src.schemas.installation import (
     InstallationLookupOut,
@@ -173,6 +173,12 @@ def sync_org_installation(
     if not is_known_admin:
         org = _bootstrap_org_admin_from_installation(db, db_user, org_login, payload.installation_id)
 
+    # Issue #190 step 6c: github_installations' org-scoped rows have no per-row user column,
+    # so migration 0031's self-access clause (owner_user_id match) can't cover this write the
+    # way it covers personal installations -- org.tenant_id is already resolved by this point
+    # (ensure_tenant_linked above, or _bootstrap_org_admin_from_installation's own
+    # org_repo.get_or_create), so set the real tenant context explicitly instead.
+    set_tenant_session_context(db, org.tenant_id, user.id)
     row = installation_repo.create(
         db,
         account_login=payload.account_login,

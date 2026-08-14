@@ -288,6 +288,20 @@ engine = create_engine(settings.database_url.get_secret_value())
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 
+def set_session_user(db: Session, user_id: int) -> None:
+    """Sets app.user_id alone, for write paths that know the acting user but not (yet, or
+    ever) a single tenant -- e.g. require_auth (every authenticated request), OAuth-login
+    provisioning across multiple orgs, and pre-login user-creation flows. Issue #190 step
+    6c: migration 0031's memberships/github_installations policies accept a row whose
+    user_id/owner_user_id matches this alongside the existing tenant_id match, since every
+    write to those tables is confirmed self-scoped (the row's own user, never someone
+    else's). src.core.rbac's _set_tenant_session_context sets both this and app.tenant_id
+    together once a specific tenant is actually known; this is the narrower, more widely
+    applicable half of that. Same plain-SET reasoning as that function -- see its docstring.
+    """
+    db.execute(text(f"SET app.user_id = {int(user_id)}"))
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
