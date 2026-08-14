@@ -12,6 +12,7 @@ def insert(
     total_checks: int,
     failed_checks: int,
     checks: list[dict],
+    tenant_id: int | None = None,
     scanned_by_user_id: int | None = None,
 ) -> None:
     db.add(
@@ -21,6 +22,7 @@ def insert(
             total_checks=total_checks,
             failed_checks=failed_checks,
             checks_json=json.dumps(checks),
+            tenant_id=tenant_id,
             scanned_by_user_id=scanned_by_user_id,
         )
     )
