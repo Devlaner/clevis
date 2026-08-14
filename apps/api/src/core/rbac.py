@@ -47,6 +47,31 @@ def set_tenant_session_context(db: Session, tenant_id: int, user_id: int) -> Non
     db.execute(text(f"SET app.user_id = {int(user_id)}"))
 
 
+def resolve_org_role(db: Session, org_login: str, user_id: int, min_role: Literal["member", "admin"]) -> OrgContext | None:
+    """Same resolution logic require_org_role's dependency raises on, but returns None
+    instead of raising when org_login doesn't exist or the membership doesn't meet
+    min_role. Shared by require_org_role itself and by installations.py's
+    sync_org_installation, which needs a non-raising check to decide whether to take its
+    known-admin fast path or fall through to first-time GitHub-verified bootstrap --
+    keeping the two checks from silently drifting apart (issue #190 CodeRabbit follow-up)."""
+    org = org_repo.get_by_login(db, org_login)
+    if org is None:
+        return None
+    # org.tenant_id is nullable (see db.py's Org.tenant_id docstring) -- a legacy row
+    # resolved here via get_by_login (not get_or_create) never gets org_repo's own
+    # self-healing dual-write, so reuse the exact same helper org_repo.get_or_create
+    # itself uses, rather than a separate hand-rolled copy of the same logic. Resolved
+    # ahead of the role check (issue #190 step 6a) so the role lookup itself can read
+    # from `memberships` (tenant_id-keyed), the new source of truth for org RBAC, instead
+    # of the legacy `org_memberships` table (org_id-keyed) it used to read.
+    org = org_repo.ensure_tenant_linked(db, org)
+    membership = tenant_repo.get_membership(db, org.tenant_id, user_id)
+    if membership is None or _ROLE_RANK.get(membership.role, -1) < _ROLE_RANK[min_role]:
+        return None
+    set_tenant_session_context(db, org.tenant_id, user_id)
+    return OrgContext(org=org, membership=membership)
+
+
 def require_org_role(min_role: Literal["member", "admin"]):
     """Dependency factory: 404 if org_login (path param) doesn't exist, 403 if the
     current user isn't a member of it or is below min_role."""
@@ -56,22 +81,12 @@ def require_org_role(min_role: Literal["member", "admin"]):
         db: Session = Depends(get_db),
         user: UserOut = Depends(require_auth),
     ) -> OrgContext:
-        org = org_repo.get_by_login(db, org_login)
-        if org is None:
+        ctx = resolve_org_role(db, org_login, user.id, min_role)
+        if ctx is not None:
+            return ctx
+        if org_repo.get_by_login(db, org_login) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Org not found")
-        # org.tenant_id is nullable (see db.py's Org.tenant_id docstring) -- a legacy row
-        # resolved here via get_by_login (not get_or_create) never gets org_repo's own
-        # self-healing dual-write, so reuse the exact same helper org_repo.get_or_create
-        # itself uses, rather than a separate hand-rolled copy of the same logic. Resolved
-        # ahead of the role check (issue #190 step 6a) so the role lookup itself can read
-        # from `memberships` (tenant_id-keyed), the new source of truth for org RBAC, instead
-        # of the legacy `org_memberships` table (org_id-keyed) it used to read.
-        org = org_repo.ensure_tenant_linked(db, org)
-        membership = tenant_repo.get_membership(db, org.tenant_id, user.id)
-        if membership is None or _ROLE_RANK.get(membership.role, -1) < _ROLE_RANK[min_role]:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
-        set_tenant_session_context(db, org.tenant_id, user.id)
-        return OrgContext(org=org, membership=membership)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
 
     return dependency
 
