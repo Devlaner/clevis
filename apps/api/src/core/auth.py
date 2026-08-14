@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
-from src.core.db import User, get_db
+from src.core.db import User, get_db, set_session_user
 
 _ALGORITHM = "HS256"
 _TOKEN_EXPIRE_DAYS = 30
@@ -119,6 +119,12 @@ def require_auth(
     db_user = db.query(User).filter(User.id == user_id).first()
     if db_user is None or db_user.token_version != payload.get("token_version", 0):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session revoked")
+    # Issue #190 step 6c: every authenticated request gets app.user_id set here, ahead of
+    # require_org_role/require_personal_tenant's more specific app.tenant_id+app.user_id SET
+    # (src.core.rbac). Covers RLS self-access checks (migration 0031) for routes that write
+    # a user's own membership/installation row without ever resolving a single tenant --
+    # see that migration's docstring for why this is safe.
+    set_session_user(db, user_id)
     return UserOut(
         id=user_id,
         email=email,

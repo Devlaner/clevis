@@ -29,7 +29,7 @@ import httpx
 
 from sqlalchemy.orm import Session
 
-from src.core.db import User
+from src.core.db import User, set_session_user
 from src.repositories import org_membership_repo, org_repo, tenant_repo
 from src.services import github_oauth
 
@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 
 def sync_org_admin_memberships(db: Session, user: User, user_token: str) -> None:
+    # Issue #190 step 6c: every membership write below is for `user` (never a different
+    # user), so this alone satisfies migration 0031's self-access RLS check regardless of
+    # which org/tenant each individual write targets. Defensive here rather than relying on
+    # the caller (github_auth.py's OAuth callback) having already set it, since this
+    # function has no other tenant context of its own across its multi-org loops.
+    set_session_user(db, user.id)
     try:
         memberships = github_oauth.list_user_org_memberships(user_token)
     except httpx.HTTPError:
