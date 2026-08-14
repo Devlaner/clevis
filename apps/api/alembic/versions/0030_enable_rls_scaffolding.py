@@ -41,6 +41,20 @@ established by migrations 0021-0029:
   here. So audit_logs gets the strict Group A equality policy despite its
   column being nullable.
 
+  Group B tables also get an explicit WITH CHECK, separate from their
+  read-side USING clause: WITH CHECK (tenant_id = app.tenant_id), with no
+  OR-NULL escape hatch. Omitting WITH CHECK makes Postgres default it to
+  the USING expression, which would let a future write under RLS clear or
+  omit tenant_id and leave the row readable from every tenant context
+  forever. CodeRabbit flagged this on this PR's review (issue #190 PR 5);
+  valid finding -- current SavedToken/ScanResult writes do omit tenant_id
+  (dual-write for those two models was explicitly out of scope for PR 4),
+  so this WITH CHECK would reject those inserts once it actually applies.
+  It changes nothing in this PR (no FORCE yet, so the app's owning role
+  isn't subject to any policy, USING or WITH CHECK), but it does mean PR 6
+  cannot flip on FORCE until SavedToken/ScanResult writes populate
+  tenant_id too -- track that as a prerequisite for PR 6, not solved here.
+
 users, tenants, org_memberships (legacy, superseded by memberships),
 jobs, and app_config are not tenant-scoped and get no RLS.
 
@@ -64,6 +78,9 @@ Verification (run against the target environment before relying on this):
     SELECT count(*) FROM audit_logs;   -- excludes NULL-tenant rows even
                                         -- though orgs/scan_results would
                                         -- include their NULL-tenant rows
+
+    -- confirm the WITH CHECK on Group B rejects a NULL-tenant write under RLS:
+    INSERT INTO orgs (tenant_id, ...) VALUES (NULL, ...);  -- expect: policy violation
     RESET SESSION AUTHORIZATION;
 
 Revision ID: 0030
@@ -101,7 +118,8 @@ def upgrade() -> None:
         op.execute(
             sa.text(
                 f"CREATE POLICY tenant_isolation ON {table} "
-                f"USING (tenant_id IS NULL OR {_TENANT_FILTER})"
+                f"USING (tenant_id IS NULL OR {_TENANT_FILTER}) "
+                f"WITH CHECK ({_TENANT_FILTER})"
             )
         )
 
