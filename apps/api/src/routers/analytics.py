@@ -65,7 +65,7 @@ async def _get_account_type(owner: str, token: str) -> str:
         raise HTTPException(status_code=503, detail="GitHub API unreachable")
 
 
-def _persist_scan(db: Session, result: dict, scanned_by_user_id: int | None = None) -> None:
+def _persist_scan(db: Session, result: dict, tenant_id: int | None, scanned_by_user_id: int | None = None) -> None:
     scan_results_repo.insert(
         db,
         owner=result["owner"],
@@ -73,6 +73,7 @@ def _persist_scan(db: Session, result: dict, scanned_by_user_id: int | None = No
         total_checks=result["total_checks"],
         failed_checks=result["failed_checks"],
         checks=result["checks"],
+        tenant_id=tenant_id,
         scanned_by_user_id=scanned_by_user_id,
     )
 
@@ -110,7 +111,7 @@ async def org_analytics_overview(
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     result = await _run_overview(payload.owner, token)
-    _persist_scan(db, result)
+    _persist_scan(db, result, tenant_id=ctx.org.tenant_id)
     return result
 
 
@@ -134,7 +135,12 @@ async def personal_analytics_overview(
             detail="Personal GitHub accounts aren't supported for security scanning yet. Connect a GitHub organization instead.",
         )
     result = await _run_overview(payload.owner, token)
-    _persist_scan(db, result, scanned_by_user_id=user.id)
+    # payload.owner here can be any GitHub account the user has a token for (bring-your-own-
+    # token path), not necessarily a Clevis org -- the scan row is associated with the
+    # scanning user's own personal tenant, consistent with the existing scanned_by_user_id-
+    # based access-gating design (see ScanResult.tenant_id/scanned_by_user_id in db.py).
+    personal_tenant = tenant_repo.ensure_personal_tenant(db, user.id)
+    _persist_scan(db, result, tenant_id=personal_tenant.id, scanned_by_user_id=user.id)
     return result
 
 
