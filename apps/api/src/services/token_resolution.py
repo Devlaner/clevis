@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.core.db import GitHubInstallation
-from src.repositories import installation_repo, org_membership_repo, org_repo
+from src.repositories import installation_repo, org_repo, tenant_repo
 from src.services import github_app
 
 logger = logging.getLogger(__name__)
@@ -140,7 +140,8 @@ def resolve_owner_token(
     """
     org = org_repo.get_by_login_ci(db, owner)
     if org is not None:
-        membership = org_membership_repo.get(db, org.id, user_id)
+        org = org_repo.ensure_tenant_linked(db, org)
+        membership = tenant_repo.get_membership(db, org.tenant_id, user_id)
         if membership is not None:
             if _ROLE_RANK.get(membership.role, -1) < _ROLE_RANK[min_role]:
                 raise InsufficientOrgRole(f"'{min_role}' access to '{owner}' is required for this action.")

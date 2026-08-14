@@ -27,9 +27,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
-from src.core.db import Org, OrgMembership, User, get_db
+from src.core.db import Membership, Org, User, get_db
 from src.core.rbac import OrgContext, require_org_role
-from src.repositories import audit_repo, installation_repo, org_membership_repo, org_repo
+from src.repositories import audit_repo, installation_repo, org_membership_repo, org_repo, tenant_repo
 from src.schemas.installation import (
     InstallationLookupOut,
     InstallationOut,
@@ -149,7 +149,9 @@ def sync_org_installation(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="owner must match the org in the URL")
 
     org: Org | None = org_repo.get_by_login(db, org_login)
-    membership: OrgMembership | None = org_membership_repo.get(db, org.id, user.id) if org else None
+    if org is not None:
+        org = org_repo.ensure_tenant_linked(db, org)
+    membership: Membership | None = tenant_repo.get_membership(db, org.tenant_id, user.id) if org else None
     is_known_admin = org is not None and membership is not None and membership.role == "admin"
 
     # Only a caller who ISN'T already a confirmed local admin needs the extra checks below

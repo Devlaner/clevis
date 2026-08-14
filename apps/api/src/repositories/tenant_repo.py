@@ -1,7 +1,7 @@
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.core.db import Membership, Tenant
+from src.core.db import Membership, Org, Tenant
 
 
 def get_or_create_org_tenant(db: Session, org_id: int) -> Tenant:
@@ -70,6 +70,28 @@ def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Te
             db.add(Membership(tenant_id=tenant.id, user_id=user_id, role="admin"))
             db.flush()
     return tenant
+
+
+def get_membership(db: Session, tenant_id: int, user_id: int) -> Membership | None:
+    """Read-only lookup, keyed on tenant_id -- the memberships-side equivalent of
+    org_membership_repo.get's org_id-keyed lookup on the legacy org_memberships table.
+    Issue #190 step 6a: RBAC callsites now read from here instead of org_memberships;
+    org_membership_repo's write functions are unchanged and keep dual-writing into
+    memberships via _sync_membership_mirror, so this always sees the current state."""
+    return db.query(Membership).filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id).first()
+
+
+def list_org_memberships_for_user(db: Session, user_id: int) -> list[tuple[Org, Membership]]:
+    """All of a user's org-tenant memberships, joined back to each Org row -- the
+    memberships-side equivalent of org_membership_repo.list_for_user, for callers that
+    need to enumerate a user's orgs rather than check one specific org."""
+    return (
+        db.query(Org, Membership)
+        .join(Tenant, Tenant.org_id == Org.id)
+        .join(Membership, Membership.tenant_id == Tenant.id)
+        .filter(Membership.user_id == user_id, Tenant.kind == "org")
+        .all()
+    )
 
 
 def get_or_create_membership(db: Session, tenant_id: int, user_id: int, role: str) -> Membership:
