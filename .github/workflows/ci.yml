@@ -119,7 +119,12 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
+      # Superuser URL: used for migrations and every step except "Run Python tests" below,
+      # which overrides DATABASE_URL to the clevis_api role instead (issue #330/#190 --
+      # proves RLS actually enforces tenant isolation under the real non-superuser runtime
+      # role, not just a hand-built throwaway test role).
       DATABASE_URL: postgresql+psycopg://clevis:clevis@localhost:5432/clevis
+      API_DB_PASSWORD: ci-dummy-api-db-password-not-for-production-use-0
       JOB_SECRET_KEY: ${{ secrets.JOB_SECRET_KEY || 'ci-dummy-secret-key-not-for-production-use-00' }}
       AUTH_SECRET: ${{ secrets.AUTH_SECRET || 'ci-dummy-auth-secret-not-for-production-use-000' }}
     steps:
@@ -149,11 +154,35 @@ jobs:
         working-directory: apps/api
         run: python -m alembic check
 
+      # Reuses the exact same script an operator runs by hand for an existing deployment
+      # (docs/self-hosting.md) instead of duplicating its grant SQL here -- keeps CI's
+      # provisioning and the documented manual path from drifting apart. Connects over TCP
+      # to the service container (not a docker exec local-socket connection like the
+      # script's usual home), so auth needs PGPASSWORD/PGHOST/PGPORT explicitly.
+      - name: Provision clevis_api role (issue #330 -- non-superuser runtime role)
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGPASSWORD: clevis
+          POSTGRES_USER: clevis
+          POSTGRES_DB: clevis
+        run: sh docker/provision-api-role-existing-deployment.sh
+
       # Global floor (.coveragerc / --cov-fail-under) is a regression guard measured against
       # the current baseline (~87%), not an aspirational target — it stops overall coverage
       # from silently eroding. New/changed lines are held to a much higher bar by the diff
       # coverage step below.
+      #
+      # DATABASE_URL is overridden here (not at job level) to the clevis_api role
+      # provisioned above -- issue #330/#190: this is what actually exercises the RLS
+      # policies (migrations 0030/0031) against a real non-superuser, non-owner role, the
+      # same posture as production when API_DB_PASSWORD is configured. Every other step
+      # in this job (migrations, drift check, coverage upload) keeps using the job-level
+      # superuser DATABASE_URL, since Alembic needs DDL/GRANT privilege this role
+      # intentionally lacks.
       - name: Run Python tests (with coverage)
+        env:
+          DATABASE_URL: postgresql+psycopg://clevis_api:${{ env.API_DB_PASSWORD }}@localhost:5432/clevis
         run: >
           python -m pytest -q
           --cov=apps/api/src --cov=apps/worker/src --cov=packages/checks/src
