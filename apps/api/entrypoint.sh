@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 
-if [ -z "$DB_USER" ] || [ -z "$DB_NAME" ] || [ -z "$DB_PASSWORD" ] || [ -z "$JOB_SECRET_KEY" ] || [ -z "$AUTH_SECRET" ]; then
-  echo "ERROR: DB_USER, DB_NAME, DB_PASSWORD, JOB_SECRET_KEY, and AUTH_SECRET must all be set" >&2
+if [ -z "$DB_USER" ] || [ -z "$DB_NAME" ] || [ -z "$DB_PASSWORD" ] || [ -z "$JOB_SECRET_KEY" ] || [ -z "$AUTH_SECRET" ] || [ -z "$REDIS_PASSWORD" ]; then
+  echo "ERROR: DB_USER, DB_NAME, DB_PASSWORD, JOB_SECRET_KEY, AUTH_SECRET, and REDIS_PASSWORD must all be set" >&2
   exit 1
 fi
 
@@ -34,6 +34,12 @@ python -m alembic upgrade head
 if [ -n "$API_DB_PASSWORD" ]; then
   export DATABASE_URL="postgresql+psycopg://clevis_api:$(_urlenc "$API_DB_PASSWORD")@db:5432/${_db_name_enc}"
 fi
+
+# Issue #191/S3: webhook ingestion queue. Built here (not left as a directly-set
+# REDIS_URL) so the raw password only ever needs to be set once, the same shape as
+# DB_USER/DB_PASSWORD/DB_NAME above -- REDIS_URL itself stays a "local dev outside
+# Docker only" var (see .env.example), same as DATABASE_URL.
+export REDIS_URL="redis://:$(_urlenc "$REDIS_PASSWORD")@redis:6379/0"
 
 # --proxy-headers/--forwarded-allow-ips: trust X-Forwarded-Proto from Traefik so
 # request.url_for() (used to build the GitHub OAuth callback/redirect_uri) reports the

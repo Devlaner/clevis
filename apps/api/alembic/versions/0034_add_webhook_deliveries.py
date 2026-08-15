@@ -1,6 +1,8 @@
 """Add webhook_deliveries table (issue #191, S3 webhook ingestion PR 1 of 4).
 
-Pure additive schema change, no existing table touched -- zero data-loss risk.
+Upgrade is purely additive and touches no existing table -- zero data-loss risk.
+Downgrade drops this table and permanently deletes any stored payloads; do not
+run it against a real environment without explicit confirmation (AGENTS.md).
 Durable landing spot for verified GitHub webhook payloads before they're queued
 onto Redis Streams for later processing (a future S4 event-processor fleet).
 See docs/architecture/clevis-architecture.md's Ingestion pipeline layer for the

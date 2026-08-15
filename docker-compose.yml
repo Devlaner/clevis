@@ -47,15 +47,22 @@ services:
   # Redis for under S1 -- this is the first consumer to actually need it.
   # --appendonly yes: stream entries must survive a container restart, since a lost
   # entry here is a lost/delayed webhook event, not just a cache miss.
+  # --requirepass: every other stateful service in this file (Postgres) requires a
+  # credential; leaving Redis open would let any other compromised container on the
+  # shared `clevis` network read, delete, or inject stream entries (e.g. spoofing a
+  # fake tenant_id into the future S4 consumer's input). REDIS_PASSWORD is required
+  # (apps/api/entrypoint.sh's "must all be set" check), mirroring DB_PASSWORD.
   redis:
     container_name: redis
     image: redis:7-alpine
     mem_limit: 256m
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     volumes:
       - redisdata:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5

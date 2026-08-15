@@ -227,7 +227,7 @@ jobs:
           AUTH_SECRET=ci-e2e-auth-secret-not-for-production-use-00000
           NEXT_PUBLIC_API_BASE=http://localhost:8080
           NEXT_PUBLIC_GITHUB_APP_SLUG=
-          REDIS_URL=redis://redis:6379/0
+          REDIS_PASSWORD=ci-e2e-redis-password-not-for-production-use-000
           EOF
 
       # Full docker-compose stack (not direct processes) so this exercises the real images —
@@ -313,6 +313,7 @@ jobs:
             -e DATABASE_URL=postgresql+psycopg://smoke:smoke@localhost:5432/smoke \
             -e JOB_SECRET_KEY=ci-smoke-test-key-not-for-production-use-000 \
             -e AUTH_SECRET=ci-smoke-test-secret-not-for-production-use-00 \
+            -e REDIS_URL=redis://smoke:6379/0 \
             clevis-api -c "import src.main"
 
       - name: Smoke-test Worker image
