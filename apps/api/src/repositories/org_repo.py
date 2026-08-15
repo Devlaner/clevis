@@ -11,7 +11,7 @@ def ensure_tenant_linked(db: Session, org: Org) -> Org:
         return org
     tenant = tenant_repo.get_or_create_org_tenant(db, org.id)
     # Issue #330: under RLS, this UPDATE's WITH CHECK requires tenant_id to match
-    # app.tenant_id (see migration 0034) -- but no request-scoped caller could have set
+    # app.tenant_id (see migration 0033) -- but no request-scoped caller could have set
     # app.tenant_id to this value yet, since tenant.id was only just created above. Safe
     # to set it here directly: it's this exact org's own brand-new tenant, not a
     # caller-supplied value. SET LOCAL (not the plain SET rbac.py's

@@ -72,7 +72,7 @@ def upsert_token(
     # save a PAT for any org string, including one Clevis has never connected -- if a
     # matching Org row exists, link its tenant now so RLS's WITH CHECK (strict equality,
     # no OR-NULL escape -- see migration 0030's docstring) can accept the write; if not,
-    # tenant_id stays NULL (migration 0034 loosens WITH CHECK for exactly this case).
+    # tenant_id stays NULL (migration 0033 loosens WITH CHECK for exactly this case).
     existing_org = org_repo.get_by_login_ci(db, org)
     tenant_id = org_repo.ensure_tenant_linked(db, existing_org).tenant_id if existing_org else None
 

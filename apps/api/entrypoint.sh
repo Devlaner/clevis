@@ -10,7 +10,7 @@ fi
 # misparsed as part of the connection URL's structure (e.g. an "@" in a password
 # would otherwise be read as the userinfo/host separator).
 _urlenc() {
-  python -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.quote_plus(sys.argv[1]))' "$1"
+  python -c 'import sys, urllib.parse; sys.stdout.write(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
 }
 
 _db_user_enc=$(_urlenc "$DB_USER")

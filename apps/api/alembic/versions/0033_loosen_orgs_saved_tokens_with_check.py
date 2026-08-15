@@ -69,19 +69,26 @@ ships the fix as a policy redefinition instead (DROP + CREATE, since ALTER POLIC
 cannot change WITH CHECK for a FOR ALL policy created without USING/WITH CHECK
 listed as separate clauses in one statement as cleanly as recreating it).
 
+This was originally sequenced as revision 0034, following a separate 0033 that
+granted clevis_api schema USAGE and sequence privileges. That 0033 was folded
+directly into migration 0032 instead (0032 hadn't merged yet, so it wasn't
+"already applied" under the same AGENTS.md rule this migration's own docstring
+above relies on) -- so this migration was renumbered to 0033 and now revises
+0032 directly.
+
 Data-loss / backfill risk: none. This migration only redefines two RLS policies; it
 does not alter any table's schema or data.
 
-Revision ID: 0034
-Revises: 0033
+Revision ID: 0033
+Revises: 0032
 Create Date: 2026-08-14
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0034"
-down_revision = "0033"
+revision = "0033"
+down_revision = "0032"
 branch_labels = None
 depends_on = None
 
