@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from src.core.auth import UserOut, require_auth
 from src.core.db import get_db
 from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
+from src.repositories import tenant_repo
 from src.schemas.cache import CacheClearInput, CacheClearResponse, CacheListInput, CacheListResponse
 from src.services.cache_service import clear
 from src.services.github_client import GitHubClient
@@ -73,7 +74,7 @@ def org_clear_caches(
             token = resolve_org_token(db, org_id=ctx.org.id, account_login=owner, client_token=_client_token(payload))
         except NoGitHubTokenAvailable as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-    return clear(db, owner, repo, payload, actor=user.email, token=token)
+    return clear(db, owner, repo, payload, actor=user.email, token=token, tenant_id=ctx.org.tenant_id)
 
 
 @router.post("/me/repos/{owner}/{repo}/actions-caches", response_model=CacheListResponse)
@@ -109,4 +110,5 @@ def personal_clear_caches(
             raise HTTPException(status_code=403, detail=str(exc))
         except NoGitHubTokenAvailable as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-    return clear(db, owner, repo, payload, actor=user.email, token=token)
+    personal_tenant = tenant_repo.ensure_personal_tenant(db, user.id)
+    return clear(db, owner, repo, payload, actor=user.email, token=token, tenant_id=personal_tenant.id)

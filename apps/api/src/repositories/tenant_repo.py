@@ -1,7 +1,23 @@
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.db import Membership, Org, Tenant
+
+
+def _set_session_user(db: Session, user_id: int) -> None:
+    # Issue #330: memberships' RLS policy (migration 0031) allows a row when EITHER
+    # tenant_id matches app.tenant_id OR user_id matches app.user_id. Every write in this
+    # module always targets a specific, already-known user_id -- setting app.user_id to
+    # that same value here is never a privilege escalation (it just self-identifies the
+    # row being written), and lets these writes succeed even when no caller has
+    # established a full tenant session context yet (e.g. ensure_personal_tenant creating
+    # a brand-new tenant + its own self-membership atomically, before rbac.py's
+    # set_tenant_session_context would otherwise run). SET LOCAL (not the plain SET
+    # rbac.py's set_tenant_session_context uses) scopes this to only the transaction the
+    # caller is about to commit, so it doesn't leak app.user_id into whatever the
+    # session does next.
+    db.execute(text(f"SET LOCAL app.user_id = {int(user_id)}"))
 
 
 def get_or_create_org_tenant(db: Session, org_id: int) -> Tenant:
@@ -67,6 +83,7 @@ def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Te
             db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
         )
         if existing_membership is None:
+            _set_session_user(db, user_id)
             db.add(Membership(tenant_id=tenant.id, user_id=user_id, role="admin"))
             db.flush()
     return tenant
@@ -102,6 +119,7 @@ def get_or_create_membership(db: Session, tenant_id: int, user_id: int, role: st
     )
     if membership is not None:
         return membership
+    _set_session_user(db, user_id)
     membership = Membership(tenant_id=tenant_id, user_id=user_id, role=role)
     db.add(membership)
     try:
@@ -137,6 +155,7 @@ def upsert_membership(db: Session, tenant_id: int, user_id: int, role: str) -> M
 
 
 def update_membership_role(db: Session, tenant_id: int, user_id: int, role: str) -> Membership | None:
+    _set_session_user(db, user_id)
     membership = (
         db.query(Membership)
         .filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id)
@@ -151,6 +170,7 @@ def update_membership_role(db: Session, tenant_id: int, user_id: int, role: str)
 
 
 def delete_membership(db: Session, tenant_id: int, user_id: int) -> None:
+    _set_session_user(db, user_id)
     db.query(Membership).filter(
         Membership.tenant_id == tenant_id, Membership.user_id == user_id
     ).delete()
