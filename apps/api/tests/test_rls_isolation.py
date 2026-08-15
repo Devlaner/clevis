@@ -45,7 +45,8 @@ def _clevis_api_engine():
             "provision the role (docker/provision-api-role-existing-deployment.sh) "
             "and set API_DB_PASSWORD to exercise this test locally"
         )
-    netloc = f"clevis_api:{quote(password, safe='')}@{url.hostname}:{url.port}"
+    port = f":{url.port}" if url.port is not None else ""
+    netloc = f"clevis_api:{quote(password, safe='')}@{url.hostname}{port}"
     return create_engine(urlunsplit((url.scheme, netloc, url.path, url.query, url.fragment)))
 
 
@@ -57,32 +58,36 @@ def test_rls_blocks_cross_tenant_audit_log_access():
         # context, which correctly fails (RLS makes it invisible) but raises
         # ObjectDeletedError instead of just leaving the already-fetched attributes alone.
         session = Session(bind=conn, expire_on_commit=False)
+        # Initialized up front and only ever deleted in the finally block if non-None, so a
+        # failure partway through setup (e.g. after users commit but before tenants do) still
+        # cleans up whatever was actually committed instead of leaking rows into a local DB.
+        user_a = user_b = tenant_a = tenant_b = log_a = log_b = None
         try:
-            user_a = User(email="rls-isolation-a@test.local", name=None, password_hash=None, is_workspace_admin=False)
-            user_b = User(email="rls-isolation-b@test.local", name=None, password_hash=None, is_workspace_admin=False)
-            session.add_all([user_a, user_b])
-            session.commit()
-
-            tenant_a = Tenant(kind="personal", personal_user_id=user_a.id)
-            tenant_b = Tenant(kind="personal", personal_user_id=user_b.id)
-            session.add_all([tenant_a, tenant_b])
-            session.commit()
-
-            # Each insert happens under its own tenant's session context, since Group A's
-            # strict equality policy has no separate WITH CHECK -- it defaults to the
-            # USING clause, so a row is only insertable when it's already visible under
-            # the session's current tenant_id.
-            set_tenant_session_context(session, tenant_a.id, user_a.id)
-            log_a = AuditLog(actor="tester", action="test", target="a", payload="{}", tenant_id=tenant_a.id)
-            session.add(log_a)
-            session.commit()
-
-            set_tenant_session_context(session, tenant_b.id, user_b.id)
-            log_b = AuditLog(actor="tester", action="test", target="b", payload="{}", tenant_id=tenant_b.id)
-            session.add(log_b)
-            session.commit()
-
             try:
+                user_a = User(email="rls-isolation-a@test.local", name=None, password_hash=None, is_workspace_admin=False)
+                user_b = User(email="rls-isolation-b@test.local", name=None, password_hash=None, is_workspace_admin=False)
+                session.add_all([user_a, user_b])
+                session.commit()
+
+                tenant_a = Tenant(kind="personal", personal_user_id=user_a.id)
+                tenant_b = Tenant(kind="personal", personal_user_id=user_b.id)
+                session.add_all([tenant_a, tenant_b])
+                session.commit()
+
+                # Each insert happens under its own tenant's session context, since Group A's
+                # strict equality policy has no separate WITH CHECK -- it defaults to the
+                # USING clause, so a row is only insertable when it's already visible under
+                # the session's current tenant_id.
+                set_tenant_session_context(session, tenant_a.id, user_a.id)
+                log_a = AuditLog(actor="tester", action="test", target="a", payload="{}", tenant_id=tenant_a.id)
+                session.add(log_a)
+                session.commit()
+
+                set_tenant_session_context(session, tenant_b.id, user_b.id)
+                log_b = AuditLog(actor="tester", action="test", target="b", payload="{}", tenant_id=tenant_b.id)
+                session.add(log_b)
+                session.commit()
+
                 # Back in tenant A's context: tenant B's row must be invisible to SELECT,
                 # and untouched by UPDATE/DELETE targeting it directly by id.
                 set_tenant_session_context(session, tenant_a.id, user_a.id)
@@ -105,19 +110,27 @@ def test_rls_blocks_cross_tenant_audit_log_access():
                 assert visible_ids == {log_b.id}
             finally:
                 # Cleanup must happen per-tenant context too -- RLS applies to DELETE just
-                # like SELECT, so a single DELETE can't remove both rows at once.
-                set_tenant_session_context(session, tenant_a.id, user_a.id)
-                session.execute(text("DELETE FROM audit_logs WHERE id = :id"), {"id": log_a.id})
-                session.commit()
-                set_tenant_session_context(session, tenant_b.id, user_b.id)
-                session.execute(text("DELETE FROM audit_logs WHERE id = :id"), {"id": log_b.id})
-                session.commit()
+                # like SELECT, so a single DELETE can't remove both rows at once. A prior
+                # exception may leave the session mid-transaction, so roll back first.
+                session.rollback()
+                if log_a is not None:
+                    set_tenant_session_context(session, tenant_a.id, user_a.id)
+                    session.execute(text("DELETE FROM audit_logs WHERE id = :id"), {"id": log_a.id})
+                    session.commit()
+                if log_b is not None:
+                    set_tenant_session_context(session, tenant_b.id, user_b.id)
+                    session.execute(text("DELETE FROM audit_logs WHERE id = :id"), {"id": log_b.id})
+                    session.commit()
                 session.execute(text("RESET app.tenant_id"))
                 session.execute(text("RESET app.user_id"))
-                session.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_a.id})
-                session.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_b.id})
-                session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_a.id})
-                session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_b.id})
+                if tenant_a is not None:
+                    session.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_a.id})
+                if tenant_b is not None:
+                    session.execute(text("DELETE FROM tenants WHERE id = :id"), {"id": tenant_b.id})
+                if user_a is not None:
+                    session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_a.id})
+                if user_b is not None:
+                    session.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_b.id})
                 session.commit()
         finally:
             session.close()
