@@ -102,11 +102,18 @@ def test_removed_github_member_loses_clevis_membership_entirely(db):
 
 
 def test_unrelated_org_membership_untouched_when_other_org_reconciled(db):
+    # Issue #330: capture each org's id right after creation -- creating a later org
+    # commits its own tenant-link UPDATE, which expires SQLAlchemy's in-memory objects for
+    # earlier orgs (default expire_on_commit=True); a later lazy-reload of one under RLS
+    # with app.tenant_id now pointed at a different org's tenant would raise
+    # ObjectDeletedError instead of finding the (still-present) row.
     acme = org_repo.get_or_create(db, github_login="acme", github_org_id=1)
+    acme_id = acme.id
     globex = org_repo.get_or_create(db, github_login="globex", github_org_id=2)
+    globex_id = globex.id
     heidi = _make_user(db, "heidi@example.com")
-    org_membership_repo.get_or_create(db, org_id=acme.id, user_id=heidi.id, role="admin")
-    org_membership_repo.get_or_create(db, org_id=globex.id, user_id=heidi.id, role="admin")
+    org_membership_repo.get_or_create(db, org_id=acme_id, user_id=heidi.id, role="admin")
+    org_membership_repo.get_or_create(db, org_id=globex_id, user_id=heidi.id, role="admin")
 
     with patch.object(
         github_oauth,
@@ -118,8 +125,8 @@ def test_unrelated_org_membership_untouched_when_other_org_reconciled(db):
     ):
         org_provisioning.sync_org_admin_memberships(db, heidi, "fake-token")
 
-    acme_membership = org_membership_repo.get(db, org_id=acme.id, user_id=heidi.id)
-    globex_membership = org_membership_repo.get(db, org_id=globex.id, user_id=heidi.id)
+    acme_membership = org_membership_repo.get(db, org_id=acme_id, user_id=heidi.id)
+    globex_membership = org_membership_repo.get(db, org_id=globex_id, user_id=heidi.id)
     assert acme_membership.role == "admin"
     assert globex_membership.role == "member"
 

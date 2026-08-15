@@ -7,6 +7,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import AuditLog, User, get_db
@@ -37,6 +38,11 @@ def _client(db, user):
     app.include_router(inst_router)
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[require_auth] = lambda: user
+    # Issue #330: overriding require_auth for tests bypasses its real body, including the
+    # SET app.user_id side effect (src.core.db.set_session_user) RLS's self-access clauses
+    # (migration 0031) depend on -- set it here directly so tests exercise the same session
+    # context a real authenticated request would have.
+    db.execute(text(f"SET app.user_id = {user.id}"))
     return TestClient(app)
 
 

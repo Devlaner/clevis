@@ -95,6 +95,11 @@ def test_get_or_create_falls_back_to_org_id_lookup_on_concurrent_insert_race(db)
 
 
 def test_different_orgs_stay_separate(db):
+    # Issue #330: capture acme.id before creating globex -- committing globex's own
+    # tenant-link UPDATE expires SQLAlchemy's in-memory acme object (default
+    # expire_on_commit=True), and a later lazy-reload of it would run under app.tenant_id
+    # now pointed at globex's tenant, which RLS would then hide acme's row from.
     acme = org_repo.get_or_create(db, github_login="acme", github_org_id=1)
+    acme_id = acme.id
     globex = org_repo.get_or_create(db, github_login="globex", github_org_id=2)
-    assert acme.id != globex.id
+    assert acme_id != globex.id

@@ -65,11 +65,26 @@ def test_personal_history_requires_auth(db):
 
 
 def test_personal_history_returns_seeded_rows_newest_first(http, db, mock_user):
+    org = org_repo.get_or_create(db, github_login="acme")
     scan_results_repo.insert(
-        db, owner="acme", score=60, total_checks=3, failed_checks=1, checks=[], scanned_by_user_id=mock_user.id
+        db,
+        owner="acme",
+        score=60,
+        total_checks=3,
+        failed_checks=1,
+        checks=[],
+        tenant_id=org.tenant_id,
+        scanned_by_user_id=mock_user.id,
     )
     scan_results_repo.insert(
-        db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[], scanned_by_user_id=mock_user.id
+        db,
+        owner="acme",
+        score=80,
+        total_checks=3,
+        failed_checks=0,
+        checks=[],
+        tenant_id=org.tenant_id,
+        scanned_by_user_id=mock_user.id,
     )
     resp = http.get("/me/analytics/history?owner=acme")
     assert resp.status_code == 200
@@ -80,11 +95,27 @@ def test_personal_history_returns_seeded_rows_newest_first(http, db, mock_user):
 
 
 def test_personal_history_only_returns_matching_owner(http, db, mock_user):
+    acme = org_repo.get_or_create(db, github_login="acme")
+    other = org_repo.get_or_create(db, github_login="other-org")
     scan_results_repo.insert(
-        db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[], scanned_by_user_id=mock_user.id
+        db,
+        owner="acme",
+        score=80,
+        total_checks=3,
+        failed_checks=0,
+        checks=[],
+        tenant_id=acme.tenant_id,
+        scanned_by_user_id=mock_user.id,
     )
     scan_results_repo.insert(
-        db, owner="other-org", score=50, total_checks=3, failed_checks=1, checks=[], scanned_by_user_id=mock_user.id
+        db,
+        owner="other-org",
+        score=50,
+        total_checks=3,
+        failed_checks=1,
+        checks=[],
+        tenant_id=other.tenant_id,
+        scanned_by_user_id=mock_user.id,
     )
     resp = http.get("/me/analytics/history?owner=acme")
     assert resp.status_code == 200
@@ -97,7 +128,8 @@ def test_personal_history_forbidden_when_user_has_no_relationship_to_owner(http,
     # No Org membership, no installation, and no prior scan by this user for
     # "acme" -- reading its history must be denied, even though rows exist
     # (seeded here by a different, unrelated persisted scan).
-    scan_results_repo.insert(db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[])
+    org = org_repo.get_or_create(db, github_login="acme")
+    scan_results_repo.insert(db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[], tenant_id=org.tenant_id)
     resp = http.get("/me/analytics/history?owner=acme")
     assert resp.status_code == 403
 
@@ -105,15 +137,16 @@ def test_personal_history_forbidden_when_user_has_no_relationship_to_owner(http,
 def test_personal_history_allowed_via_org_membership_even_without_own_scan(http, db, mock_user):
     org = org_repo.get_or_create(db, github_login="acme")
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=mock_user.id, role="member")
-    scan_results_repo.insert(db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[])
+    scan_results_repo.insert(db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[], tenant_id=org.tenant_id)
     resp = http.get("/me/analytics/history?owner=acme")
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
 
 def test_scan_results_repo_list_recent_respects_limit(db):
+    org = org_repo.get_or_create(db, github_login="acme")
     for score in range(5):
-        scan_results_repo.insert(db, owner="acme", score=score, total_checks=1, failed_checks=0, checks=[])
+        scan_results_repo.insert(db, owner="acme", score=score, total_checks=1, failed_checks=0, checks=[], tenant_id=org.tenant_id)
     rows = scan_results_repo.list_recent(db, owner="acme", limit=2)
     assert len(rows) == 2
     assert rows[0]["score"] == 4  # newest first
@@ -134,7 +167,7 @@ def test_org_history_unknown_org_returns_404(http):
 def test_org_history_member_ok(http, db, mock_user):
     org = org_repo.get_or_create(db, github_login="acme")
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=mock_user.id, role="member")
-    scan_results_repo.insert(db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[])
+    scan_results_repo.insert(db, owner="acme", score=80, total_checks=3, failed_checks=0, checks=[], tenant_id=org.tenant_id)
     resp = http.get("/orgs/acme/analytics/history")
     assert resp.status_code == 200
     assert len(resp.json()) == 1

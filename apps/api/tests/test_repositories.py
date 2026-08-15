@@ -17,7 +17,8 @@ def test_installation_create(db):
 
 
 def test_audit_write(db):
-    audit_repo.write(db, actor="bot", action="test.event", target="acme/repo", payload={"x": 1})
+    org = org_repo.get_or_create(db, github_login="acme")
+    audit_repo.write(db, actor="bot", action="test.event", target="acme/repo", payload={"x": 1}, tenant_id=org.tenant_id)
     # no exception means the row was inserted and committed via savepoint
 
 
