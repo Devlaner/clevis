@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     database_url: SecretStr
     job_secret_key: SecretStr   # Fernet key for saved-token + job token encryption
     auth_secret: SecretStr      # JWT signing secret
+    redis_url: SecretStr        # issue #191/S3 -- webhook ingestion queue (Redis Streams);
+                                 # SecretStr since a production URL may embed AUTH credentials
 
     # Deploy-time config with safe defaults. Override via env per environment/install.
     # cors_origins is a security boundary read once at startup; github_api_base is where

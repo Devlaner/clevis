@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -106,6 +107,38 @@ class Job(Base):
     # finishes. Null for a job that was claimed before this column existed, or hasn't had
     # its first heartbeat tick yet.
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class WebhookDelivery(Base):
+    """Durable landing spot for verified GitHub webhook payloads (issue #191/S3), written by
+    the unauthenticated receiver before enqueueing onto Redis Streams. No RLS: like `jobs`,
+    this is a system-internal table -- the receiver writes it with no app.tenant_id session
+    var set (there's no authenticated tenant context at webhook-receive time), and a future
+    S4 consumer fleet needs to read across all tenants, not one tenant's rows at a time. Access
+    control is HMAC-signature verification at the receiver, not row-level tenant isolation."""
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (
+        Index("ix_webhook_deliveries_tenant_id", "tenant_id"),
+        Index("ix_webhook_deliveries_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Nullable: resolution can fail (installation not found -- e.g. a webhook for an org that
+    # uninstalled between delivery and processing).
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True)
+    # X-GitHub-Delivery. Not unique-constrained: GitHub redelivers the same delivery id on
+    # retry, and deduping is the future S4 event-processor's job, not this table's.
+    delivery_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)  # X-GitHub-Event
+    installation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Exact verified raw body bytes, not re-serialized JSON, so a byte-for-byte copy of what
+    # HMAC was checked against is preserved for any future signature re-verification/replay.
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # queued | queue_failed -- queue_failed lets a future re-enqueue sweep find rows whose
+    # Redis XADD didn't succeed even though the payload itself was durably stored.
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class SavedToken(Base):

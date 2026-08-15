@@ -118,6 +118,19 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      # Issue #191/S3: webhook ingestion queue. Not used by any test yet in this PR
+      # (infra scaffolding only), but required for Settings() to construct (redis_url
+      # has no default) and wired up now so PR 3's Redis-backed tests don't need a
+      # separate CI change.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     env:
       # Superuser URL: used for migrations and every step except "Run Python tests" below,
       # which overrides DATABASE_URL to the clevis_api role instead (issue #330/#190 --
@@ -127,6 +140,7 @@ jobs:
       API_DB_PASSWORD: ci-dummy-api-db-password-not-for-production-use-0
       JOB_SECRET_KEY: ${{ secrets.JOB_SECRET_KEY || 'ci-dummy-secret-key-not-for-production-use-00' }}
       AUTH_SECRET: ${{ secrets.AUTH_SECRET || 'ci-dummy-auth-secret-not-for-production-use-000' }}
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - name: Checkout (full history for diff coverage)
         uses: actions/checkout@v4
@@ -213,6 +227,7 @@ jobs:
           AUTH_SECRET=ci-e2e-auth-secret-not-for-production-use-00000
           NEXT_PUBLIC_API_BASE=http://localhost:8080
           NEXT_PUBLIC_GITHUB_APP_SLUG=
+          REDIS_URL=redis://redis:6379/0
           EOF
 
       # Full docker-compose stack (not direct processes) so this exercises the real images —

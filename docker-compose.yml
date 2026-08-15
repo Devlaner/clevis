@@ -42,6 +42,28 @@ services:
     networks:
       - clevis
 
+  # Issue #191/S3: managed queue for webhook ingestion (Redis Streams), plus the
+  # cache/token-broker role docs/architecture/clevis-architecture.md already earmarks
+  # Redis for under S1 -- this is the first consumer to actually need it.
+  # --appendonly yes: stream entries must survive a container restart, since a lost
+  # entry here is a lost/delayed webhook event, not just a cache miss.
+  redis:
+    container_name: redis
+    image: redis:7-alpine
+    mem_limit: 256m
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - clevis
+
   api:
     container_name: api
     build:
@@ -54,6 +76,8 @@ services:
       - "8080"
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -126,3 +150,4 @@ networks:
 
 volumes:
   pgdata:
+  redisdata:
