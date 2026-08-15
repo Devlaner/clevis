@@ -1,5 +1,6 @@
 import json
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.core.db import ScanResult
@@ -15,6 +16,17 @@ def insert(
     tenant_id: int | None = None,
     scanned_by_user_id: int | None = None,
 ) -> None:
+    # Issue #330: scan_results' RLS WITH CHECK is strict equality against app.tenant_id
+    # (migration 0030), with no self-access widening (unlike memberships/
+    # github_installations in migration 0031). Callers here always already know a real
+    # tenant_id when one is passed (org or personal analytics flows never call this with
+    # tenant_id=None in production -- only test seeding does), but nothing else in the
+    # request necessarily set app.tenant_id to match (personal-scoped routes only set
+    # app.user_id via require_auth). SET LOCAL here to exactly the value being written is
+    # always safe -- see audit_repo.write's identical reasoning -- and scoped to only this
+    # transaction.
+    if tenant_id is not None:
+        db.execute(text(f"SET LOCAL app.tenant_id = {int(tenant_id)}"))
     db.add(
         ScanResult(
             owner=owner,

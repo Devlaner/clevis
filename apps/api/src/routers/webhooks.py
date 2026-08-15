@@ -96,7 +96,7 @@ def _handle_installation_deleted(db: Session, payload: dict) -> None:
     if not isinstance(installation_id, int) or isinstance(installation_id, bool):
         logger.warning("installation.deleted webhook has a missing/non-integer installation.id: %r", installation_id)
         return
-    removed = installation_repo.delete_by_installation_id(db, installation_id)
+    removed, tenant_id = installation_repo.delete_by_installation_id(db, installation_id)
     if removed:
         audit_repo.write(
             db,
@@ -104,4 +104,5 @@ def _handle_installation_deleted(db: Session, payload: dict) -> None:
             action="installation.deleted",
             target=str(installation_id),
             payload={"installation_id": installation_id, "rows_removed": removed},
+            tenant_id=tenant_id,
         )

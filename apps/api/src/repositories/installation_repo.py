@@ -139,9 +139,14 @@ def list_for_user(db: Session, owner_user_id: int) -> list[GitHubInstallation]:
     )
 
 
-def delete_by_installation_id(db: Session, installation_id: int) -> int:
+def delete_by_installation_id(db: Session, installation_id: int) -> tuple[int, int | None]:
     """Remove every row referencing a GitHub installation_id (e.g. on uninstall).
-    Returns the number of rows deleted."""
+    Returns (rows deleted, tenant_id of the first deleted row) -- the tenant_id lets the
+    webhook handler's audit_repo.write call attribute the deletion under RLS (issue #330);
+    every row here already has tenant_id populated by upsert's _resolve_tenant_id, so this
+    is just reading back what's already there before the rows are gone."""
+    rows = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).all()
+    tenant_id = rows[0].tenant_id if rows else None
     count = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).delete()
     db.commit()
-    return count
+    return count, tenant_id

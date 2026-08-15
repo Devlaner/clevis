@@ -144,12 +144,20 @@ def test_require_org_role_does_not_set_session_vars_on_403(db):
     org_repo.get_or_create(db, github_login="widgets")
     user = _make_user(db, "bob@example.com")  # no membership
 
+    # Issue #330: creating a brand-new org transiently sets app.tenant_id via SET LOCAL
+    # (org_repo.ensure_tenant_linked) so its own tenant-link UPDATE satisfies RLS -- scoped
+    # to that one real transaction in production, but this test's savepoint-based db
+    # fixture never issues a real top-level COMMIT, so it's still visible here. Snapshot it
+    # as the baseline and assert the dependency call under test doesn't change it, rather
+    # than asserting an absolute None -- that's the actual invariant this test protects.
+    baseline = _current_setting(db, "app.tenant_id")
+
     dependency = require_org_role("member")
     with pytest.raises(HTTPException) as exc_info:
         dependency(org_login="widgets", db=db, user=user)
 
     assert exc_info.value.status_code == 403
-    assert _current_setting(db, "app.tenant_id") is None
+    assert _current_setting(db, "app.tenant_id") == baseline
 
 
 def test_require_personal_tenant_sets_session_vars(db):

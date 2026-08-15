@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from src.core.auth import UserOut, require_auth
 from src.core.db import Org, User, get_db
 from src.core.rbac import OrgContext, require_org_role, resolve_org_role, set_tenant_session_context
-from src.repositories import audit_repo, installation_repo, org_membership_repo, org_repo
+from src.repositories import audit_repo, installation_repo, org_membership_repo, org_repo, tenant_repo
 from src.schemas.installation import (
     InstallationLookupOut,
     InstallationOut,
@@ -195,6 +195,7 @@ def sync_org_installation(
         action="installation.connected",
         target=org_login,
         payload={"account_type": payload.account_type, "installation_id": payload.installation_id},
+        tenant_id=org.tenant_id,
     )
     return {"synced": True, "token_ref": row.token_ref}
 
@@ -238,11 +239,13 @@ def sync_personal_installation(
         installation_id=payload.installation_id,
         owner_user_id=user.id,
     )
+    personal_tenant = tenant_repo.ensure_personal_tenant(db, user.id)
     audit_repo.write(
         db,
         actor=user.email,
         action="installation.connected.personal",
         target=payload.account_login,
         payload={"account_type": payload.account_type, "installation_id": payload.installation_id},
+        tenant_id=personal_tenant.id,
     )
     return {"synced": True, "token_ref": row.token_ref}

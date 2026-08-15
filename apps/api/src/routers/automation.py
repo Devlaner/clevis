@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 from src.core.auth import UserOut, require_auth
 from src.core.db import get_db
 from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
-from src.repositories import audit_repo
+from src.repositories import audit_repo, tenant_repo
 from src.schemas.automation import (
     DispatchInput,
     DispatchResponse,
@@ -113,7 +113,14 @@ def _list_runs(owner: str, repo: str, token: str, per_page: int) -> RunsResponse
 
 
 def _dispatch(
-    db: Session, owner: str, repo: str, workflow_id: int, payload: DispatchInput, token: str, actor: str
+    db: Session,
+    owner: str,
+    repo: str,
+    workflow_id: int,
+    payload: DispatchInput,
+    token: str,
+    actor: str,
+    tenant_id: int | None = None,
 ) -> DispatchResponse:
     target = f"{owner}/{repo}#{workflow_id}"
     audit_repo.write(
@@ -122,6 +129,7 @@ def _dispatch(
         "automation.workflow.dispatch",
         target,
         {"ref": payload.ref, "inputs": payload.inputs or {}},
+        tenant_id=tenant_id,
     )
     client = GitHubClient(token)
     try:
@@ -189,7 +197,7 @@ def org_dispatch_workflow(
         token = resolve_org_token(db, org_id=ctx.org.id, account_login=owner, client_token=client_token)
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return _dispatch(db, owner, repo, workflow_id, payload, token, actor=user.email)
+    return _dispatch(db, owner, repo, workflow_id, payload, token, actor=user.email, tenant_id=ctx.org.tenant_id)
 
 
 # ── personal-scoped ──────────────────────────────────────────────────────────
@@ -241,4 +249,5 @@ def personal_dispatch_workflow(
         raise HTTPException(status_code=403, detail=str(exc))
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return _dispatch(db, owner, repo, workflow_id, payload, token, actor=user.email)
+    personal_tenant = tenant_repo.ensure_personal_tenant(db, user.id)
+    return _dispatch(db, owner, repo, workflow_id, payload, token, actor=user.email, tenant_id=personal_tenant.id)

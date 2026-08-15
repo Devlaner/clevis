@@ -50,7 +50,17 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
 
    Don't rely on re-running `alembic upgrade head` for step 2 — if migration `0020` already applied (as a no-op, since the role didn't exist yet), Alembic considers it done and won't re-run it. Restart the `worker` container afterwards to pick up the new credential.
 
-6. Start the stack:
+6. (Recommended) Give the API its own non-superuser Postgres credential, separate from `DB_USER`/`DB_PASSWORD`: set `API_DB_PASSWORD` in `.env`. Without this, the API connects as `DB_USER` — the `initdb` bootstrap superuser — which unconditionally bypasses Row-Level Security, so tenant isolation is enforced only at the application layer (issue #330). Same fresh-volume-only caveat as the worker's credential above. If you're setting this on an **existing** deployment, run `docker/provision-api-role-existing-deployment.sh` instead of the fresh-volume init script:
+
+   ```bash
+   docker compose up -d db
+   docker compose cp docker/provision-api-role-existing-deployment.sh db:/tmp/provision-api-role.sh
+   docker compose exec db sh /tmp/provision-api-role.sh
+   ```
+
+   Unlike the worker (which only ever needs `SELECT`/`UPDATE` on `jobs` and `SELECT` on `app_config`), the API needs schema `USAGE`, table privileges on every table, and sequence privileges for every serial primary key — this script creates the role and applies all three grant kinds in a single `psql` invocation wrapped in one transaction, so an operator never ends up with a role that has `CONNECT` but no table/schema/sequence privileges (which a failure partway through two separate commands could otherwise leave behind). It's deliberately not placed under `docker/postgres-init/` — that directory auto-runs on every fresh volume, at a point before Alembic has created any tables yet, so its `GRANT ... ON users, orgs, ...` statements would fail on a genuinely fresh volume. Safe to re-run. Restart the `api` container afterwards to pick up the new credential.
+
+7. Start the stack:
 
    ```bash
    docker compose up --build -d
@@ -64,7 +74,7 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
    ghcr.io/<owner>/clevis-ui
    ```
 
-7. Verify it's up:
+8. Verify it's up:
 
    ```bash
    curl http://localhost:8080/healthz   # -> {"status": "ok"}

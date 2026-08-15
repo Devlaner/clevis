@@ -66,7 +66,9 @@ def test_list_caches_no_installation_and_no_token_returns_400(cache_client):
     assert resp.status_code == 400
 
 
-def test_clear_caches_dry_run_does_not_require_a_token(cache_client):
+def test_clear_caches_dry_run_does_not_require_a_token(cache_client, db):
+    db.add(User(id=_USER.id, email=_USER.email, name=None, password_hash=None, is_workspace_admin=False))
+    db.commit()
     resp = cache_client.post(
         "/me/repos/acme/demo/actions-caches/clear",
         json={"dry_run": True},
