@@ -50,20 +50,15 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
 
    Don't rely on re-running `alembic upgrade head` for step 2 — if migration `0020` already applied (as a no-op, since the role didn't exist yet), Alembic considers it done and won't re-run it. Restart the `worker` container afterwards to pick up the new credential.
 
-6. (Optional, ahead of a future cutover — issue #330) Provision a dedicated non-superuser Postgres role for the API: set `API_DB_PASSWORD` in `.env`. Setting this var alone has no runtime effect yet — nothing connects as this role until a later change switches the API's runtime connection over to it (see issue #330) — but the role and its grants (table, schema, and per-sequence privileges, matching exactly what RLS-gated tenant isolation will need) can be provisioned ahead of time. Same fresh-volume-only caveat as the worker's credential above. If you're setting this on an **existing** deployment, run this once by hand instead — unlike the worker (which only ever needs `SELECT`/`UPDATE` on `jobs` and `SELECT` on `app_config`), the API needs schema `USAGE`, table privileges on every table, and sequence privileges for every serial primary key, so bundle all three into one step rather than relying on `alembic upgrade head` to replay already-applied migrations:
+6. (Optional, ahead of a future cutover — issue #330) Provision a dedicated non-superuser Postgres role for the API: set `API_DB_PASSWORD` in `.env`. Setting this var alone has no runtime effect yet — nothing connects as this role until a later change switches the API's runtime connection over to it (see issue #330) — but the role and its grants (table, schema, and per-sequence privileges, matching exactly what RLS-gated tenant isolation will need) can be provisioned ahead of time. Same fresh-volume-only caveat as the worker's credential above. If you're setting this on an **existing** deployment, run `docker/provision-api-role-existing-deployment.sh` instead of the fresh-volume init script:
 
    ```bash
    docker compose up -d db
-   docker compose exec db sh /docker-entrypoint-initdb.d/02-create-api-role.sh
-
-   docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
-     GRANT USAGE ON SCHEMA public TO clevis_api;
-     GRANT SELECT, INSERT, UPDATE, DELETE ON users, orgs, org_memberships, tenants, memberships, invitations, github_installations, saved_tokens, audit_logs, scan_results, jobs, app_config TO clevis_api;
-     GRANT USAGE, SELECT ON users_id_seq, orgs_id_seq, org_memberships_id_seq, tenants_id_seq, memberships_id_seq, invitations_id_seq, github_installations_id_seq, saved_tokens_id_seq, audit_logs_id_seq, scan_results_id_seq, jobs_id_seq TO clevis_api;
-   "'
+   docker compose cp docker/provision-api-role-existing-deployment.sh db:/tmp/provision-api-role.sh
+   docker compose exec db sh /tmp/provision-api-role.sh
    ```
 
-   This bundles role creation with all three grant kinds in one atomic step, so an operator provisioning an existing deployment never ends up with a role that has `CONNECT` but no table/schema/sequence privileges (which would happen if the role were created by hand *after* migrations `0032` already ran, since Alembic won't replay an already-applied migration once the role exists).
+   Unlike the worker (which only ever needs `SELECT`/`UPDATE` on `jobs` and `SELECT` on `app_config`), the API needs schema `USAGE`, table privileges on every table, and sequence privileges for every serial primary key — this script creates the role and applies all three grant kinds in a single `psql` invocation wrapped in one transaction, so an operator never ends up with a role that has `CONNECT` but no table/schema/sequence privileges (which a failure partway through two separate commands could otherwise leave behind). It's deliberately not placed under `docker/postgres-init/` — that directory auto-runs on every fresh volume, at a point before Alembic has created any tables yet, so its `GRANT ... ON users, orgs, ...` statements would fail on a genuinely fresh volume. Safe to re-run.
 
 7. Start the stack:
 
