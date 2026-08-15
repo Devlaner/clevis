@@ -41,6 +41,16 @@ END
 $do$;
 $fmt$, :'api_password') \gexec
 
+-- Runs unconditionally (not just on first creation) so re-running this script always
+-- converges the role to the current API_DB_PASSWORD and to the least-privilege
+-- attributes below -- covering both a rotated password and a role that was somehow
+-- created with broader attributes than intended (e.g. by hand, before this script
+-- existed). NOBYPASSRLS in particular matters: the whole point of this role (issue
+-- #330) is to actually be subject to Row-Level Security, unlike DB_USER.
+SELECT format($fmt$
+ALTER ROLE clevis_api WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L;
+$fmt$, :'api_password') \gexec
+
 GRANT CONNECT ON DATABASE :"db_name" TO clevis_api;
 GRANT USAGE ON SCHEMA public TO clevis_api;
 GRANT SELECT, INSERT, UPDATE, DELETE ON users, orgs, org_memberships, tenants, memberships, invitations, github_installations, saved_tokens, audit_logs, scan_results, jobs, app_config TO clevis_api;
