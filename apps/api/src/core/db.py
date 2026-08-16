@@ -335,6 +335,20 @@ def set_session_user(db: Session, user_id: int) -> None:
     db.execute(text(f"SET app.user_id = {int(user_id)}"))
 
 
+def set_session_tenant(db: Session, tenant_id: int) -> None:
+    """Sets app.tenant_id alone, for system code paths that resolve a tenant_id without an
+    acting user -- e.g. the GitHub webhook receiver (issue #191/S3), which runs before any
+    authenticated session exists (HMAC-signature-verified, not login-gated), so there's no
+    app.user_id to set alongside it. Satisfies the tenant_id-equality half of migration
+    0031's github_installations/memberships policies. The tenant_id here must come from a
+    trusted resolution (e.g. resolve_installation_tenant_id(), migration 0035's SECURITY
+    DEFINER function) -- this call only sets session state for RLS to read, it does not
+    itself verify the caller is entitled to that tenant. Same plain-SET reasoning as
+    set_session_user/rbac.set_tenant_session_context -- see their docstrings.
+    """
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+
+
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
