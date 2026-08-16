@@ -29,7 +29,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
-from src.core.db import GitHubInstallation, Org, Tenant, User
+from src.core.db import GitHubInstallation, Org, Tenant, User, set_session_user
 from src.core.rbac import set_tenant_session_context
 from src.repositories import installation_repo, org_repo
 
@@ -115,14 +115,21 @@ def test_installation_deleted_removes_the_row_with_no_session_context_set():
                 assert still_present is None
             finally:
                 session.rollback()
-                # Restore tenant context (if the test's own delete-under-test didn't
-                # already remove the row via the fix, e.g. when run against the pre-fix
-                # code) so this cleanup's own writes against RLS-protected
-                # github_installations/tenants aren't blocked by the very same gap this
-                # PR fixes -- deliberately using the raw SET here, not the fix's
-                # SECURITY DEFINER path, since cleanup already has tenant/user in scope.
-                if tenant is not None and user is not None:
-                    set_tenant_session_context(session, tenant.id, user.id)
+                # Restore context (if the test's own delete-under-test didn't already
+                # remove the row via the fix, e.g. when run against the pre-fix code) so
+                # this cleanup's own writes against RLS-protected github_installations/
+                # tenants aren't blocked by the very same gap this PR fixes --
+                # deliberately using the raw SET here, not the fix's SECURITY DEFINER
+                # path, since cleanup already has tenant/user in scope. Falls back to
+                # set_session_user alone when tenant resolution itself failed (tenant is
+                # still None) but user was created -- restoring at least the user-scoped
+                # half of RLS's self-access clause instead of skipping restoration
+                # entirely (CodeRabbit finding on PR #337).
+                if user is not None:
+                    if tenant is not None:
+                        set_tenant_session_context(session, tenant.id, user.id)
+                    else:
+                        set_session_user(session, user.id)
                 if installation is not None:
                     session.execute(
                         text("DELETE FROM github_installations WHERE installation_id = :iid"), {"iid": 987654}
@@ -195,8 +202,11 @@ def test_resolve_installation_tenant_id_bypasses_rls_with_no_session_context():
                 assert resolved == tenant.id
             finally:
                 session.rollback()
-                if tenant is not None and user is not None:
-                    set_tenant_session_context(session, tenant.id, user.id)
+                if user is not None:
+                    if tenant is not None:
+                        set_tenant_session_context(session, tenant.id, user.id)
+                    else:
+                        set_session_user(session, user.id)
                 session.execute(
                     text("DELETE FROM github_installations WHERE installation_id = :iid"), {"iid": 987655}
                 )

@@ -60,6 +60,12 @@ def upgrade() -> None:
         $$;
         """
     )
+    # Postgres grants EXECUTE on a new function to PUBLIC by default (unlike tables) --
+    # left alone, the GRANT below wouldn't actually narrow anything, since every role
+    # that can connect could already call this function and read any installation's
+    # tenant_id, defeating the "narrow, deliberately scoped" bypass this migration's
+    # docstring describes (CodeRabbit finding on PR #337).
+    op.execute("REVOKE EXECUTE ON FUNCTION resolve_installation_tenant_id(integer) FROM PUBLIC")
     op.execute(
         """
         DO $$
