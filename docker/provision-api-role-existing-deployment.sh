@@ -53,8 +53,13 @@ $fmt$, :'api_password') \gexec
 
 GRANT CONNECT ON DATABASE :"db_name" TO clevis_api;
 GRANT USAGE ON SCHEMA public TO clevis_api;
-GRANT SELECT, INSERT, UPDATE, DELETE ON users, orgs, org_memberships, tenants, memberships, invitations, github_installations, saved_tokens, audit_logs, scan_results, jobs, app_config TO clevis_api;
-GRANT USAGE, SELECT ON users_id_seq, orgs_id_seq, org_memberships_id_seq, tenants_id_seq, memberships_id_seq, invitations_id_seq, github_installations_id_seq, saved_tokens_id_seq, audit_logs_id_seq, scan_results_id_seq, jobs_id_seq TO clevis_api;
+GRANT SELECT, INSERT, UPDATE, DELETE ON users, orgs, org_memberships, tenants, memberships, invitations, github_installations, saved_tokens, audit_logs, scan_results, jobs, app_config, webhook_deliveries TO clevis_api;
+GRANT USAGE, SELECT ON users_id_seq, orgs_id_seq, org_memberships_id_seq, tenants_id_seq, memberships_id_seq, invitations_id_seq, github_installations_id_seq, saved_tokens_id_seq, audit_logs_id_seq, scan_results_id_seq, jobs_id_seq, webhook_deliveries_id_seq TO clevis_api;
+
+-- resolve_installation_tenant_id() (migration 0035, issue #191/S3 PR 2) needs no GRANT
+-- here -- Postgres functions default to PUBLIC EXECUTE unless explicitly revoked, unlike
+-- tables, so it's already callable without this script's help. Mentioned only so the next
+-- person editing this file doesn't wonder why it's missing from the list above.
 
 COMMIT;
 EOSQL
