@@ -16,6 +16,15 @@ _urlenc() {
 _db_user_enc=$(_urlenc "$DB_USER")
 _db_password_enc=$(_urlenc "$DB_PASSWORD")
 _db_name_enc=$(_urlenc "$DB_NAME")
+_redis_password_enc=$(_urlenc "$REDIS_PASSWORD")
+
+# Issue #191/S3: webhook ingestion queue. Built here (not left as a directly-set
+# REDIS_URL) so the raw password only ever needs to be set once, the same shape as
+# DB_USER/DB_PASSWORD/DB_NAME above -- REDIS_URL itself stays a "local dev outside
+# Docker only" var (see .env.example), same as DATABASE_URL. Must be set before
+# `alembic upgrade head` below, since alembic/env.py imports src.core.config, which
+# now requires REDIS_URL (Settings() fails to construct otherwise).
+export REDIS_URL="redis://:${_redis_password_enc}@redis:6379/0"
 
 # Migrations always run under the DB_USER superuser credential -- it owns the tables
 # (see migration 0030's ENABLE-without-FORCE reasoning: table owners bypass RLS unless
@@ -34,12 +43,6 @@ python -m alembic upgrade head
 if [ -n "$API_DB_PASSWORD" ]; then
   export DATABASE_URL="postgresql+psycopg://clevis_api:$(_urlenc "$API_DB_PASSWORD")@db:5432/${_db_name_enc}"
 fi
-
-# Issue #191/S3: webhook ingestion queue. Built here (not left as a directly-set
-# REDIS_URL) so the raw password only ever needs to be set once, the same shape as
-# DB_USER/DB_PASSWORD/DB_NAME above -- REDIS_URL itself stays a "local dev outside
-# Docker only" var (see .env.example), same as DATABASE_URL.
-export REDIS_URL="redis://:$(_urlenc "$REDIS_PASSWORD")@redis:6379/0"
 
 # --proxy-headers/--forwarded-allow-ips: trust X-Forwarded-Proto from Traefik so
 # request.url_for() (used to build the GitHub OAuth callback/redirect_uri) reports the
