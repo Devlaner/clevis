@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 
-if [ -z "$DB_USER" ] || [ -z "$DB_NAME" ] || [ -z "$DB_PASSWORD" ] || [ -z "$JOB_SECRET_KEY" ] || [ -z "$AUTH_SECRET" ]; then
-  echo "ERROR: DB_USER, DB_NAME, DB_PASSWORD, JOB_SECRET_KEY, and AUTH_SECRET must all be set" >&2
+if [ -z "$DB_USER" ] || [ -z "$DB_NAME" ] || [ -z "$DB_PASSWORD" ] || [ -z "$JOB_SECRET_KEY" ] || [ -z "$AUTH_SECRET" ] || [ -z "$REDIS_PASSWORD" ]; then
+  echo "ERROR: DB_USER, DB_NAME, DB_PASSWORD, JOB_SECRET_KEY, AUTH_SECRET, and REDIS_PASSWORD must all be set" >&2
   exit 1
 fi
 
@@ -16,6 +16,15 @@ _urlenc() {
 _db_user_enc=$(_urlenc "$DB_USER")
 _db_password_enc=$(_urlenc "$DB_PASSWORD")
 _db_name_enc=$(_urlenc "$DB_NAME")
+_redis_password_enc=$(_urlenc "$REDIS_PASSWORD")
+
+# Issue #191/S3: webhook ingestion queue. Built here (not left as a directly-set
+# REDIS_URL) so the raw password only ever needs to be set once, the same shape as
+# DB_USER/DB_PASSWORD/DB_NAME above -- REDIS_URL itself stays a "local dev outside
+# Docker only" var (see .env.example), same as DATABASE_URL. Must be set before
+# `alembic upgrade head` below, since alembic/env.py imports src.core.config, which
+# now requires REDIS_URL (Settings() fails to construct otherwise).
+export REDIS_URL="redis://:${_redis_password_enc}@redis:6379/0"
 
 # Migrations always run under the DB_USER superuser credential -- it owns the tables
 # (see migration 0030's ENABLE-without-FORCE reasoning: table owners bypass RLS unless

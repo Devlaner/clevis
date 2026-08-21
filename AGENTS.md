@@ -13,7 +13,7 @@ Clevis is a GitHub analytics dashboard with three independently deployable servi
 
 ### Database models (`apps/api/src/core/db.py`)
 
-Nine tables managed by Alembic — no runtime DDL:
+Tables managed by Alembic — no runtime DDL. (Not an exhaustive list of every table in `apps/api/src/core/db.py` — `tenants`/`memberships` predate this list being kept current; see that file for the authoritative schema.)
 - **`users`** — email/password or GitHub-OAuth-linked accounts. `is_workspace_admin` (instance-level, set once at first-run `/auth/setup`), `token_version` (bumped to invalidate all issued JWTs), `email_verified` / `email_verify_token` / `email_verify_token_expires_at` (issue #217 — self-registered accounts start unverified and can't accept org invites until they click the emailed link; GitHub-linked and first-run-setup accounts are verified immediately since their email is already trusted).
 - **`orgs`** / **`org_memberships`** — a GitHub org becomes a Clevis `Org` row once someone connects it; `org_memberships` is the `(org_id, user_id) -> role ("member"|"admin")` join table `require_org_role` checks against.
 - **`invitations`** — pending org invites by email; `accept_invitation` requires the accepting user's email to match and (per #217) `email_verified=True`.
@@ -23,6 +23,7 @@ Nine tables managed by Alembic — no runtime DDL:
 - **`jobs`** — job queue; composite index on `(status, job_type)` for efficient worker polling. Status lifecycle: `queued → processing → done/failed`. The `result` column stores JSON on success or a raw exception string on failure. `retry_count` caps both reclaim-after-crash and transient-failure retries at `MAX_RETRIES`; `heartbeat_at` (issue #215) lets a long-running-but-alive job survive the reclaim sweep past `RECLAIM_TIMEOUT_MINUTES`.
 - **`scan_results`** — historical security-scan snapshots (score, checks JSON) powering the score-trend chart; `scanned_by_user_id` scopes personal-endpoint scan history when there's no org membership to gate on.
 - **`app_config`** — DB-backed, Settings-page-editable runtime config (currently just `worker_poll_seconds`; see Development setup below).
+- **`webhook_deliveries`** — issue #191/S3: durable landing spot for verified GitHub webhook payloads (raw `bytea` body, delivery id, event type, resolved `tenant_id` when resolvable) before they're queued onto Redis Streams for later processing. `status` (`queued`/`queue_failed`) lets a future sweep re-enqueue anything the queue write itself failed on. Not deduplicated by `delivery_id` here — GitHub redelivers on retry, and dedupe is the S4 event-processor's job, not this table's.
 
 ### Job queue flow
 
@@ -74,7 +75,7 @@ pip install -e packages/checks
 cd apps/ui && bun install
 ```
 
-**Required env vars (6 total):** `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `JOB_SECRET_KEY`, `AUTH_SECRET`, `NEXT_PUBLIC_API_BASE`. Everything else is optional with a safe default in code (`CORS_ORIGINS`, `GITHUB_API_BASE`, the `GITHUB_APP_*` block for GitHub App auth/OAuth, the `SMTP_*` block for verification emails — see `.env.example`). Everything else lives in the `app_config` DB table (configured via Settings page).
+**Required env vars (7 total):** `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `JOB_SECRET_KEY`, `AUTH_SECRET`, `NEXT_PUBLIC_API_BASE`, `REDIS_PASSWORD`. Everything else is optional with a safe default in code (`CORS_ORIGINS`, `GITHUB_API_BASE`, the `GITHUB_APP_*` block for GitHub App auth/OAuth, the `SMTP_*` block for verification emails — see `.env.example`). Everything else lives in the `app_config` DB table (configured via Settings page).
 
 Key variables:
 - `DB_USER`, `DB_PASSWORD`, `DB_NAME` — Postgres credentials. Docker Compose maps these to `POSTGRES_USER/PASSWORD/DB` for the db container; entrypoints construct `DATABASE_URL` from them (host = `db`).
@@ -82,6 +83,7 @@ Key variables:
 - `JOB_SECRET_KEY` — Fernet key for token encryption; generate with `openssl rand -hex 32`
 - `AUTH_SECRET` — JWT signing secret; generate with `openssl rand -hex 32`
 - `NEXT_PUBLIC_API_BASE` — `http://localhost:8080` for local dev
+- `REDIS_PASSWORD` — issue #191/S3's webhook ingestion queue (Redis Streams). Auths the `redis` Compose service (`--requirepass`, so any other container on the shared network can't read/inject stream entries); `apps/api/entrypoint.sh` builds `REDIS_URL` from it, same pattern as `DB_USER`/`DB_PASSWORD`/`DB_NAME` → `DATABASE_URL`. `REDIS_URL` itself is local-dev-only (outside Docker), same as `DATABASE_URL`.
 - `API_PORT` / `UI_PORT` — `8080` / `3000`
 
 **Deploy-time config (env vars, safe defaults in code):**

@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from src.core.config import settings
-from src.core.db import AuditLog, get_db
+from src.core.db import AuditLog, WebhookDelivery, get_db
+from src.core.redis_client import get_redis_client
 from src.repositories import installation_repo, org_repo
-from src.routers.webhooks import router as webhooks_router
+from src.routers import webhooks as webhooks_module
+from src.routers.webhooks import _WEBHOOK_STREAM_KEY, router as webhooks_router
 
 _SECRET = "test-webhook-secret"
 
@@ -26,22 +28,41 @@ def webhook_client(db, monkeypatch):
     return TestClient(app)
 
 
+@pytest.fixture()
+def redis_client():
+    # FLUSHDB, not a per-test key prefix: the ingestion path's stream key is a fixed
+    # module constant, not parameterized per test, so isolating one test's entries
+    # from another's needs the whole (test) DB cleared -- fine since this is a
+    # dedicated Redis instance for the test suite, never a shared/production one.
+    client = get_redis_client()
+    client.flushdb()
+    yield client
+    client.flushdb()
+
+
 def _sign(body: bytes, secret: str = _SECRET) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
-def _post(client, event: str, payload: dict, *, secret: str = _SECRET, signature: str | None = None):
+def _post(
+    client,
+    event: str,
+    payload: dict,
+    *,
+    secret: str = _SECRET,
+    signature: str | None = None,
+    headers_extra: dict | None = None,
+):
     body = json.dumps(payload).encode()
     sig = signature if signature is not None else _sign(body, secret)
-    return client.post(
-        "/webhooks/github",
-        content=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-GitHub-Event": event,
-            "X-Hub-Signature-256": sig,
-        },
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": event,
+        "X-Hub-Signature-256": sig,
+    }
+    if headers_extra:
+        headers.update(headers_extra)
+    return client.post("/webhooks/github", content=body, headers=headers)
 
 
 def test_rejects_missing_signature(webhook_client):
@@ -179,6 +200,77 @@ def test_installation_deleted_ignores_non_integer_installation_id(db, webhook_cl
     # Nothing should be deleted, and no exception should propagate from a type mismatch
     # hitting the database — an installation_id of the wrong type must be a safe no-op.
     assert len(installation_repo.list_for_org(db, org_id=org.id)) == 1
+
+
+def test_push_event_writes_webhook_delivery_row_and_queues_it(db, webhook_client, redis_client):
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=org.id
+    )
+
+    resp = _post(
+        webhook_client,
+        "push",
+        {"installation": {"id": 42}, "ref": "refs/heads/main"},
+        headers_extra={"X-GitHub-Delivery": "delivery-abc-123"},
+    )
+
+    assert resp.status_code == 200
+    rows = db.query(WebhookDelivery).filter(WebhookDelivery.delivery_id == "delivery-abc-123").all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.event_type == "push"
+    assert row.installation_id == 42
+    assert row.status == "queued"
+    assert row.tenant_id is not None
+    assert json.loads(row.payload) == {"installation": {"id": 42}, "ref": "refs/heads/main"}
+
+    entries = redis_client.xrange(_WEBHOOK_STREAM_KEY)
+    assert len(entries) == 1
+    _, fields = entries[0]
+    assert fields["event_type"] == "push"
+    assert fields["delivery_row_id"] == str(row.id)
+    assert fields["tenant_id"] == str(row.tenant_id)
+
+
+def test_ingested_event_without_installation_still_queues_with_null_tenant(db, webhook_client, redis_client):
+    resp = _post(webhook_client, "issues", {"action": "opened"}, headers_extra={"X-GitHub-Delivery": "delivery-no-inst"})
+
+    assert resp.status_code == 200
+    row = db.query(WebhookDelivery).filter(WebhookDelivery.delivery_id == "delivery-no-inst").first()
+    assert row is not None
+    assert row.installation_id is None
+    assert row.tenant_id is None
+    assert row.status == "queued"
+
+    entries = redis_client.xrange(_WEBHOOK_STREAM_KEY)
+    assert len(entries) == 1
+    assert entries[0][1]["tenant_id"] == ""
+
+
+def test_unrecognized_event_type_does_not_write_a_webhook_delivery_row(db, webhook_client, redis_client):
+    resp = _post(webhook_client, "ping", {"zen": "hello"})
+
+    assert resp.status_code == 200
+    assert db.query(WebhookDelivery).count() == 0
+    assert redis_client.xrange(_WEBHOOK_STREAM_KEY) == []
+
+
+def test_redis_unreachable_still_returns_200_and_marks_row_queue_failed(db, webhook_client, monkeypatch):
+    class _BrokenClient:
+        def xadd(self, *args, **kwargs):
+            raise ConnectionError("redis unreachable")
+
+    monkeypatch.setattr(webhooks_module, "get_redis_client", lambda: _BrokenClient())
+
+    resp = _post(
+        webhook_client, "release", {"action": "published"}, headers_extra={"X-GitHub-Delivery": "delivery-redis-down"}
+    )
+
+    assert resp.status_code == 200
+    row = db.query(WebhookDelivery).filter(WebhookDelivery.delivery_id == "delivery-redis-down").first()
+    assert row is not None
+    assert row.status == "queue_failed"
 
 
 def test_route_is_registered_on_the_real_app(db, monkeypatch):

@@ -16,7 +16,7 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
    cp .env.example .env
    ```
 
-2. Fill in `.env`. Six vars are hard-required (the app fails to start without them) — `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `JOB_SECRET_KEY` (`openssl rand -hex 32`), `AUTH_SECRET` (`openssl rand -hex 32`), `NEXT_PUBLIC_API_BASE`. Everything else in `.env.example` has a safe default and only needs overriding per environment (e.g. `CORS_ORIGINS` for your real UI domain, `GITHUB_API_BASE` for GitHub Enterprise).
+2. Fill in `.env`. Seven vars are hard-required (the app fails to start without them) — `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `JOB_SECRET_KEY` (`openssl rand -hex 32`), `AUTH_SECRET` (`openssl rand -hex 32`), `NEXT_PUBLIC_API_BASE`, `REDIS_PASSWORD` (`openssl rand -hex 32` — auths the `redis` service used for webhook ingestion, issue #191). Everything else in `.env.example` has a safe default and only needs overriding per environment (e.g. `CORS_ORIGINS` for your real UI domain, `GITHUB_API_BASE` for GitHub Enterprise).
 
 3. Register a GitHub App on github.com (**Settings → Developer settings → GitHub Apps → New GitHub App**) so users can connect their orgs after the instance is running. The App form asks for three separate URLs — each one is where GitHub sends the browser back to at a different point in the flow, so don't reuse one URL for another's purpose:
    - **Homepage URL** — your deployed UI URL. Shown on the App's public listing page; not used in any redirect.
