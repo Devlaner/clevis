@@ -101,7 +101,7 @@ def _enqueue_backfill_best_effort(db: Session, *, tenant_id: int, account_login:
         # A DB-level error here (e.g. from job_repo.enqueue's own commit) leaves the
         # shared request Session's transaction aborted -- roll it back so the response
         # this handler still has to build (row.token_ref) doesn't itself 500 trying to
-        # use a poisoned session (CodeRabbit finding on #342).
+        # use a poisoned session.
         db.rollback()
         logger.exception("failed to enqueue activity backfill for %s", account_login)
 

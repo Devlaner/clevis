@@ -276,10 +276,10 @@ class _FailingConn(_FakeConn):
 
 
 def test_handler_rolls_back_and_requeues_on_a_db_error_during_the_insert_loop():
-    # CodeRabbit finding on #342: without a rollback here, the connection's transaction
-    # stays aborted and the _mark_failed/_requeue_for_retry UPDATE that follows would
-    # itself raise InFailedSqlTransaction, leaving the job stuck in 'processing' forever
-    # instead of being requeued.
+    # Without a rollback here, the connection's transaction stays aborted and the
+    # _mark_failed/_requeue_for_retry UPDATE that follows would itself raise
+    # InFailedSqlTransaction, leaving the job stuck in 'processing' forever instead of
+    # being requeued.
     conn = _FailingConn()
     events = [_raw_event(id="b-db-error-1")]
 
@@ -287,7 +287,7 @@ def test_handler_rolls_back_and_requeues_on_a_db_error_during_the_insert_loop():
         worker._handle_backfill_repo_events(conn, 5, _payload(), 0)
 
     assert conn.rolled_back is True
-    sql, params = conn._cursor.calls[0]
+    sql, _params = conn._cursor.calls[0]
     assert "status='queued'" in sql  # requeued, not stuck in 'processing'
 
 

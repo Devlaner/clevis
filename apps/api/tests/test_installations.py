@@ -162,10 +162,10 @@ def test_sync_org_installation_still_succeeds_when_no_backfill_token_is_availabl
 
 
 def test_sync_org_installation_survives_a_db_error_during_backfill_enqueue(db, acme_org):
-    # CodeRabbit finding on #342: a DB-level error from resolve_token()/enqueue() (not
-    # NoGitHubTokenAvailable) used to leave the shared Session's transaction aborted, so
-    # the install response's own row.token_ref access (a post-commit lazy reload) would
-    # itself raise and turn an already-successful install into a 500.
+    # A DB-level error from resolve_token()/enqueue() (not NoGitHubTokenAvailable) used
+    # to leave the shared Session's transaction aborted, so the install response's own
+    # row.token_ref access (a post-commit lazy reload) would itself raise and turn an
+    # already-successful install into a 500.
     def _boom(*args, **kwargs):
         db.execute(text("SELECT 1/0"))  # forces a real, session-aborting Postgres error
 
