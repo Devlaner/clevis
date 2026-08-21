@@ -289,6 +289,10 @@ def test_handler_rolls_back_and_requeues_on_a_db_error_during_the_insert_loop():
     assert conn.rolled_back is True
     sql, _params = conn._cursor.calls[0]
     assert "status='queued'" in sql  # requeued, not stuck in 'processing'
+    # The activity_sync_cursors upsert never even runs -- the failure happens on the
+    # very first execute() (SET app.tenant_id), before the insert loop or the cursor
+    # upsert are reached.
+    assert not any("activity_sync_cursors" in sql for sql, _params in conn._cursor.calls)
 
 
 # ---------------------------------------------------------------------------
@@ -413,3 +417,42 @@ def test_handler_uses_the_user_events_path_for_personal_installs(pg_conn, tenant
     called_url = mock_client.get.call_args[0][0]
     assert "/users/octocat/events" in called_url
     assert _repo_events_count(pg_conn, tenant_id, repo) == 1
+
+
+def _sync_cursor(conn, tenant_id):
+    with conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute(
+            "SELECT account_login, account_type, last_synced_at FROM activity_sync_cursors WHERE tenant_id = %s",
+            (tenant_id,),
+        )
+        return cur.fetchone()
+
+
+def test_handler_upserts_the_sync_cursor_on_success(pg_conn, tenant_id):
+    repo = "acme/cursor-fresh"
+    events = [_raw_event(id="b-cursor-1", event_type="PushEvent", repo={"name": repo})]
+
+    with patch("worker.httpx.Client", return_value=_mock_github_client(events)):
+        worker._handle_backfill_repo_events(pg_conn, 105, _payload_for(tenant_id), 0)
+
+    row = _sync_cursor(pg_conn, tenant_id)
+    assert row is not None
+    account_login, account_type, last_synced_at = row
+    assert account_login == "acme"
+    assert account_type == "Organization"
+    assert last_synced_at is not None
+
+
+def test_handler_cursor_upsert_advances_last_synced_at_on_rerun(pg_conn, tenant_id):
+    repo = "acme/cursor-rerun"
+    events = [_raw_event(id="b-cursor-2", event_type="PushEvent", repo={"name": repo})]
+
+    with patch("worker.httpx.Client", return_value=_mock_github_client(events)):
+        worker._handle_backfill_repo_events(pg_conn, 106, _payload_for(tenant_id), 0)
+        first_synced_at = _sync_cursor(pg_conn, tenant_id)[2]
+
+        worker._handle_backfill_repo_events(pg_conn, 107, _payload_for(tenant_id), 0)
+        second_synced_at = _sync_cursor(pg_conn, tenant_id)[2]
+
+    assert second_synced_at >= first_synced_at

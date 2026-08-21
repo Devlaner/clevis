@@ -196,6 +196,25 @@ class RepoEventDailyCount(Base):
     count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class ActivitySyncCursor(Base):
+    """Per-tenant "how far synced" cursor (issue #192, S5 PR 2), migration 0038. One row per
+    tenant, upserted by apps/worker's github.backfill_repo_events handler after every successful
+    run -- both the install-time trigger (S5 PR 1, PR #342) and the scheduled gap-heal sweep this
+    PR adds. Per-tenant, not per-repo: GitHub's Events API is org/user-scoped, not repo-scoped, so
+    there is nothing to key a per-repo cursor on yet. last_synced_at is nullable -- a row doesn't
+    exist until the tenant's first successful sync completes."""
+
+    __tablename__ = "activity_sync_cursors"
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    account_login: Mapped[str] = mapped_column(String, nullable=False)
+    account_type: Mapped[str] = mapped_column(String, nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SavedToken(Base):
     __tablename__ = "saved_tokens"
 
