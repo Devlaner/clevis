@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -26,6 +27,7 @@ from src.routers import (
     tokens,
     webhooks,
 )
+from src.services.gap_heal_loop import gap_heal_loop
 
 # CORS allowed origins are a deploy-time security boundary, set via the CORS_ORIGINS env var.
 _cors_origins = settings.cors_origins
@@ -34,7 +36,15 @@ _cors_origins = settings.cors_origins
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     setup_logging()
-    yield
+    task = asyncio.create_task(gap_heal_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(

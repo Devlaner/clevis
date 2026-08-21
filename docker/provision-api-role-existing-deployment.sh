@@ -87,6 +87,17 @@ BEGIN
 END
 $do$;
 
+-- activity_sync_cursors (migration 0038, issue #192/S5 PR 2): same reasoning as
+-- repo_event_daily_counts immediately above -- CI runs apps/worker's tests as clevis_api, and this
+-- table has no sequence (tenant_id is the PK), so only the table grant is needed.
+DO $do$
+BEGIN
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'activity_sync_cursors') THEN
+    GRANT SELECT, INSERT, UPDATE ON activity_sync_cursors TO clevis_api;
+  END IF;
+END
+$do$;
+
 -- resolve_installation_tenant_id() (migration 0035) REVOKEs its default PUBLIC EXECUTE
 -- and re-GRANTs it only to clevis_api -- but that migration's own GRANT is itself
 -- conditional on clevis_api already existing, which isn't true the first time this

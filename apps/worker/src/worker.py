@@ -276,6 +276,23 @@ def _handle_backfill_repo_events(conn: psycopg.Connection, job_id: int, payload_
                     continue
                 if repo_events_store.insert_event_and_upsert_daily_count(cur, tenant_id=payload.tenant_id, **normalized):
                     inserted_count += 1
+
+            # Marks this tenant as freshly synced regardless of trigger (install-time or
+            # the gap-heal sweep) -- issue #192's sync cursor. Upserted in the same
+            # transaction as the event inserts above so a rolled-back run (below) doesn't
+            # advance the cursor past events that were never actually stored.
+            cur.execute(
+                """
+                INSERT INTO activity_sync_cursors (tenant_id, account_login, account_type, last_synced_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (tenant_id) DO UPDATE SET
+                    account_login = EXCLUDED.account_login,
+                    account_type = EXCLUDED.account_type,
+                    last_synced_at = EXCLUDED.last_synced_at,
+                    updated_at = NOW()
+                """,
+                (payload.tenant_id, payload.account_login, payload.account_type),
+            )
         conn.commit()
     except psycopg.Error as error:
         # Without a rollback here, this connection's transaction stays aborted -- the

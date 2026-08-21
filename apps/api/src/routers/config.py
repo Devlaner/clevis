@@ -16,7 +16,7 @@ from src.core.auth import UserOut, require_workspace_admin
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_INT_KEYS = {"worker_poll_seconds"}
+_INT_KEYS = {"worker_poll_seconds", "gap_heal_poll_seconds", "gap_heal_stale_hours"}
 _BOOL_KEYS = {"registration_enabled"}
 
 

@@ -22,7 +22,7 @@ Tables managed by Alembic — no runtime DDL. (Not an exhaustive list of every t
 - **`audit_logs`** — immutable audit trail; every significant action (cache clear, dry-run, etc.) writes here with actor, action, target, and payload JSON.
 - **`jobs`** — job queue; composite index on `(status, job_type)` for efficient worker polling. Status lifecycle: `queued → processing → done/failed`. The `result` column stores JSON on success or a raw exception string on failure. `retry_count` caps both reclaim-after-crash and transient-failure retries at `MAX_RETRIES`; `heartbeat_at` (issue #215) lets a long-running-but-alive job survive the reclaim sweep past `RECLAIM_TIMEOUT_MINUTES`.
 - **`scan_results`** — historical security-scan snapshots (score, checks JSON) powering the score-trend chart; `scanned_by_user_id` scopes personal-endpoint scan history when there's no org membership to gate on.
-- **`app_config`** — DB-backed, Settings-page-editable runtime config (currently just `worker_poll_seconds`; see Development setup below).
+- **`app_config`** — DB-backed, Settings-page-editable runtime config (`worker_poll_seconds`, `gap_heal_poll_seconds`, `gap_heal_stale_hours`; see Development setup below).
 - **`webhook_deliveries`** — issue #191/S3: durable landing spot for verified GitHub webhook payloads (raw `bytea` body, delivery id, event type, resolved `tenant_id` when resolvable) before they're queued onto Redis Streams for later processing. `status` (`queued`/`queue_failed`) lets a future sweep re-enqueue anything the queue write itself failed on. Not deduplicated by `delivery_id` here — GitHub redelivers on retry, and dedupe is the S4 event-processor's job, not this table's.
 
 ### Job queue flow
@@ -96,6 +96,8 @@ Key variables:
 
 **DB-backed config (editable in Settings → Instance Configuration):**
 - `worker_poll_seconds` — default `5`, clamped to `[1, 30]`; the worker re-reads it each loop, so changes take effect live without a restart. The upper clamp keeps the worker's heartbeat healthcheck in `docker-compose.yml` meaningful (see `apps/worker/src/worker.py`'s `_MAX_POLL_SECONDS`).
+- `gap_heal_poll_seconds` — default `900`, clamped to `[60, 3600]`. How often the API's gap-heal sweep (issue #192/S5 PR 2) runs, via an `asyncio` background loop started in `apps/api/src/main.py`'s lifespan (`src/services/gap_heal_loop.py`) — the API's own equivalent of the worker's poll loop, re-read each iteration.
+- `gap_heal_stale_hours` — default `6`, clamped to `[1, 168]`. How old a tenant's `activity_sync_cursors.last_synced_at` must be before the sweep re-enqueues a `github.backfill_repo_events` job for it (`src/services/gap_heal_sweep.py`).
 
 ## Running locally
 
