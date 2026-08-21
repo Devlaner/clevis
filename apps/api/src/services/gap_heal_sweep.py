@@ -35,6 +35,26 @@ def _read_stale_hours() -> int:
         return 6
 
 
+def _has_active_backfill_job(db: Session, tenant_id: int) -> bool:
+    """True if a github.backfill_repo_events job for this tenant is already queued or
+    processing. The cursor only advances once a job reaches a terminal state (worker.py's
+    _handle_backfill_repo_events upserts it right before _mark_done) -- without this check,
+    a job that's slow to finish (worker downtime, a retried run) would still look stale on
+    every subsequent sweep tick and get re-enqueued again and again, piling up duplicate
+    GitHub API work for the same tenant. jobs has no tenant_id column (it's a generic
+    queue), so this matches against the JSON payload the way it's actually stored --
+    job_repo.enqueue always writes tenant_id as a JSON number under this exact job_type."""
+    row = db.execute(
+        text(
+            "SELECT 1 FROM jobs WHERE job_type = 'github.backfill_repo_events' "
+            "AND status IN ('queued', 'processing') "
+            "AND (payload::jsonb ->> 'tenant_id')::int = :tenant_id LIMIT 1"
+        ),
+        {"tenant_id": tenant_id},
+    ).fetchone()
+    return row is not None
+
+
 def run_gap_heal_sweep(db: Session) -> None:
     stale_hours = _read_stale_hours()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=stale_hours)
@@ -60,6 +80,8 @@ def run_gap_heal_sweep(db: Session) -> None:
             continue
         account_login, account_type, last_synced_at = cursor_row
         if last_synced_at is not None and last_synced_at >= cutoff:
+            continue
+        if _has_active_backfill_job(db, tenant_id):
             continue
 
         try:

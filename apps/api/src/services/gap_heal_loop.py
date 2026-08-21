@@ -11,6 +11,8 @@ opens and closes its own short-lived session.
 import asyncio
 import logging
 
+from sqlalchemy import text
+
 from src.core.app_config import get_config
 from src.core.db import SessionLocal
 from src.services.gap_heal_sweep import run_gap_heal_sweep
@@ -34,7 +36,20 @@ def _read_poll_seconds() -> int:
 
 def _run_sweep() -> None:
     with SessionLocal() as db:
-        run_gap_heal_sweep(db)
+        try:
+            run_gap_heal_sweep(db)
+        finally:
+            # Mirrors get_db()'s own cleanup (src/core/db.py): run_gap_heal_sweep sets
+            # app.tenant_id via plain SET (not SET LOCAL) once per tenant, and
+            # backfill_service.enqueue's db.commit() makes that SET durable on the
+            # physical connection, not just this Session. SessionLocal() here bypasses
+            # get_db()'s own finally-block reset, so without this, the connection pool
+            # would hand the next checkout (a real request via get_db(), or the next
+            # sweep iteration) a connection with a leftover tenant context.
+            db.rollback()
+            db.execute(text("RESET app.tenant_id"))
+            db.execute(text("RESET app.user_id"))
+            db.commit()
 
 
 async def gap_heal_loop() -> None:

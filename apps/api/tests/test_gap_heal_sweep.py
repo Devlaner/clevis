@@ -115,6 +115,36 @@ def test_sweep_survives_a_token_resolution_failure_for_one_tenant(db):
     assert json.loads(jobs[0].payload)["account_login"] == "acme-sweep-ok"
 
 
+def test_sweep_does_not_double_enqueue_while_a_backfill_job_is_still_active(db):
+    # The cursor only advances once the worker's handler reaches _mark_done -- a sweep that
+    # fires again before a slow/retried job finishes must not pile up a second job for the
+    # same tenant (issue found on this PR's own review).
+    org = org_repo.get_or_create(db, github_login="acme-sweep-dedupe")
+    stale = datetime.now(timezone.utc) - timedelta(hours=10)
+    _seed_cursor(db, org.tenant_id, "acme-sweep-dedupe", "Organization", stale)
+
+    with patch("src.services.gap_heal_sweep.resolve_org_token", return_value="tok"):
+        run_gap_heal_sweep(db)
+        run_gap_heal_sweep(db)
+
+    jobs = _backfill_jobs(db)
+    assert len(jobs) == 1
+
+
+def test_sweep_re_enqueues_once_the_active_job_reaches_a_terminal_state(db):
+    org = org_repo.get_or_create(db, github_login="acme-sweep-retry")
+    stale = datetime.now(timezone.utc) - timedelta(hours=10)
+    _seed_cursor(db, org.tenant_id, "acme-sweep-retry", "Organization", stale)
+
+    with patch("src.services.gap_heal_sweep.resolve_org_token", return_value="tok"):
+        run_gap_heal_sweep(db)
+        db.execute(text("UPDATE jobs SET status = 'failed' WHERE job_type = 'github.backfill_repo_events'"))
+        db.commit()
+        run_gap_heal_sweep(db)
+
+    assert len(_backfill_jobs(db)) == 2
+
+
 def test_sweep_survives_a_generic_error_during_enqueue_for_one_tenant(db):
     # A DB-level error here (or any other unexpected exception) must not abort the whole
     # sweep -- the shared Session's transaction is rolled back and the loop moves on to

@@ -28,6 +28,47 @@ def test_read_poll_seconds_falls_back_on_non_integer():
         assert gap_heal_loop._read_poll_seconds() == 900
 
 
+class _FakeSession:
+    def __init__(self):
+        self.executed = []
+        self.rolled_back = False
+        self.committed = False
+
+    def execute(self, stmt, params=None):
+        self.executed.append(str(stmt))
+
+    def rollback(self):
+        self.rolled_back = True
+
+    def commit(self):
+        self.committed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_run_sweep_resets_the_tenant_session_context_even_when_the_sweep_raises():
+    # _run_sweep uses SessionLocal() directly, bypassing get_db()'s own finally-block
+    # reset -- without this, a connection returned to the pool after processing tenant N
+    # would leak tenant N's app.tenant_id into whichever request or sweep iteration checks
+    # that connection out next (issue found on this PR's own review).
+    fake_db = _FakeSession()
+
+    with (
+        patch("src.services.gap_heal_loop.SessionLocal", return_value=fake_db),
+        patch("src.services.gap_heal_loop.run_gap_heal_sweep", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError),
+    ):
+        gap_heal_loop._run_sweep()
+
+    assert any("RESET app.tenant_id" in s for s in fake_db.executed)
+    assert any("RESET app.user_id" in s for s in fake_db.executed)
+    assert fake_db.committed is True
+
+
 @pytest.mark.asyncio
 async def test_loop_runs_the_sweep_then_sleeps_each_iteration():
     # asyncio.sleep raising is what ends the (otherwise infinite) loop for this test --
