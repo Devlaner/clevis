@@ -1,9 +1,12 @@
-"""Redis Streams consumer for webhook_events (issue #191, S4 PR 1 of N).
+"""Redis Streams consumer for webhook_events (issue #191, S4).
 
 Normalizes each queued webhook delivery into the repo_events table, deduplicated by
-delivery_id. Runs as a second daemon thread in worker.py's run(), alongside the
-existing jobs-table poll loop -- not a separate process, so it shares the container's
-healthcheck/deploy story.
+delivery_id, and upserts a per-tenant/repo/event_type/day count into
+repo_event_daily_counts in the same transaction (S4 PR 2) -- the materialized-aggregate
+half of S4, gated on the repo_events insert having actually happened (not a deduped
+redelivery), so a redelivered webhook can't double-count the rollup. Runs as a second
+daemon thread in worker.py's run(), alongside the existing jobs-table poll loop -- not a
+separate process, so it shares the container's healthcheck/deploy story.
 
 Consumer-group semantics (XREADGROUP, group "event_processors") rather than a bare
 XREAD: today's docker-compose runs exactly one worker replica, but a bare XREAD has no
@@ -210,6 +213,7 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
             VALUES (%(tenant_id)s, %(delivery_id)s, %(event_type)s, %(actor)s, %(actor_avatar)s,
                     %(repo)s, %(summary)s, %(occurred_at)s)
             ON CONFLICT (delivery_id) DO NOTHING
+            RETURNING id
             """,
             {
                 "tenant_id": tenant_id,
@@ -217,6 +221,24 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
                 **normalized,
             },
         )
+        # Only upsert the aggregate when a repo_events row was actually inserted --
+        # RETURNING comes back empty on the ON CONFLICT DO NOTHING path (a redelivered
+        # webhook), and that must not double-count the rollup (issue #191/S4 PR 2).
+        if cur.fetchone() is not None:
+            cur.execute(
+                """
+                INSERT INTO repo_event_daily_counts (tenant_id, repo, event_type, day, count)
+                VALUES (%(tenant_id)s, %(repo)s, %(event_type)s, %(day)s, 1)
+                ON CONFLICT (tenant_id, repo, event_type, day)
+                DO UPDATE SET count = repo_event_daily_counts.count + 1
+                """,
+                {
+                    "tenant_id": tenant_id,
+                    "repo": normalized["repo"],
+                    "event_type": normalized["event_type"],
+                    "day": normalized["occurred_at"].date(),
+                },
+            )
         cur.execute("UPDATE webhook_deliveries SET status = 'processed' WHERE id = %s", (delivery_row_id,))
     pg_conn.commit()
     redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
