@@ -53,13 +53,32 @@ def _is_secondary_rate_limit(resp: httpx.Response) -> bool:
 def _retry_delay_seconds(resp: httpx.Response, attempt: int) -> float:
     """Prefer the server's own Retry-After value (GitHub's rate-limit responses include one)
     over a blind exponential backoff -- retrying before the window it asked for just burns
-    the fixed attempt budget hitting the same limit again."""
+    the fixed attempt budget hitting the same limit again. Falls back to X-RateLimit-Reset
+    (epoch seconds) when Retry-After is absent -- GitHub's own docs say to wait until that
+    reset time when X-RateLimit-Remaining is 0 but no Retry-After was sent (found on this
+    PR's own review; the two other copies of this retry contract in this codebase don't
+    handle this case either, so this is a deliberate improvement over parity with them, not
+    a regression). Both paths are capped at _MAX_RETRY_AFTER_SECONDS for the same reason
+    Retry-After itself is capped. If neither header is usable, a 429 or a secondary-limit
+    403 still waits the full cap (GitHub's documented minimum backoff for a rate limit)
+    rather than a fast exponential retry that would just hit the same limit again; any other
+    status (a plain 5xx) falls back to exponential, unchanged."""
     raw = resp.headers.get("Retry-After")
     if raw is not None:
         try:
             return min(float(raw), _MAX_RETRY_AFTER_SECONDS)
         except ValueError:
             pass
+    reset_raw = resp.headers.get("X-RateLimit-Reset")
+    if reset_raw is not None:
+        try:
+            delay = float(reset_raw) - time.time()
+            if delay > 0:
+                return min(delay, _MAX_RETRY_AFTER_SECONDS)
+        except ValueError:
+            pass
+    if resp.status_code == 429 or _is_secondary_rate_limit(resp):
+        return _MAX_RETRY_AFTER_SECONDS
     return 2**attempt
 
 
