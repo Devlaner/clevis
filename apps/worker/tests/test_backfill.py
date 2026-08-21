@@ -180,6 +180,19 @@ def test_fetch_events_retries_a_secondary_rate_limit_403_via_remaining_header():
     assert [e["id"] for e in events] == ["1"]
 
 
+def test_fetch_events_retries_a_secondary_rate_limit_403_with_a_malformed_retry_after():
+    # A non-numeric Retry-After must fall back to exponential backoff rather than crash.
+    rate_limited = _FakeResponse({}, status_code=403, headers={"Retry-After": "not-a-number"})
+    success = _FakeResponse([_raw_event(id="1")])
+    client = _FakeClient([rate_limited, success])
+
+    with patch("backfill.time.sleep") as mock_sleep:
+        events = backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert [e["id"] for e in events] == ["1"]
+    mock_sleep.assert_called_once_with(1)  # 2**0
+
+
 def test_fetch_events_does_not_retry_a_genuine_permission_403():
     forbidden = _FakeResponse({}, status_code=403)  # no Retry-After, no X-RateLimit-Remaining
     client = _FakeClient([forbidden])
