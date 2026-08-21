@@ -44,8 +44,9 @@ function RepoActivityCell({ org, repo, token }: { org: string; repo: string; tok
   })
 
   const weeks = (data?.commit_activity ?? []).slice(-8).map((w) => w.total)
+  const isEstimated = data?.commit_activity_source === "aggregate"
   return (
-    <div ref={ref}>
+    <div ref={ref} title={isEstimated ? "Estimated from stored push events, not exact commit counts." : undefined}>
       {!inView || isLoading ? (
         <Skeleton className="h-8 w-24" />
       ) : isError ? (

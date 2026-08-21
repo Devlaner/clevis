@@ -1,14 +1,16 @@
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 from checks.github_checks import BranchProtectionEnabled, SecretScanningEnabled
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from src.core.db import get_db
+from src.core.db import RepoEventDailyCount, get_db
 from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
+from src.repositories import installation_repo
 from src.schemas.repos import (
     RepoListInput,
     RepoListResponse,
@@ -70,30 +72,84 @@ def _fetch_latest_release(client: GitHubClient, owner: str, repo: str) -> dict |
     }
 
 
-def _fetch_stats(owner: str, repo: str, token: str) -> RepoStatsResponse:
+def _repo_org_connected(db: Session, org_id: int, account_login: str) -> bool:
+    # Same installation_id-presence gate as src.routers.github's org_events/
+    # org_activity_summary -- repo_event_daily_counts is only ever populated for a
+    # tenant with a real connected GitHub App installation. Not shared code (routers
+    # don't import each other's private helpers in this codebase); duplicated per call
+    # site on purpose, same precedent as org_events' own comment about this check.
+    installation = installation_repo.get_for_org(db, org_id=org_id, account_login=account_login)
+    return installation is not None and installation.installation_id is not None
+
+
+def _repo_commit_activity_from_aggregate(db: Session, tenant_id: int, repo: str) -> list[dict]:
+    """Same {week, total, days} shape GitHub's stats/commit_activity returns (52 weeks,
+    oldest first, week = Unix seconds at that week's Sunday 00:00 UTC, days = 7 ints
+    Sun-Sat) -- built from repo_event_daily_counts' push-event counts instead of GitHub's
+    actual commit counts. This is an approximation (a push can carry multiple commits,
+    and doesn't 1:1 map to "commits" the way GitHub's own stat does) -- callers must set
+    RepoStatsResponse.commit_activity_source="aggregate" so the UI can label it as such."""
+    today = date.today()
+    # weekday(): Monday=0..Sunday=6; this finds the Sunday on/before `today`.
+    current_week_start = today - timedelta(days=(today.weekday() + 1) % 7)
+    oldest_week_start = current_week_start - timedelta(weeks=51)
+
+    rows = (
+        db.query(RepoEventDailyCount.day, RepoEventDailyCount.count)
+        .filter(
+            RepoEventDailyCount.tenant_id == tenant_id,
+            RepoEventDailyCount.repo == repo,
+            RepoEventDailyCount.event_type == "push",
+            RepoEventDailyCount.day >= oldest_week_start,
+        )
+        .all()
+    )
+    counts_by_day = {row.day: row.count for row in rows}
+
+    weeks = []
+    for i in range(52):
+        week_start = oldest_week_start + timedelta(weeks=i)
+        days = [counts_by_day.get(week_start + timedelta(days=d), 0) for d in range(7)]
+        week_epoch = int(datetime(week_start.year, week_start.month, week_start.day, tzinfo=timezone.utc).timestamp())
+        weeks.append({"week": week_epoch, "total": sum(days), "days": days})
+    return weeks
+
+
+def _fetch_stats(owner: str, repo: str, token: str, db: Session, tenant_id: int, connected: bool) -> RepoStatsResponse:
     client = GitHubClient(token)
-    # The five calls are independent — run them concurrently rather than one at a time.
+    # The calls are independent — run them concurrently rather than one at a time.
     # commit_activity/participation/contributors intentionally still propagate real
     # errors (a 4xx/5xx here means the repo/stats are genuinely unavailable), while
-    # repo_meta/latest_release degrade gracefully — see their own functions.
+    # repo_meta/latest_release degrade gracefully — see their own functions. When
+    # `connected`, commit_activity is served from repo_event_daily_counts instead (S6) --
+    # one fewer live GitHub call, see _repo_commit_activity_from_aggregate.
     with ThreadPoolExecutor(max_workers=5) as pool:
         repo_meta_f = pool.submit(_fetch_repo_meta, client, owner, repo)
-        commit_activity_f = pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/stats/commit_activity")
+        commit_activity_f = None if connected else pool.submit(
+            client.request, "GET", f"/repos/{owner}/{repo}/stats/commit_activity"
+        )
         participation_f = pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/stats/participation")
         contributors_f = pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/stats/contributors")
         latest_release_f = pool.submit(_fetch_latest_release, client, owner, repo)
 
         repo_meta = repo_meta_f.result()
-        commit_activity = commit_activity_f.result()
+        if connected:
+            commit_activity = _repo_commit_activity_from_aggregate(db, tenant_id, f"{owner}/{repo}")
+            commit_activity_source = "aggregate"
+        else:
+            raw_commit_activity = commit_activity_f.result()
+            # GitHub computes these stats asynchronously and returns 202 with an empty
+            # body on a cache miss — treat "not a list yet" as "not ready", not an error.
+            commit_activity = raw_commit_activity if isinstance(raw_commit_activity, list) else []
+            commit_activity_source = "github"
         participation = participation_f.result()
         contributors = contributors_f.result()
         latest_release = latest_release_f.result()
 
     return {
         "repository": f"{owner}/{repo}",
-        # GitHub computes these stats asynchronously and returns 202 with an empty body
-        # on a cache miss — treat "not a list/dict yet" as "not ready", not an error.
-        "commit_activity": commit_activity if isinstance(commit_activity, list) else [],
+        "commit_activity": commit_activity,
+        "commit_activity_source": commit_activity_source,
         "participation": participation if isinstance(participation, dict) else {},
         "contributors": contributors if isinstance(contributors, list) else [],
         "stargazers_count": repo_meta.get("stargazers_count", 0),
@@ -114,13 +170,13 @@ def _evict_expired_stats(now: float) -> None:
         del _stats_cache[key]
 
 
-def _cached_stats(owner: str, repo: str, token: str) -> RepoStatsResponse:
+def _cached_stats(owner: str, repo: str, token: str, db: Session, tenant_id: int, connected: bool) -> RepoStatsResponse:
     key = (owner, repo, _token_hash(token))
     now = time.monotonic()
     cached = _stats_cache.get(key)
     if cached and now - cached[0] < _STATS_CACHE_TTL_SECONDS:
         return cached[1]
-    stats = _fetch_stats(owner, repo, token)
+    stats = _fetch_stats(owner, repo, token, db, tenant_id, connected)
     _stats_cache[key] = (now, stats)
     _evict_expired_stats(now)
     return stats
@@ -173,8 +229,9 @@ def org_repo_stats(
         token = resolve_org_token(db, org_id=ctx.org.id, account_login=owner, client_token=_client_token(payload))
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    connected = _repo_org_connected(db, ctx.org.id, owner)
     try:
-        return _cached_stats(owner, repo, token)
+        return _cached_stats(owner, repo, token, db, ctx.org.tenant_id, connected)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         raise _github_error(exc) from exc
 
