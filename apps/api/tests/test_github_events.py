@@ -1,16 +1,19 @@
 """Tests for the org events feed router (Phase 9 groundwork)."""
 
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import User, get_db
-from src.repositories import org_membership_repo, org_repo
+from src.repositories import installation_repo, org_membership_repo, org_repo
 from src.routers.github import router as github_router
 from src.routers.github import _events_cache
-from unittest.mock import patch
 
 _ADMIN = UserOut(id=1, email="admin@example.com", name=None, is_workspace_admin=False)
 
@@ -269,3 +272,142 @@ def test_events_non_member_forbidden(db):
     client = TestClient(app)
     resp = client.post("/github/orgs/acme/events", json={})
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# S6: repo_events-backed path for orgs with a connected GitHub App installation
+# (issue #191/#192's ingestion pipeline -- S3 webhooks + S4 normalization + S5
+# backfill/gap-healing -- all require one, so this is the signal used to decide
+# which path serves a given org; see org_events's own comment).
+# ---------------------------------------------------------------------------
+
+
+def _insert_repo_event(db, tenant_id, *, delivery_id, event_type, actor, repo, summary, occurred_at):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO repo_events (tenant_id, delivery_id, event_type, actor, actor_avatar, repo, summary, occurred_at) "
+            "VALUES (:tenant_id, :delivery_id, :event_type, :actor, '', :repo, :summary, :occurred_at)"
+        ),
+        {
+            "tenant_id": tenant_id,
+            "delivery_id": delivery_id,
+            "event_type": event_type,
+            "actor": actor,
+            "repo": repo,
+            "summary": summary,
+            "occurred_at": occurred_at,
+        },
+    )
+    db.commit()
+
+
+@pytest.fixture()
+def acme_org_with_installation(db, acme_org):
+    installation_repo.create(db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=7, org_id=acme_org.id)
+    return acme_org
+
+
+def test_events_served_from_repo_events_when_an_installation_is_connected(events_client, db, acme_org_with_installation):
+    now = datetime.now(timezone.utc)
+    _insert_repo_event(
+        db, acme_org_with_installation.tenant_id,
+        delivery_id="d1", event_type="push", actor="alice", repo="acme/api", summary="pushed 2 commits to main", occurred_at=now,
+    )
+
+    with patch("src.routers.github.GitHubClient") as mock_client:
+        resp = events_client.post("/github/orgs/acme/events", json={})
+
+    assert resp.status_code == 200
+    mock_client.assert_not_called()
+    events = resp.json()["events"]
+    assert len(events) == 1
+    assert events[0]["type"] == "PushEvent"  # mapped back from repo_events' lowercase "push"
+    assert events[0]["actor"] == "alice"
+    assert events[0]["summary"] == "pushed 2 commits to main"
+
+
+def test_events_from_repo_events_orders_newest_first_and_respects_per_page(events_client, db, acme_org_with_installation):
+    now = datetime.now(timezone.utc)
+    for i in range(3):
+        _insert_repo_event(
+            db, acme_org_with_installation.tenant_id,
+            delivery_id=f"d{i}", event_type="push", actor="alice", repo="acme/api", summary=f"push {i}",
+            occurred_at=now - timedelta(minutes=3 - i),
+        )
+
+    resp = events_client.post("/github/orgs/acme/events", json={"per_page": 2})
+
+    assert resp.status_code == 200
+    summaries = [e["summary"] for e in resp.json()["events"]]
+    assert summaries == ["push 2", "push 1"]  # newest first, capped at per_page
+
+
+def test_events_from_repo_events_excludes_bot_actors(events_client, db, acme_org_with_installation):
+    now = datetime.now(timezone.utc)
+    _insert_repo_event(
+        db, acme_org_with_installation.tenant_id,
+        delivery_id="d1", event_type="push", actor="alice", repo="acme/api", summary="pushed", occurred_at=now,
+    )
+    _insert_repo_event(
+        db, acme_org_with_installation.tenant_id,
+        delivery_id="d2", event_type="push", actor="dependabot[bot]", repo="acme/api", summary="pushed", occurred_at=now,
+    )
+
+    resp = events_client.post("/github/orgs/acme/events", json={})
+
+    events = resp.json()["events"]
+    assert len(events) == 1
+    assert events[0]["actor"] == "alice"
+
+
+def test_events_from_repo_events_maps_all_five_tracked_types_back_to_github_style(
+    events_client, db, acme_org_with_installation
+):
+    now = datetime.now(timezone.utc)
+    for i, event_type in enumerate(["push", "pull_request", "issues", "release", "create"]):
+        _insert_repo_event(
+            db, acme_org_with_installation.tenant_id,
+            delivery_id=f"t{i}", event_type=event_type, actor="alice", repo="acme/api", summary=event_type,
+            occurred_at=now - timedelta(minutes=i),
+        )
+
+    resp = events_client.post("/github/orgs/acme/events", json={})
+
+    types_by_summary = {e["summary"]: e["type"] for e in resp.json()["events"]}
+    assert types_by_summary == {
+        "push": "PushEvent",
+        "pull_request": "PullRequestEvent",
+        "issues": "IssuesEvent",
+        "release": "ReleaseEvent",
+        "create": "CreateEvent",
+    }
+
+
+def test_events_falls_back_to_live_github_when_the_installation_has_no_installation_id(events_client, db, acme_org):
+    # sync_org_installation's known-admin path lets a caller re-sync org metadata without a
+    # real installation_id -- that row exists (get_for_org finds it) but there's no actual
+    # App installation behind it, so no webhook/backfill pipeline ever populated
+    # repo_events for this tenant. Must not be treated as "connected" (issue found on this
+    # PR's own review).
+    installation_repo.create(db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=None, org_id=acme_org.id)
+
+    with patch("src.routers.github.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = [_PUSH_EVENT]
+        resp = events_client.post("/github/orgs/acme/events", json={"token": "ghp_testtoken123456789012345678901234"})
+
+    assert resp.status_code == 200
+    mock_client.assert_called_once()
+    assert resp.json()["events"][0]["actor"] == "alice"
+
+
+def test_events_falls_back_to_live_github_when_no_installation_is_connected(events_client, acme_org):
+    # acme_org (no installation fixture) -- confirms the hybrid still uses the unchanged
+    # live-GitHub path for a legacy PAT-only org, not an empty feed.
+    with patch("src.routers.github.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = [_PUSH_EVENT]
+        resp = events_client.post("/github/orgs/acme/events", json={"token": "ghp_testtoken123456789012345678901234"})
+
+    assert resp.status_code == 200
+    mock_client.assert_called_once()
+    assert resp.json()["events"][0]["actor"] == "alice"
