@@ -1,8 +1,8 @@
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from src.core.db import GitHubInstallation
+from src.core.db import GitHubInstallation, set_session_tenant
 from src.repositories import tenant_repo
 
 
@@ -144,9 +144,25 @@ def delete_by_installation_id(db: Session, installation_id: int) -> tuple[int, i
     Returns (rows deleted, tenant_id of the first deleted row) -- the tenant_id lets the
     webhook handler's audit_repo.write call attribute the deletion under RLS (issue #330);
     every row here already has tenant_id populated by upsert's _resolve_tenant_id, so this
-    is just reading back what's already there before the rows are gone."""
+    is just reading back what's already there before the rows are gone.
+
+    Called from the unauthenticated webhook receiver (issue #191/S3), which never sets
+    app.tenant_id/app.user_id -- under RLS (migration 0031's FORCE ROW LEVEL SECURITY on
+    this table) that made both the SELECT and DELETE below silently see zero rows, every
+    time (issue #191/S3 PR 2 fix). resolve_installation_tenant_id() (migration 0035, a
+    SECURITY DEFINER function) resolves tenant_id first, bypassing RLS for that one lookup
+    the same way the table owner already does; once resolved, set_session_tenant supplies
+    the session context RLS expects so the actual SELECT/DELETE that follows are evaluated
+    normally, under a session that now legitimately satisfies the tenant_id-equality
+    policy branch -- not a second RLS bypass."""
+    tenant_id = db.execute(
+        text("SELECT resolve_installation_tenant_id(:installation_id)"), {"installation_id": installation_id}
+    ).scalar()
+    if tenant_id is not None:
+        set_session_tenant(db, tenant_id)
+
     rows = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).all()
-    tenant_id = rows[0].tenant_id if rows else None
+    resolved_tenant_id = rows[0].tenant_id if rows else tenant_id
     count = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).delete()
     db.commit()
-    return count, tenant_id
+    return count, resolved_tenant_id
