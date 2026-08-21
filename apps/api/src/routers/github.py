@@ -20,8 +20,9 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from src.core.db import get_db
+from src.core.db import RepoEvent, get_db
 from src.core.rbac import OrgContext, require_org_role
+from src.repositories import installation_repo
 from src.schemas.github import (
     FailedRunsInput,
     FailedRunsResponse,
@@ -35,6 +36,19 @@ from src.schemas.github import (
 )
 from src.services.github_client import GitHubClient, github_error as _github_error
 from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token
+
+# repo_events.event_type is the lowercase vocabulary apps/worker's event_consumer.py and
+# backfill.py both write (issue #191/#192) -- the UI's event-feed.tsx filter chips match
+# against GitHub's own raw PascalCase event type strings (e.g. "PushEvent"), the same
+# strings the live-GitHub path below has always returned. Reversing the map here keeps
+# the response contract identical regardless of which path served it.
+_EVENT_TYPE_TO_GITHUB = {
+    "push": "PushEvent",
+    "pull_request": "PullRequestEvent",
+    "issues": "IssuesEvent",
+    "release": "ReleaseEvent",
+    "create": "CreateEvent",
+}
 
 router = APIRouter()
 
@@ -124,6 +138,37 @@ def _fetch_events(org_login: str, token: str, per_page: int) -> OrgEventsRespons
     return OrgEventsResponse(org=org_login, events=events)
 
 
+def _fetch_events_from_repo_events(db: Session, org_login: str, tenant_id: int, per_page: int) -> OrgEventsResponse:
+    """S6: serves the Activity Feed from the already-populated, already-fresh repo_events
+    table (S3 webhooks + S4 normalization + S5 install-time backfill/gap-healing) instead
+    of a live GitHub call -- no token, no GitHub rate-limit exposure, no cache needed (a
+    cheap indexed DB read doesn't need one). Relies on the tenant session context
+    require_org_role's dependency already set (RLS, migration 0036) -- tenant_id is passed
+    through explicitly only for the WHERE clause, not to re-establish that context.
+    Bot-filtered here at read time, matching backfill.py's own note that repo_events itself
+    stores every actor unfiltered by design (filtering is a display concern, not storage)."""
+    rows = (
+        db.query(RepoEvent)
+        .filter(RepoEvent.tenant_id == tenant_id, ~RepoEvent.actor.like("%[bot]"))
+        .order_by(RepoEvent.occurred_at.desc())
+        .limit(per_page)
+        .all()
+    )
+    events = [
+        OrgEvent(
+            id=str(row.id),
+            type=_EVENT_TYPE_TO_GITHUB.get(row.event_type, row.event_type),
+            actor=row.actor,
+            actor_avatar=row.actor_avatar,
+            repo=row.repo,
+            summary=row.summary,
+            created_at=row.occurred_at,
+        )
+        for row in rows
+    ]
+    return OrgEventsResponse(org=org_login, events=events)
+
+
 def _evict_expired_events(now: float) -> None:
     # Same reasoning as repos.py's _evict_expired_stats: token_hash rotates hourly with
     # each fresh installation token, so stale keys would otherwise accumulate forever.
@@ -151,6 +196,16 @@ def org_events(
     ctx: OrgContext = Depends(require_org_role(min_role="member")),
     db: Session = Depends(get_db),
 ):
+    # repo_events only ever gets rows for a tenant with a connected GitHub App
+    # installation -- webhooks, install-time backfill, and gap-healing (S3-S5) all require
+    # one. An org still on the legacy PAT-only path has no installation and therefore no
+    # repo_events rows; falling through to the live-GitHub path for that case (unchanged
+    # below) avoids silently regressing it to an empty feed. Mirrors token_resolution.py's
+    # own "prefer installation, fall back to client token" precedent, applied to the read
+    # path instead of the auth path.
+    if installation_repo.get_for_org(db, org_id=ctx.org.id, account_login=org_login) is not None:
+        return _fetch_events_from_repo_events(db, org_login, ctx.org.tenant_id, payload.per_page)
+
     client_token = payload.token.get_secret_value() if payload.token else None
     try:
         token = resolve_org_token(db, org_id=ctx.org.id, account_login=org_login, client_token=client_token)
