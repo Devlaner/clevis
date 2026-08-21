@@ -109,6 +109,8 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       # worker.py touches HEARTBEAT_FILE once per poll loop iteration -- a hung-but-alive

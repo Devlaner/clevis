@@ -321,4 +321,5 @@ jobs:
           docker run --rm --entrypoint python \
             -e DATABASE_URL=postgresql://smoke:smoke@localhost:5432/smoke \
             -e JOB_SECRET_KEY=ci-smoke-test-key-not-for-production-use-000 \
+            -e REDIS_URL=redis://smoke:6379/0 \
             clevis-worker -c "import worker"

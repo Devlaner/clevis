@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     database_url: SecretStr
     job_secret_key: SecretStr
     github_api_base: str = "https://api.github.com"
+    # issue #191/S4 -- webhook_events Redis Stream consumer (event_consumer.py). Mirrors
+    # apps/api/src/core/config.py's redis_url exactly (same SecretStr reasoning: a
+    # production URL may embed AUTH credentials).
+    redis_url: SecretStr
 
     model_config = SettingsConfigDict(env_file=_env_file, extra="ignore")
 

@@ -141,6 +141,37 @@ class WebhookDelivery(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class RepoEvent(Base):
+    """Normalized, deduplicated event store (issue #191/S4 PR 1), populated by
+    apps/worker's Redis Streams consumer from webhook_deliveries rows. Not read by the
+    API yet -- that's S6's job. RLS-enabled (migration 0036), strict tenant_id equality
+    (no OR-NULL group): the consumer deliberately skips normalizing any
+    webhook_deliveries row with a null tenant_id rather than write one here, so this
+    table never has a null tenant_id row to begin with."""
+
+    __tablename__ = "repo_events"
+    __table_args__ = (
+        Index("ix_repo_events_tenant_id", "tenant_id"),
+        UniqueConstraint("delivery_id", name="uq_repo_events_delivery_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    # X-GitHub-Delivery -- the actual idempotency key; ON CONFLICT DO NOTHING on this
+    # column is what makes normalization safe to run twice on a redelivered event.
+    delivery_id: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    actor_avatar: Mapped[str] = mapped_column(String, nullable=False)
+    repo: Mapped[str] = mapped_column(String, nullable=False)
+    summary: Mapped[str] = mapped_column(String, nullable=False)
+    # The event's own timestamp where the raw payload has one; falls back to the
+    # webhook_deliveries row's received_at otherwise (see event_consumer.py) -- not
+    # every ingested event type has one canonical top-level timestamp field.
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class SavedToken(Base):
     __tablename__ = "saved_tokens"
 
