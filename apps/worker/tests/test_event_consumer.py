@@ -272,6 +272,23 @@ def test_aggregates_separate_days_produce_separate_rows(pg_conn, tenant_id):
     assert _daily_count(conn, tenant_id, "acme/agg-days", "create", day_two.date()) == 1
 
 
+def test_aggregates_use_the_utc_day_regardless_of_session_timezone(pg_conn, tenant_id):
+    conn, state = pg_conn
+    # 00:30 UTC on Aug 21 is still Aug 20 in America/Los_Angeles (UTC-7 in August) -- the
+    # aggregate's "day" must bucket by UTC, not whatever timezone this Postgres session
+    # happens to be in (CodeRabbit finding on #341: psycopg returns timestamptz values in
+    # the session's TimeZone, not UTC, so a naive .date() call would misbucket this).
+    received_at = datetime(2026, 8, 21, 0, 30, tzinfo=timezone.utc)
+    payload = {"repository": {"full_name": "acme/agg-tz"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v1"}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-tz-1", event_type="create", payload=payload, received_at=received_at)
+
+    with conn.cursor() as cur:
+        cur.execute("SET TIME ZONE 'America/Los_Angeles'")
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "create", tenant_id))
+
+    assert _daily_count(conn, tenant_id, "acme/agg-tz", "create", received_at.date()) == 1  # UTC day, not LA day (Aug 20)
+
+
 def test_null_tenant_delivery_is_skipped_not_normalized(pg_conn):
     conn, state = pg_conn
     with conn.cursor() as cur:

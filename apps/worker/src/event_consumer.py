@@ -26,7 +26,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg
@@ -236,7 +236,17 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
                     "tenant_id": tenant_id,
                     "repo": normalized["repo"],
                     "event_type": normalized["event_type"],
-                    "day": normalized["occurred_at"].date(),
+                    # psycopg returns a timestamptz in whatever timezone this connection's
+                    # Postgres session happens to be in, not necessarily UTC -- .date() on
+                    # that raw value would misbucket an event near a non-UTC-session
+                    # midnight. Force UTC first so "day" always means the UTC calendar day,
+                    # matching migration 0037's column docstring (CodeRabbit finding on #341).
+                    # psycopg returns a timestamptz in whatever timezone this connection's
+                    # Postgres session happens to be in, not necessarily UTC -- .date() on
+                    # that raw value would misbucket an event near a non-UTC-session
+                    # midnight. Force UTC first so "day" always means the UTC calendar day,
+                    # matching migration 0037's column docstring (CodeRabbit finding on #341).
+                    "day": normalized["occurred_at"].astimezone(timezone.utc).date(),
                 },
             )
         cur.execute("UPDATE webhook_deliveries SET status = 'processed' WHERE id = %s", (delivery_row_id,))
