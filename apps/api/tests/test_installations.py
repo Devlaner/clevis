@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from src.core.auth import UserOut, require_auth
-from src.core.db import AuditLog, User, get_db
+from src.core.db import AuditLog, Job, User, get_db
 from src.repositories import installation_repo, org_membership_repo, org_repo
 from src.routers.installations import router as inst_router
 from src.services import github_app
@@ -126,6 +126,41 @@ def test_sync_org_installation_writes_audit_log(db, acme_org):
     assert payload == {"account_type": "Organization", "installation_id": 7}
 
 
+def test_sync_org_installation_enqueues_a_backfill_job_when_a_token_is_available(db, acme_org):
+    # Issue #191/S5 PR 1: a successful sync should kick off a one-shot activity backfill.
+    # No GitHub App is configured in test settings, so resolve_org_token itself is mocked
+    # directly (patched where installations.py imported it) rather than relying on real
+    # installation-token minting.
+    with _mock_installation("acme", "Organization"), patch(
+        "src.routers.installations.resolve_org_token", return_value="tok_acme"
+    ):
+        resp = _client(db, acme_org["admin"]).post(
+            "/orgs/acme/installations/sync",
+            json={"account_login": "acme", "account_type": "Organization", "installation_id": 7},
+        )
+    assert resp.status_code == 200
+    jobs = db.query(Job).filter(Job.job_type == "github.backfill_repo_events").all()
+    assert len(jobs) == 1
+    payload = json.loads(jobs[0].payload)
+    assert payload["account_login"] == "acme"
+    assert payload["account_type"] == "Organization"
+    assert payload["tenant_id"] == acme_org["org"].tenant_id
+    assert payload["token"] != "tok_acme"  # Fernet-encrypted, not the raw token
+
+
+def test_sync_org_installation_still_succeeds_when_no_backfill_token_is_available(db, acme_org):
+    # No GitHub App configured (the default in test settings) -> resolve_org_token raises
+    # NoGitHubTokenAvailable -- the install itself must still succeed (issue #191/S5 PR 1:
+    # backfill is best-effort enrichment, not a precondition of a working install).
+    with _mock_installation("acme", "Organization"):
+        resp = _client(db, acme_org["admin"]).post(
+            "/orgs/acme/installations/sync",
+            json={"account_login": "acme", "account_type": "Organization", "installation_id": 7},
+        )
+    assert resp.status_code == 200
+    assert db.query(Job).filter(Job.job_type == "github.backfill_repo_events").count() == 0
+
+
 def test_personal_installations_scoped_to_self(db):
     me = _make_user(db, "shabnam@e.com")
     someone_else = _make_user(db, "someoneelse@e.com")
@@ -171,6 +206,23 @@ def test_sync_personal_installation_writes_audit_log(db):
     assert logs[0].actor == me.email
     payload = json.loads(logs[0].payload)
     assert payload == {"account_type": "User", "installation_id": 3}
+
+
+def test_sync_personal_installation_enqueues_a_backfill_job_when_a_token_is_available(db):
+    me = _make_user(db, "shabnam@e.com", github_login="shabnam")
+    with _mock_installation("shabnam", "User"), patch(
+        "src.routers.installations.resolve_personal_token", return_value="tok_shabnam"
+    ):
+        resp = _client(db, me).post(
+            "/me/installations/sync",
+            json={"account_login": "shabnam", "account_type": "User", "installation_id": 3},
+        )
+    assert resp.status_code == 200
+    jobs = db.query(Job).filter(Job.job_type == "github.backfill_repo_events").all()
+    assert len(jobs) == 1
+    payload = json.loads(jobs[0].payload)
+    assert payload["account_login"] == "shabnam"
+    assert payload["account_type"] == "User"
 
 
 def test_sync_personal_installation_requires_linked_github_account(db):

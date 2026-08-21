@@ -21,6 +21,8 @@
                                               whether to call the /me or /orgs sync endpoint next.
 """
 
+import logging
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
@@ -36,7 +38,10 @@ from src.schemas.installation import (
     SyncInstallationsInput,
     SyncInstallationsResponse,
 )
-from src.services import github_app
+from src.services import backfill_service, github_app
+from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token, resolve_personal_token
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -78,6 +83,22 @@ def _verify_installation(installation_id: int | None, account_login: str, accoun
                 f"'{actual_login}', not {account_type} '{account_login}'"
             ),
         )
+
+
+def _enqueue_backfill_best_effort(db: Session, *, tenant_id: int, account_login: str, account_type: str, resolve_token) -> None:
+    """S5 PR 1: best-effort install-time activity backfill. Must never fail the install
+    response itself -- the install already succeeded (its own audit log entry is already
+    written by the time this runs), and backfill is enrichment, not a precondition of a
+    working install. `resolve_token` is a zero-arg callable so the org/personal callers
+    can each pass their own resolve_org_token/resolve_personal_token call without this
+    helper needing to know which one applies."""
+    try:
+        token = resolve_token()
+        backfill_service.enqueue(db, tenant_id=tenant_id, account_login=account_login, account_type=account_type, token=token)
+    except NoGitHubTokenAvailable as exc:
+        logger.warning("skipping activity backfill for %s: %s", account_login, exc)
+    except Exception:
+        logger.exception("failed to enqueue activity backfill for %s", account_login)
 
 
 @router.get("/me/installations/lookup/{installation_id}", response_model=InstallationLookupOut)
@@ -197,6 +218,13 @@ def sync_org_installation(
         payload={"account_type": payload.account_type, "installation_id": payload.installation_id},
         tenant_id=org.tenant_id,
     )
+    _enqueue_backfill_best_effort(
+        db,
+        tenant_id=org.tenant_id,
+        account_login=payload.account_login,
+        account_type=payload.account_type,
+        resolve_token=lambda: resolve_org_token(db, org_id=org.id, account_login=payload.account_login, client_token=None),
+    )
     return {"synced": True, "token_ref": row.token_ref}
 
 
@@ -247,5 +275,14 @@ def sync_personal_installation(
         target=payload.account_login,
         payload={"account_type": payload.account_type, "installation_id": payload.installation_id},
         tenant_id=personal_tenant.id,
+    )
+    _enqueue_backfill_best_effort(
+        db,
+        tenant_id=personal_tenant.id,
+        account_login=payload.account_login,
+        account_type=payload.account_type,
+        resolve_token=lambda: resolve_personal_token(
+            db, owner_user_id=user.id, account_login=payload.account_login, client_token=None
+        ),
     )
     return {"synced": True, "token_ref": row.token_ref}
