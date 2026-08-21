@@ -20,6 +20,7 @@ in apps/api/src/routers/github.py) -- repo_events itself stores every actor unfi
 regardless of source; filtering is a read-time/display concern, not a storage concern.
 """
 
+import time
 from datetime import datetime
 
 import httpx
@@ -28,6 +29,59 @@ import httpx
 # the primary limit, just a bound so a pathological Link-header loop can't run forever.
 _MAX_PAGES = 3
 _PER_PAGE = 100
+
+# Cap on honoring a server-supplied Retry-After value, so a single malformed/huge value
+# can't block a job for an unreasonable amount of time -- GitHub's real rate-limit
+# Retry-After values are ordinarily well under this. Same value as
+# packages/checks/src/checks/github_checks.py's own _MAX_RETRY_AFTER_SECONDS.
+_MAX_RETRY_AFTER_SECONDS = 60
+
+
+def _is_secondary_rate_limit(resp: httpx.Response) -> bool:
+    """GitHub's secondary/abuse rate limit commonly returns 403 (not 429), often with a
+    Retry-After header. Without this, a 403 that would succeed on retry raises immediately
+    instead of backing off like the 429 case already does. A genuine permission-denied 403
+    (token lacks scope) has neither header, so it's unaffected and still surfaces immediately.
+    Duplicated from apps/api/src/services/github_client.py and
+    packages/checks/src/checks/github_checks.py's own copies -- apps/worker doesn't import
+    apps/api, same precedent as this module's own _summarize duplicating github.py's."""
+    if resp.status_code != 403:
+        return False
+    return "Retry-After" in resp.headers or resp.headers.get("X-RateLimit-Remaining") == "0"
+
+
+def _retry_delay_seconds(resp: httpx.Response, attempt: int) -> float:
+    """Prefer the server's own Retry-After value (GitHub's rate-limit responses include one)
+    over a blind exponential backoff -- retrying before the window it asked for just burns
+    the fixed attempt budget hitting the same limit again."""
+    raw = resp.headers.get("Retry-After")
+    if raw is not None:
+        try:
+            return min(float(raw), _MAX_RETRY_AFTER_SECONDS)
+        except ValueError:
+            pass
+    return 2**attempt
+
+
+def _get_with_retry(client: httpx.Client, url: str, headers: dict, params: dict | None) -> httpx.Response:
+    """Same retry/backoff contract as GitHubClient.request and github_checks.py's own
+    _get_with_retry: 3 attempts, exponential backoff on a connection error, Retry-After-aware
+    backoff on a 429/secondary-403 rate limit or a presumed-transient 5xx. Absorbs a rate
+    limit here instead of burning a whole job attempt via worker.py's outer requeue -- issue
+    #192 calls out that this didn't happen previously."""
+    for attempt in range(3):
+        try:
+            resp = client.get(url, headers=headers, params=params)
+        except httpx.RequestError:
+            if attempt < 2:
+                time.sleep(2**attempt)
+                continue
+            raise
+        if (resp.status_code == 429 or _is_secondary_rate_limit(resp) or resp.status_code >= 500) and attempt < 2:
+            time.sleep(_retry_delay_seconds(resp, attempt))
+            continue
+        return resp
+    raise RuntimeError("request loop exhausted without returning")
 
 _EVENT_TYPE_MAP = {
     "PushEvent": "push",
@@ -48,13 +102,15 @@ def _events_path(account_login: str, account_type: str) -> str:
 
 def fetch_events(client: httpx.Client, base: str, headers: dict, account_login: str, account_type: str) -> list[dict]:
     """Follows the Link: rel="next" header (httpx parses it into response.links) up to
-    _MAX_PAGES. Raises httpx.HTTPStatusError/RequestError on failure -- callers map
-    those to the same requeue/fail decision worker.py's other job handlers already use."""
+    _MAX_PAGES. Each page is fetched via _get_with_retry, which absorbs a transient rate
+    limit/5xx internally (3 attempts) before this ever raises. Still raises
+    httpx.HTTPStatusError/RequestError once retries are exhausted -- callers map those to
+    the same requeue/fail decision worker.py's other job handlers already use."""
     events: list[dict] = []
     url = f"{base}{_events_path(account_login, account_type)}"
     params: dict | None = {"per_page": _PER_PAGE}
     for _ in range(_MAX_PAGES):
-        resp = client.get(url, headers=headers, params=params)
+        resp = _get_with_retry(client, url, headers, params)
         resp.raise_for_status()
         page = resp.json()
         if not isinstance(page, list):
