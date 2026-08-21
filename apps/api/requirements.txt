@@ -10,3 +10,4 @@ cryptography==44.0.2
 bcrypt==4.2.1
 PyJWT==2.13.0
 email-validator==2.2.0
+redis==5.2.1
