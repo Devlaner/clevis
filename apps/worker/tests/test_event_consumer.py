@@ -1,6 +1,7 @@
-"""Tests for the webhook_events Redis Streams consumer (issue #191/S4 PR 1)."""
+"""Tests for the webhook_events Redis Streams consumer (issue #191/S4)."""
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import psycopg
@@ -74,16 +75,26 @@ def redis_client():
     client.flushdb()
 
 
-def _make_delivery(conn, state, *, tenant_id, delivery_id, event_type, payload: dict) -> int:
+def _make_delivery(conn, state, *, tenant_id, delivery_id, event_type, payload: dict, received_at=None) -> int:
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO webhook_deliveries (tenant_id, delivery_id, event_type, payload, status)
-            VALUES (%s, %s, %s, %s, 'queued')
-            RETURNING id
-            """,
-            (tenant_id, delivery_id, event_type, json.dumps(payload).encode()),
-        )
+        if received_at is None:
+            cur.execute(
+                """
+                INSERT INTO webhook_deliveries (tenant_id, delivery_id, event_type, payload, status)
+                VALUES (%s, %s, %s, %s, 'queued')
+                RETURNING id
+                """,
+                (tenant_id, delivery_id, event_type, json.dumps(payload).encode()),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO webhook_deliveries (tenant_id, delivery_id, event_type, payload, status, received_at)
+                VALUES (%s, %s, %s, %s, 'queued', %s)
+                RETURNING id
+                """,
+                (tenant_id, delivery_id, event_type, json.dumps(payload).encode(), received_at),
+            )
         row_id = cur.fetchone()[0]
     conn.commit()
     state["delivery_ids"].append(row_id)
@@ -194,6 +205,88 @@ def test_processing_the_same_delivery_twice_is_idempotent(pg_conn, tenant_id):
         cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
         cur.execute("SELECT count(*) FROM repo_events WHERE delivery_id = %s", ("d-dedupe-1",))
         assert cur.fetchone()[0] == 1
+
+
+def _daily_count(conn, tenant_id, repo, event_type, day):
+    with conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute(
+            "SELECT count FROM repo_event_daily_counts WHERE tenant_id = %s AND repo = %s AND event_type = %s AND day = %s",
+            (tenant_id, repo, event_type, day),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def test_aggregates_a_daily_count_on_insert(pg_conn, tenant_id):
+    conn, state = pg_conn
+    received_at = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
+    payload = {"repository": {"full_name": "acme/agg-fresh"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v1"}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-fresh-1", event_type="create", payload=payload, received_at=received_at)
+
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "create", tenant_id))
+
+    assert _daily_count(conn, tenant_id, "acme/agg-fresh", "create", received_at.date()) == 1
+
+
+def test_aggregates_increment_on_a_second_distinct_event_same_day(pg_conn, tenant_id):
+    conn, state = pg_conn
+    received_at = datetime(2026, 8, 21, 11, 0, tzinfo=timezone.utc)
+    payload_a = {"repository": {"full_name": "acme/agg-increment"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v1"}
+    payload_b = {"repository": {"full_name": "acme/agg-increment"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v2"}
+    row_a = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-increment-1", event_type="create", payload=payload_a, received_at=received_at)
+    row_b = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-increment-2", event_type="create", payload=payload_b, received_at=received_at)
+
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_a, "create", tenant_id))
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_b, "create", tenant_id))
+
+    assert _daily_count(conn, tenant_id, "acme/agg-increment", "create", received_at.date()) == 2
+
+
+def test_aggregates_unchanged_when_the_same_delivery_is_reprocessed(pg_conn, tenant_id):
+    conn, state = pg_conn
+    received_at = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
+    payload = {"repository": {"full_name": "acme/agg-dedupe"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v1"}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-dedupe-1", event_type="create", payload=payload, received_at=received_at)
+
+    fields = _entry_fields(row_id, "create", tenant_id)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", fields)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", fields)  # simulates a redelivery/reprocess
+
+    assert _daily_count(conn, tenant_id, "acme/agg-dedupe", "create", received_at.date()) == 1
+
+
+def test_aggregates_separate_days_produce_separate_rows(pg_conn, tenant_id):
+    conn, state = pg_conn
+    day_one = datetime(2026, 8, 20, 23, 0, tzinfo=timezone.utc)
+    day_two = datetime(2026, 8, 21, 1, 0, tzinfo=timezone.utc)
+    payload_a = {"repository": {"full_name": "acme/agg-days"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v1"}
+    payload_b = {"repository": {"full_name": "acme/agg-days"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v2"}
+    row_a = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-days-1", event_type="create", payload=payload_a, received_at=day_one)
+    row_b = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-days-2", event_type="create", payload=payload_b, received_at=day_two)
+
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_a, "create", tenant_id))
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_b, "create", tenant_id))
+
+    assert _daily_count(conn, tenant_id, "acme/agg-days", "create", day_one.date()) == 1
+    assert _daily_count(conn, tenant_id, "acme/agg-days", "create", day_two.date()) == 1
+
+
+def test_aggregates_use_the_utc_day_regardless_of_session_timezone(pg_conn, tenant_id):
+    conn, state = pg_conn
+    # 00:30 UTC on Aug 21 is still Aug 20 in America/Los_Angeles (UTC-7 in August) -- the
+    # aggregate's "day" must bucket by UTC, not whatever timezone this Postgres session
+    # happens to be in (CodeRabbit finding on #341: psycopg returns timestamptz values in
+    # the session's TimeZone, not UTC, so a naive .date() call would misbucket this).
+    received_at = datetime(2026, 8, 21, 0, 30, tzinfo=timezone.utc)
+    payload = {"repository": {"full_name": "acme/agg-tz"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v1"}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-agg-tz-1", event_type="create", payload=payload, received_at=received_at)
+
+    with conn.cursor() as cur:
+        cur.execute("SET TIME ZONE 'America/Los_Angeles'")
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "create", tenant_id))
+
+    assert _daily_count(conn, tenant_id, "acme/agg-tz", "create", received_at.date()) == 1  # UTC day, not LA day (Aug 20)
 
 
 def test_null_tenant_delivery_is_skipped_not_normalized(pg_conn):

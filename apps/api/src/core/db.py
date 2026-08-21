@@ -1,16 +1,18 @@
 from collections.abc import Generator
-from datetime import datetime
+from datetime import date, datetime
 import logging
 
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -170,6 +172,28 @@ class RepoEvent(Base):
     # every ingested event type has one canonical top-level timestamp field.
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RepoEventDailyCount(Base):
+    """Materialized rollup half of S4 (issue #191), migration 0037. Upserted by
+    apps/worker's event_consumer.py in the same transaction as each RepoEvent insert --
+    not a separate batch job -- and only when that insert actually happened (a
+    redelivered/deduped event must not double-count here). Not read by the API yet --
+    S6's job, same deferral as RepoEvent. Composite PK instead of a surrogate id: this
+    row is purely identified by (tenant_id, repo, event_type, day), it's an upsert
+    target, and nothing references it by foreign key."""
+
+    __tablename__ = "repo_event_daily_counts"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "repo", "event_type", "day", name="pk_repo_event_daily_counts"),
+        Index("ix_repo_event_daily_counts_tenant_id_day", "tenant_id", "day"),
+    )
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    repo: Mapped[str] = mapped_column(String, nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
 class SavedToken(Base):

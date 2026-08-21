@@ -76,6 +76,17 @@ BEGIN
 END
 $do$;
 
+-- repo_event_daily_counts (migration 0037, issue #191/S4 PR 2): same reasoning as
+-- repo_events immediately above -- CI runs apps/worker's tests as clevis_api, and this
+-- table has no sequence (composite PK), so only the table grant is needed.
+DO $do$
+BEGIN
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'repo_event_daily_counts') THEN
+    GRANT SELECT, INSERT, UPDATE ON repo_event_daily_counts TO clevis_api;
+  END IF;
+END
+$do$;
+
 -- resolve_installation_tenant_id() (migration 0035) REVOKEs its default PUBLIC EXECUTE
 -- and re-GRANTs it only to clevis_api -- but that migration's own GRANT is itself
 -- conditional on clevis_api already existing, which isn't true the first time this
