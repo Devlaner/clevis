@@ -384,6 +384,23 @@ def test_events_from_repo_events_maps_all_five_tracked_types_back_to_github_styl
     }
 
 
+def test_events_falls_back_to_live_github_when_the_installation_has_no_installation_id(events_client, db, acme_org):
+    # sync_org_installation's known-admin path lets a caller re-sync org metadata without a
+    # real installation_id -- that row exists (get_for_org finds it) but there's no actual
+    # App installation behind it, so no webhook/backfill pipeline ever populated
+    # repo_events for this tenant. Must not be treated as "connected" (issue found on this
+    # PR's own review).
+    installation_repo.create(db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=None, org_id=acme_org.id)
+
+    with patch("src.routers.github.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = [_PUSH_EVENT]
+        resp = events_client.post("/github/orgs/acme/events", json={"token": "ghp_testtoken123456789012345678901234"})
+
+    assert resp.status_code == 200
+    mock_client.assert_called_once()
+    assert resp.json()["events"][0]["actor"] == "alice"
+
+
 def test_events_falls_back_to_live_github_when_no_installation_is_connected(events_client, acme_org):
     # acme_org (no installation fixture) -- confirms the hybrid still uses the unchanged
     # live-GitHub path for a legacy PAT-only org, not an empty feed.

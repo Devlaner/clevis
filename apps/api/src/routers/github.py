@@ -203,7 +203,16 @@ def org_events(
     # below) avoids silently regressing it to an empty feed. Mirrors token_resolution.py's
     # own "prefer installation, fall back to client token" precedent, applied to the read
     # path instead of the auth path.
-    if installation_repo.get_for_org(db, org_id=ctx.org.id, account_login=org_login) is not None:
+    #
+    # get_for_org's own filter only matches on org_id/account_login (it's a general lookup,
+    # also used to just display "is something connected" in list endpoints) -- a row can
+    # exist with installation_id IS NULL (e.g. sync_org_installation's known-admin path lets
+    # a caller re-sync org metadata without a real installation_id). Checking
+    # installation_id here too, rather than widening get_for_org itself, mirrors
+    # token_resolution.py's _from_installation, which guards the exact same gap at its own
+    # call site instead of baking the check into the shared repository function.
+    installation = installation_repo.get_for_org(db, org_id=ctx.org.id, account_login=org_login)
+    if installation is not None and installation.installation_id is not None:
         return _fetch_events_from_repo_events(db, org_login, ctx.org.tenant_id, payload.per_page)
 
     client_token = payload.token.get_secret_value() if payload.token else None
