@@ -84,10 +84,11 @@ def test_normalize_returns_none_for_missing_or_malformed_fields(overrides):
 
 
 class _FakeResponse:
-    def __init__(self, json_data, links=None, status_code=200):
+    def __init__(self, json_data, links=None, status_code=200, headers=None):
         self._json_data = json_data
         self.links = links or {}
         self.status_code = status_code
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -136,6 +137,145 @@ def test_fetch_events_uses_the_user_events_path_for_personal_installs():
     client = _FakeClient([_FakeResponse([])])
     backfill.fetch_events(client, "https://api.github.com", {}, "octocat", "User")
     assert client.calls[0][0] == "https://api.github.com/users/octocat/events"
+
+
+# ---------------------------------------------------------------------------
+# _get_with_retry / fetch_events: GitHub rate-limit retry (issue #192 fast-follow)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_events_retries_a_429_and_succeeds():
+    rate_limited = _FakeResponse({}, status_code=429)
+    success = _FakeResponse([_raw_event(id="1")])
+    client = _FakeClient([rate_limited, success])
+
+    with patch("backfill.time.sleep") as mock_sleep:
+        events = backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert [e["id"] for e in events] == ["1"]
+    assert len(client.calls) == 2
+    mock_sleep.assert_called_once()
+
+
+def test_fetch_events_retries_a_secondary_rate_limit_403_with_retry_after():
+    rate_limited = _FakeResponse({}, status_code=403, headers={"Retry-After": "5"})
+    success = _FakeResponse([_raw_event(id="1")])
+    client = _FakeClient([rate_limited, success])
+
+    with patch("backfill.time.sleep") as mock_sleep:
+        events = backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert [e["id"] for e in events] == ["1"]
+    mock_sleep.assert_called_once_with(5.0)
+
+
+def test_fetch_events_retries_a_secondary_rate_limit_403_via_remaining_header():
+    rate_limited = _FakeResponse({}, status_code=403, headers={"X-RateLimit-Remaining": "0"})
+    success = _FakeResponse([_raw_event(id="1")])
+    client = _FakeClient([rate_limited, success])
+
+    with patch("backfill.time.sleep"):
+        events = backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert [e["id"] for e in events] == ["1"]
+
+
+def test_fetch_events_retries_a_secondary_rate_limit_403_with_a_malformed_retry_after():
+    # A non-numeric Retry-After must not crash -- it's still a secondary-rate-limit response
+    # (the header's presence, not its validity, is what _is_secondary_rate_limit checks), so
+    # this falls through to the conservative _MAX_RETRY_AFTER_SECONDS wait, not a fast retry.
+    rate_limited = _FakeResponse({}, status_code=403, headers={"Retry-After": "not-a-number"})
+    success = _FakeResponse([_raw_event(id="1")])
+    client = _FakeClient([rate_limited, success])
+
+    with patch("backfill.time.sleep") as mock_sleep:
+        events = backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert [e["id"] for e in events] == ["1"]
+    mock_sleep.assert_called_once_with(backfill._MAX_RETRY_AFTER_SECONDS)
+
+
+def test_retry_delay_seconds_caps_a_large_retry_after():
+    resp = _FakeResponse({}, status_code=429, headers={"Retry-After": "600"})
+    assert backfill._retry_delay_seconds(resp, 0) == backfill._MAX_RETRY_AFTER_SECONDS
+
+
+def test_retry_delay_seconds_uses_x_rate_limit_reset_when_retry_after_is_absent():
+    resp = _FakeResponse({}, status_code=403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1000030"})
+    with patch("backfill.time.time", return_value=1000000.0):
+        assert backfill._retry_delay_seconds(resp, 0) == 30.0
+
+
+def test_retry_delay_seconds_caps_a_far_future_x_rate_limit_reset():
+    resp = _FakeResponse({}, status_code=403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1010000"})
+    with patch("backfill.time.time", return_value=1000000.0):
+        assert backfill._retry_delay_seconds(resp, 0) == backfill._MAX_RETRY_AFTER_SECONDS
+
+
+def test_retry_delay_seconds_ignores_a_past_x_rate_limit_reset():
+    # A reset timestamp already in the past (clock skew, or the header lagging reality)
+    # must not produce a negative sleep -- fall through to the rate-limit default instead.
+    resp = _FakeResponse({}, status_code=429, headers={"X-RateLimit-Reset": "999900"})
+    with patch("backfill.time.time", return_value=1000000.0):
+        assert backfill._retry_delay_seconds(resp, 0) == backfill._MAX_RETRY_AFTER_SECONDS
+
+
+def test_retry_delay_seconds_falls_back_to_exponential_for_a_plain_5xx():
+    resp = _FakeResponse({}, status_code=502)
+    assert backfill._retry_delay_seconds(resp, 1) == 2
+
+
+def test_fetch_events_does_not_retry_a_genuine_permission_403():
+    forbidden = _FakeResponse({}, status_code=403)  # no Retry-After, no X-RateLimit-Remaining
+    client = _FakeClient([forbidden])
+
+    with patch("backfill.time.sleep") as mock_sleep:
+        with pytest.raises(httpx.HTTPStatusError):
+            backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert len(client.calls) == 1
+    mock_sleep.assert_not_called()
+
+
+def test_fetch_events_raises_after_exhausting_all_retries():
+    responses = [_FakeResponse({}, status_code=429) for _ in range(3)]
+    client = _FakeClient(responses)
+
+    with patch("backfill.time.sleep"):
+        with pytest.raises(httpx.HTTPStatusError):
+            backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert len(client.calls) == 3
+
+
+def test_fetch_events_retries_a_5xx():
+    server_error = _FakeResponse({}, status_code=502)
+    success = _FakeResponse([_raw_event(id="1")])
+    client = _FakeClient([server_error, success])
+
+    with patch("backfill.time.sleep"):
+        events = backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert [e["id"] for e in events] == ["1"]
+
+
+def test_fetch_events_retries_a_connection_error_then_succeeds():
+    success = _FakeResponse([_raw_event(id="1")])
+
+    class _FlakyClient(_FakeClient):
+        def get(self, url, headers=None, params=None):
+            self.calls.append((url, params))
+            if len(self.calls) == 1:
+                raise httpx.RequestError("connection reset")
+            return self._responses.pop(0)
+
+    client = _FlakyClient([success])
+
+    with patch("backfill.time.sleep"):
+        events = backfill.fetch_events(client, "https://api.github.com", {}, "acme", "Organization")
+
+    assert [e["id"] for e in events] == ["1"]
+    assert len(client.calls) == 2
 
 
 # ---------------------------------------------------------------------------
