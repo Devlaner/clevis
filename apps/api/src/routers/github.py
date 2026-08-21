@@ -14,16 +14,20 @@ sibling org-scoped router's convention of defining its complete path locally.
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from src.core.db import RepoEvent, get_db
+from src.core.db import RepoEvent, RepoEventDailyCount, get_db
 from src.core.rbac import OrgContext, require_org_role
 from src.repositories import installation_repo
 from src.schemas.github import (
+    ActivitySummaryEntry,
+    ActivitySummaryResponse,
     FailedRunsInput,
     FailedRunsResponse,
     FailedRunSummary,
@@ -224,6 +228,114 @@ def org_events(
         return _cached_events(org_login, token, payload.per_page)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         raise _github_error(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# S6 foundation: first read path against a pre-computed aggregate table instead
+# of repo_events row-by-row or a live GitHub call. repo_event_daily_counts
+# (migration 0037, S4 PR 2) has been upserted by apps/worker's event_consumer.py
+# and backfill.py since S4/S5 shipped, but nothing in apps/api has read it until
+# now -- this is the "aggregates-first API" half of S6's own branch name
+# (feat/aggregates-api-sse), proving the read + live-push pattern once on one
+# real slice of data before the feature-module phases (8, 10/16, 11/18, 12/14,
+# 13, 17) each build their own dashboard on top of it.
+# ---------------------------------------------------------------------------
+
+# Same reasoning as _MAX_REPOS_FOR_FEED below: an upper bound on a client-supplied
+# window, not a default -- keeps a mistaken/malicious `days=100000` from summing an
+# unbounded number of daily-count rows.
+_ACTIVITY_SUMMARY_MAX_DAYS = 90
+_ACTIVITY_SUMMARY_DEFAULT_DAYS = 7
+
+# SSE poll cadence and a hard cap on how long a single stream connection stays open
+# (v1: poll-and-diff against the aggregate table, not Postgres LISTEN/NOTIFY or a
+# Redis pub/sub channel -- simplest thing that proves live-push works; a client
+# whose connection hits the cap just reconnects, same as any short-lived SSE
+# gateway timeout would force anyway).
+_SSE_POLL_INTERVAL_SECONDS = 5
+_SSE_MAX_DURATION_SECONDS = 15 * 60
+
+
+def _org_installation_connected(db: Session, org_login: str, ctx: OrgContext) -> bool:
+    # Same installation_id-presence guard as org_events above (see that handler's
+    # comment) -- repo_event_daily_counts is upserted by the same pipeline that
+    # populates repo_events, so it's only ever non-empty for a tenant with a real
+    # connected installation.
+    installation = installation_repo.get_for_org(db, org_id=ctx.org.id, account_login=org_login)
+    return installation is not None and installation.installation_id is not None
+
+
+def _activity_summary_snapshot(db: Session, org_login: str, ctx: OrgContext, days: int) -> ActivitySummaryResponse:
+    connected = _org_installation_connected(db, org_login, ctx)
+    totals: list[ActivitySummaryEntry] = []
+    if connected:
+        cutoff = date.today() - timedelta(days=days - 1)
+        rows = (
+            db.query(RepoEventDailyCount.repo, RepoEventDailyCount.event_type, func.sum(RepoEventDailyCount.count))
+            .filter(RepoEventDailyCount.tenant_id == ctx.org.tenant_id, RepoEventDailyCount.day >= cutoff)
+            .group_by(RepoEventDailyCount.repo, RepoEventDailyCount.event_type)
+            .all()
+        )
+        totals = [ActivitySummaryEntry(repo=repo, event_type=event_type, count=int(count)) for repo, event_type, count in rows]
+    return ActivitySummaryResponse(
+        org=org_login, days=days, connected=connected, generated_at=datetime.now(timezone.utc), totals=totals
+    )
+
+
+def _activity_summary_stream(db: Session, org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
+    """SSE body generator. Runs in Starlette's threadpool iterator (this route is a plain
+    `def`, matching every other handler in this file, so FastAPI already executes it off
+    the event loop) -- the blocking time.sleep below does not stall other requests.
+
+    Only emits a real `activity_summary` event when the aggregate actually changed since
+    the last poll (comparing on totals/connected, not generated_at, which changes every
+    poll by definition); otherwise emits an SSE comment as a heartbeat, both to keep
+    intermediary proxies from closing an idle-looking connection and to give the client a
+    liveness signal distinct from "no events yet"."""
+    deadline = time.monotonic() + _SSE_MAX_DURATION_SECONDS
+    last_key: tuple | None = None
+    while time.monotonic() < deadline:
+        snapshot = _activity_summary_snapshot(db, org_login, ctx, days)
+        key = (snapshot.connected, tuple(sorted((t.repo, t.event_type, t.count) for t in snapshot.totals)))
+        if key != last_key:
+            yield f"event: activity_summary\ndata: {snapshot.model_dump_json()}\n\n"
+            last_key = key
+        else:
+            yield ": heartbeat\n\n"
+        time.sleep(poll_interval)
+
+
+@router.get("/github/orgs/{org_login}/activity-summary", response_model=ActivitySummaryResponse)
+def org_activity_summary(
+    org_login: str,
+    days: int = _ACTIVITY_SUMMARY_DEFAULT_DAYS,
+    ctx: OrgContext = Depends(require_org_role(min_role="member")),
+    db: Session = Depends(get_db),
+):
+    """Per-repo, per-event-type event counts over a trailing window, read from the
+    pre-computed repo_event_daily_counts rollup -- no live GitHub call, no token. GET (not
+    POST like org_events/failed-runs/release-timeline) because, unlike those, this never
+    takes a client-supplied token in its body -- there is nothing here that needs to avoid
+    a URL/query string.
+
+    Returns connected=False with empty totals (200, not an error) for a legacy PAT-only
+    org that has no GitHub App installation -- repo_event_daily_counts is only ever
+    populated for a tenant with one, same gating as org_events' repo_events path."""
+    days = max(1, min(days, _ACTIVITY_SUMMARY_MAX_DAYS))
+    return _activity_summary_snapshot(db, org_login, ctx, days)
+
+
+@router.get("/github/orgs/{org_login}/activity-summary/stream")
+def org_activity_summary_stream(
+    org_login: str,
+    days: int = _ACTIVITY_SUMMARY_DEFAULT_DAYS,
+    ctx: OrgContext = Depends(require_org_role(min_role="member")),
+    db: Session = Depends(get_db),
+):
+    """SSE channel pushing the same shape org_activity_summary returns, whenever it
+    changes. First concrete piece of S6's "+ SSE" half -- see _activity_summary_stream."""
+    days = max(1, min(days, _ACTIVITY_SUMMARY_MAX_DAYS))
+    return StreamingResponse(_activity_summary_stream(db, org_login, ctx, days), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------
