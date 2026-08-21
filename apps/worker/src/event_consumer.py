@@ -231,8 +231,11 @@ def _sweep_pending(pg_conn: psycopg.Connection, redis_client: redis.Redis) -> No
     if not pending:
         return
 
-    to_drop = [p["message_id"] for p in pending if p["times_delivered"] > _MAX_DELIVERY_ATTEMPTS]
-    to_claim = [p["message_id"] for p in pending if p["times_delivered"] <= _MAX_DELIVERY_ATTEMPTS]
+    # >= / < , not > / <=: XCLAIM itself increments times_delivered before this entry is
+    # even processed, so an entry already at the limit would otherwise get a (limit + 1)th
+    # attempt instead of being dropped (CodeRabbit finding on PR #340).
+    to_drop = [p["message_id"] for p in pending if p["times_delivered"] >= _MAX_DELIVERY_ATTEMPTS]
+    to_claim = [p["message_id"] for p in pending if p["times_delivered"] < _MAX_DELIVERY_ATTEMPTS]
 
     for message_id in to_drop:
         log.error("stream entry %s exceeded %d delivery attempts, dropping", message_id, _MAX_DELIVERY_ATTEMPTS)
@@ -249,8 +252,20 @@ def _sweep_pending(pg_conn: psycopg.Connection, redis_client: redis.Redis) -> No
 
 
 def run() -> None:
-    redis_client = _redis_client()
-    _ensure_group(redis_client)
+    # Retried, not just attempted once: this runs on its own daemon thread (see
+    # start_background_thread) with nothing else supervising it -- an uncaught
+    # exception here (e.g. Redis not reachable yet at container startup) would
+    # otherwise kill the thread silently and leave the consumer dead until the whole
+    # worker process restarts (CodeRabbit finding on PR #340).
+    redis_client = None
+    while redis_client is None:
+        try:
+            redis_client = _redis_client()
+            _ensure_group(redis_client)
+        except (redis.RedisError, OSError) as error:
+            log.error("event consumer initialization error: %s", type(error).__name__)
+            redis_client = None
+            time.sleep(5)
     log.info("event consumer started, group=%s consumer=%s", _GROUP_NAME, _CONSUMER_NAME)
 
     while True:

@@ -441,6 +441,29 @@ def test_run_recovers_from_a_connection_error(monkeypatch):
     assert event_consumer.psycopg.connect.call_count == 2  # retried instead of crashing after the first failure
 
 
+def test_run_retries_initialization_instead_of_dying_on_a_startup_redis_error(monkeypatch):
+    # A Redis error constructing the client or creating the consumer group used to be
+    # completely uncaught -- run() would raise straight out, silently killing the
+    # daemon thread it's started on forever (CodeRabbit finding on PR #340).
+    attempts = {"n": 0}
+
+    def _flaky_redis_client():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise redis.ConnectionError("not ready yet")
+        return MagicMock()
+
+    monkeypatch.setattr(event_consumer, "_redis_client", _flaky_redis_client)
+    monkeypatch.setattr(event_consumer, "_ensure_group", MagicMock())
+    monkeypatch.setattr(event_consumer.time, "sleep", MagicMock())
+    monkeypatch.setattr(event_consumer, "_touch_heartbeat", MagicMock(side_effect=_StopLoop))
+
+    with pytest.raises(_StopLoop):
+        event_consumer.run()
+
+    assert attempts["n"] == 2  # retried after the first failure instead of raising out of run()
+
+
 def test_start_background_thread_runs_in_the_background(monkeypatch):
     ran = []
     monkeypatch.setattr(event_consumer, "run", lambda: ran.append(True))

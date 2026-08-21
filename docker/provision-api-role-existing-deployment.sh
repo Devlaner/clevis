@@ -60,9 +60,21 @@ GRANT USAGE, SELECT ON users_id_seq, orgs_id_seq, org_memberships_id_seq, tenant
 -- itself (only apps/worker's consumer does; S6 will add API reads later), but CI runs
 -- the whole pytest suite -- apps/worker's tests included -- under clevis_api (there's
 -- no clevis_worker CI provisioning), so the consumer's own tests need this grant to
--- pass in CI. Same reasoning as clevis_worker's own grant in migration 0036.
-GRANT SELECT, INSERT ON repo_events TO clevis_api;
-GRANT USAGE, SELECT ON repo_events_id_seq TO clevis_api;
+-- pass in CI. Same reasoning as clevis_worker's own grant in migration 0036. Guarded
+-- by existence, unlike the unconditional grants above -- this script isn't only run
+-- once per deployment (its own comment above documents it as safe to re-run for
+-- password rotation too), and a re-run against a deployment that hasn't applied
+-- migration 0036 yet would otherwise fail on "relation does not exist" and roll back
+-- every grant in this transaction, including the ones that were fine (CodeRabbit
+-- finding on PR #340).
+DO $do$
+BEGIN
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'repo_events') THEN
+    GRANT SELECT, INSERT ON repo_events TO clevis_api;
+    GRANT USAGE, SELECT ON repo_events_id_seq TO clevis_api;
+  END IF;
+END
+$do$;
 
 -- resolve_installation_tenant_id() (migration 0035) REVOKEs its default PUBLIC EXECUTE
 -- and re-GRANTs it only to clevis_api -- but that migration's own GRANT is itself
