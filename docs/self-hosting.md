@@ -45,10 +45,10 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
    # 2. Grant it the table privileges migration 0020 would otherwise apply.
    #    Runs inside the db container so it uses the container's own
    #    POSTGRES_USER/POSTGRES_DB, not unexported host-shell variables.
-   docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "GRANT SELECT, UPDATE ON jobs TO clevis_worker; GRANT SELECT ON app_config TO clevis_worker;"'
+   docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "GRANT SELECT, UPDATE ON jobs TO clevis_worker; GRANT SELECT ON app_config TO clevis_worker; GRANT SELECT, INSERT ON repo_events TO clevis_worker; GRANT USAGE, SELECT ON repo_events_id_seq TO clevis_worker; GRANT SELECT, UPDATE ON webhook_deliveries TO clevis_worker;"'
    ```
 
-   Don't rely on re-running `alembic upgrade head` for step 2 — if migration `0020` already applied (as a no-op, since the role didn't exist yet), Alembic considers it done and won't re-run it. Restart the `worker` container afterwards to pick up the new credential.
+   Don't rely on re-running `alembic upgrade head` for step 2 — if migrations `0020`/`0036` already applied (as a no-op, since the role didn't exist yet), Alembic considers them done and won't re-run them. Restart the `worker` container afterwards to pick up the new credential.
 
 6. (Recommended) Give the API its own non-superuser Postgres credential, separate from `DB_USER`/`DB_PASSWORD`: set `API_DB_PASSWORD` in `.env`. Without this, the API connects as `DB_USER` — the `initdb` bootstrap superuser — which unconditionally bypasses Row-Level Security, so tenant isolation is enforced only at the application layer (issue #330). Same fresh-volume-only caveat as the worker's credential above. If you're setting this on an **existing** deployment, run `docker/provision-api-role-existing-deployment.sh` instead of the fresh-volume init script:
 

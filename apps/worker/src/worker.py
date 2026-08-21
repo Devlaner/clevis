@@ -356,4 +356,12 @@ def run() -> None:
 
 
 if __name__ == "__main__":
+    import event_consumer
+
+    # Runs on its own daemon thread, independent of this module's jobs-table poll loop
+    # below -- see event_consumer.py's module docstring for why (Redis Streams consumer
+    # group, issue #191/S4 PR 1). A crash inside it is caught and logged by its own
+    # run() loop and doesn't take down the process; it does not currently fail the
+    # container healthcheck on its own (see event_consumer.py's _HEARTBEAT_FILE note).
+    event_consumer.start_background_thread()
     run()

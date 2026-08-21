@@ -1,8 +1,8 @@
 #!/bin/sh
 set -e
 
-if [ -z "$DB_NAME" ] || [ -z "$JOB_SECRET_KEY" ]; then
-  echo "ERROR: DB_NAME and JOB_SECRET_KEY must be set" >&2
+if [ -z "$DB_NAME" ] || [ -z "$JOB_SECRET_KEY" ] || [ -z "$REDIS_PASSWORD" ]; then
+  echo "ERROR: DB_NAME, JOB_SECRET_KEY, and REDIS_PASSWORD must be set" >&2
   exit 1
 fi
 
@@ -14,6 +14,11 @@ _urlenc() {
 }
 
 _db_name_enc=$(_urlenc "$DB_NAME")
+
+# issue #191/S4: webhook_events Redis Stream consumer (src/event_consumer.py). Built
+# here rather than left as a directly-set REDIS_URL, same reasoning as
+# apps/api/entrypoint.sh's REDIS_URL export -- the raw password only needs setting once.
+export REDIS_URL="redis://:$(_urlenc "$REDIS_PASSWORD")@redis:6379/0"
 
 # Prefer a dedicated worker DB role (issue #190) over the credential shared with the
 # API -- see docker/postgres-init/01-create-worker-role.sh for how it's provisioned.
