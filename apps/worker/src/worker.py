@@ -265,17 +265,29 @@ def _handle_backfill_repo_events(conn: psycopg.Connection, job_id: int, payload_
         return
 
     inserted_count = 0
-    with conn.cursor() as cur:
-        # Same session-context mechanism as event_consumer.py's _process_entry -- see
-        # its comment for why this isn't a clevis_worker BYPASSRLS grant instead.
-        cur.execute(f"SET app.tenant_id = {int(payload.tenant_id)}")
-        for raw_event in raw_events:
-            normalized = backfill.normalize(raw_event)
-            if normalized is None:
-                continue
-            if repo_events_store.insert_event_and_upsert_daily_count(cur, tenant_id=payload.tenant_id, **normalized):
-                inserted_count += 1
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            # Same session-context mechanism as event_consumer.py's _process_entry -- see
+            # its comment for why this isn't a clevis_worker BYPASSRLS grant instead.
+            cur.execute(f"SET app.tenant_id = {int(payload.tenant_id)}")
+            for raw_event in raw_events:
+                normalized = backfill.normalize(raw_event)
+                if normalized is None:
+                    continue
+                if repo_events_store.insert_event_and_upsert_daily_count(cur, tenant_id=payload.tenant_id, **normalized):
+                    inserted_count += 1
+        conn.commit()
+    except psycopg.Error as error:
+        # Without a rollback here, this connection's transaction stays aborted -- the
+        # _mark_failed/process_job safety net UPDATE that would otherwise run on it next
+        # would itself raise InFailedSqlTransaction, leaving the job stuck in
+        # 'processing' until the reclaim sweep instead of being requeued (CodeRabbit
+        # finding on #342). The synthetic backfill:<id> delivery_id makes a full retry
+        # safe -- nothing is lost by requeueing rather than resuming.
+        conn.rollback()
+        log.warning("job %d failed to store backfilled events (attempt %d): %s", job_id, retry_count + 1, error)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
+        return
 
     _mark_done(
         conn, job_id, {"ok": True, "events_seen": len(raw_events), "events_inserted": inserted_count}, retry_count

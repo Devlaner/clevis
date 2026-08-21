@@ -161,6 +161,25 @@ def test_sync_org_installation_still_succeeds_when_no_backfill_token_is_availabl
     assert db.query(Job).filter(Job.job_type == "github.backfill_repo_events").count() == 0
 
 
+def test_sync_org_installation_survives_a_db_error_during_backfill_enqueue(db, acme_org):
+    # CodeRabbit finding on #342: a DB-level error from resolve_token()/enqueue() (not
+    # NoGitHubTokenAvailable) used to leave the shared Session's transaction aborted, so
+    # the install response's own row.token_ref access (a post-commit lazy reload) would
+    # itself raise and turn an already-successful install into a 500.
+    def _boom(*args, **kwargs):
+        db.execute(text("SELECT 1/0"))  # forces a real, session-aborting Postgres error
+
+    with _mock_installation("acme", "Organization"), patch(
+        "src.routers.installations.resolve_org_token", return_value="tok_acme"
+    ), patch("src.routers.installations.backfill_service.enqueue", side_effect=_boom):
+        resp = _client(db, acme_org["admin"]).post(
+            "/orgs/acme/installations/sync",
+            json={"account_login": "acme", "account_type": "Organization", "installation_id": 7},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["synced"] is True
+
+
 def test_personal_installations_scoped_to_self(db):
     me = _make_user(db, "shabnam@e.com")
     someone_else = _make_user(db, "someoneelse@e.com")

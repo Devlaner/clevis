@@ -164,6 +164,7 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self):
         self.committed = False
+        self.rolled_back = False
         self._cursor = _FakeCursor()
 
     def cursor(self):
@@ -171,6 +172,9 @@ class _FakeConn:
 
     def commit(self):
         self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
 
 
 def _payload(**kwargs):
@@ -248,6 +252,43 @@ def test_handler_requeues_on_network_error():
 
     sql, params = conn._cursor.calls[0]
     assert "status='queued'" in sql
+
+
+class _FailingCursor(_FakeCursor):
+    """Raises on the first execute() (the SET app.tenant_id call) to simulate a genuine
+    DB error mid-insert-loop -- e.g. a constraint violation or serialization failure.
+    Subsequent execute() calls succeed, same as _requeue_for_retry's own UPDATE would
+    against a real connection once its rollback() has cleared the aborted transaction."""
+
+    has_failed = False
+
+    def execute(self, sql, params=None):
+        if not self.has_failed:
+            self.has_failed = True
+            raise psycopg.OperationalError("simulated database failure")
+        super().execute(sql, params)
+
+
+class _FailingConn(_FakeConn):
+    def __init__(self):
+        super().__init__()
+        self._cursor = _FailingCursor()
+
+
+def test_handler_rolls_back_and_requeues_on_a_db_error_during_the_insert_loop():
+    # CodeRabbit finding on #342: without a rollback here, the connection's transaction
+    # stays aborted and the _mark_failed/_requeue_for_retry UPDATE that follows would
+    # itself raise InFailedSqlTransaction, leaving the job stuck in 'processing' forever
+    # instead of being requeued.
+    conn = _FailingConn()
+    events = [_raw_event(id="b-db-error-1")]
+
+    with patch("worker.httpx.Client", return_value=_mock_github_client(events)):
+        worker._handle_backfill_repo_events(conn, 5, _payload(), 0)
+
+    assert conn.rolled_back is True
+    sql, params = conn._cursor.calls[0]
+    assert "status='queued'" in sql  # requeued, not stuck in 'processing'
 
 
 # ---------------------------------------------------------------------------
