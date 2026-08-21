@@ -8,6 +8,8 @@ import httpx
 import psycopg
 from pydantic import BaseModel, Field, ValidationError
 
+import backfill
+import repo_events_store
 from _crypto import decrypt_job_token
 from _sanitize import sanitize_error
 from config import settings
@@ -82,6 +84,13 @@ class ClearActionsCachePayload(BaseModel):
     token: str = Field(min_length=1)
     key: str | None = None
     ref: str | None = None
+
+
+class BackfillRepoEventsPayload(BaseModel):
+    tenant_id: int
+    account_login: str = Field(min_length=1)
+    account_type: str = Field(min_length=1)
+    token: str = Field(min_length=1)
 
 
 def _mark_done(conn: psycopg.Connection, job_id: int, result: dict, expected_retry_count: int) -> None:
@@ -215,11 +224,83 @@ def _handle_clear_actions_cache(conn: psycopg.Connection, job_id: int, payload_r
     log.info("job %d done", job_id)
 
 
+def _handle_backfill_repo_events(conn: psycopg.Connection, job_id: int, payload_raw: str, retry_count: int) -> None:
+    try:
+        payload = BackfillRepoEventsPayload.model_validate_json(payload_raw)
+    except ValidationError as error:
+        log.error("job %d has an invalid payload: %s", job_id, error)
+        _mark_failed(conn, job_id, sanitize_error(error), retry_count)
+        return
+
+    try:
+        token = decrypt_job_token(payload.token, settings.job_secret_key.get_secret_value())
+    except Exception as error:
+        log.error("job %d failed to decrypt its token: %s", job_id, error)
+        _mark_failed(conn, job_id, sanitize_error(error), retry_count)
+        return
+
+    base = settings.github_api_base
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        with httpx.Client(timeout=20) as client:
+            raw_events = backfill.fetch_events(client, base, headers, payload.account_login, payload.account_type)
+    except httpx.HTTPStatusError as error:
+        resp = error.response
+        if resp.status_code >= 500:
+            # 5xx is presumed transient (GitHub-side issue) — worth retrying, unlike 4xx.
+            log.warning("job %d got a %d from GitHub (attempt %d)", job_id, resp.status_code, retry_count + 1)
+            _requeue_for_retry(conn, job_id, retry_count, sanitize_error(_github_error_message(resp)))
+        else:
+            log.error("job %d failed: GitHub API error %d", job_id, resp.status_code)
+            _mark_failed(conn, job_id, sanitize_error(_github_error_message(resp)), retry_count)
+        return
+    except httpx.RequestError as error:
+        log.warning("job %d hit a network error (attempt %d): %s", job_id, retry_count + 1, error)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
+        return
+
+    inserted_count = 0
+    try:
+        with conn.cursor() as cur:
+            # Same session-context mechanism as event_consumer.py's _process_entry -- see
+            # its comment for why this isn't a clevis_worker BYPASSRLS grant instead.
+            cur.execute(f"SET app.tenant_id = {int(payload.tenant_id)}")
+            for raw_event in raw_events:
+                normalized = backfill.normalize(raw_event)
+                if normalized is None:
+                    continue
+                if repo_events_store.insert_event_and_upsert_daily_count(cur, tenant_id=payload.tenant_id, **normalized):
+                    inserted_count += 1
+        conn.commit()
+    except psycopg.Error as error:
+        # Without a rollback here, this connection's transaction stays aborted -- the
+        # _mark_failed/process_job safety net UPDATE that would otherwise run on it next
+        # would itself raise InFailedSqlTransaction, leaving the job stuck in
+        # 'processing' until the reclaim sweep instead of being requeued. The synthetic
+        # backfill:<id> delivery_id makes a full retry safe -- nothing is lost by
+        # requeueing rather than resuming.
+        conn.rollback()
+        log.warning("job %d failed to store backfilled events (attempt %d): %s", job_id, retry_count + 1, error)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
+        return
+
+    _mark_done(
+        conn, job_id, {"ok": True, "events_seen": len(raw_events), "events_inserted": inserted_count}, retry_count
+    )
+    log.info("job %d done: backfilled %d/%d events for %s", job_id, inserted_count, len(raw_events), payload.account_login)
+
+
 # job_type -> handler. Each handler takes (conn, job_id, payload_raw, retry_count) and is
 # responsible for its own payload validation and terminal/retry outcome via _mark_done /
 # _mark_failed / _requeue_for_retry.
 JOB_HANDLERS = {
     "github.clear_actions_cache": _handle_clear_actions_cache,
+    "github.backfill_repo_events": _handle_backfill_repo_events,
 }
 
 

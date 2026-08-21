@@ -4,9 +4,11 @@ Normalizes each queued webhook delivery into the repo_events table, deduplicated
 delivery_id, and upserts a per-tenant/repo/event_type/day count into
 repo_event_daily_counts in the same transaction (S4 PR 2) -- the materialized-aggregate
 half of S4, gated on the repo_events insert having actually happened (not a deduped
-redelivery), so a redelivered webhook can't double-count the rollup. Runs as a second
-daemon thread in worker.py's run(), alongside the existing jobs-table poll loop -- not a
-separate process, so it shares the container's healthcheck/deploy story.
+redelivery), so a redelivered webhook can't double-count the rollup. That insert-then-
+upsert logic itself lives in repo_events_store.py, shared with backfill.py (S5 PR 1) --
+see that module's docstring. Runs as a second daemon thread in worker.py's run(),
+alongside the existing jobs-table poll loop -- not a separate process, so it shares the
+container's healthcheck/deploy story.
 
 Consumer-group semantics (XREADGROUP, group "event_processors") rather than a bare
 XREAD: today's docker-compose runs exactly one worker replica, but a bare XREAD has no
@@ -26,12 +28,13 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
 import redis
 
+import repo_events_store
 from config import settings
 
 log = logging.getLogger(__name__)
@@ -206,49 +209,7 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
         # explicit mechanism than granting clevis_worker BYPASSRLS, same precedent as
         # migration 0035's SECURITY DEFINER function.
         cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
-        cur.execute(
-            """
-            INSERT INTO repo_events
-                (tenant_id, delivery_id, event_type, actor, actor_avatar, repo, summary, occurred_at)
-            VALUES (%(tenant_id)s, %(delivery_id)s, %(event_type)s, %(actor)s, %(actor_avatar)s,
-                    %(repo)s, %(summary)s, %(occurred_at)s)
-            ON CONFLICT (delivery_id) DO NOTHING
-            RETURNING id
-            """,
-            {
-                "tenant_id": tenant_id,
-                "delivery_id": delivery_id,
-                **normalized,
-            },
-        )
-        # Only upsert the aggregate when a repo_events row was actually inserted --
-        # RETURNING comes back empty on the ON CONFLICT DO NOTHING path (a redelivered
-        # webhook), and that must not double-count the rollup (issue #191/S4 PR 2).
-        if cur.fetchone() is not None:
-            cur.execute(
-                """
-                INSERT INTO repo_event_daily_counts (tenant_id, repo, event_type, day, count)
-                VALUES (%(tenant_id)s, %(repo)s, %(event_type)s, %(day)s, 1)
-                ON CONFLICT (tenant_id, repo, event_type, day)
-                DO UPDATE SET count = repo_event_daily_counts.count + 1
-                """,
-                {
-                    "tenant_id": tenant_id,
-                    "repo": normalized["repo"],
-                    "event_type": normalized["event_type"],
-                    # psycopg returns a timestamptz in whatever timezone this connection's
-                    # Postgres session happens to be in, not necessarily UTC -- .date() on
-                    # that raw value would misbucket an event near a non-UTC-session
-                    # midnight. Force UTC first so "day" always means the UTC calendar day,
-                    # matching migration 0037's column docstring (CodeRabbit finding on #341).
-                    # psycopg returns a timestamptz in whatever timezone this connection's
-                    # Postgres session happens to be in, not necessarily UTC -- .date() on
-                    # that raw value would misbucket an event near a non-UTC-session
-                    # midnight. Force UTC first so "day" always means the UTC calendar day,
-                    # matching migration 0037's column docstring (CodeRabbit finding on #341).
-                    "day": normalized["occurred_at"].astimezone(timezone.utc).date(),
-                },
-            )
+        repo_events_store.insert_event_and_upsert_daily_count(cur, tenant_id=tenant_id, delivery_id=delivery_id, **normalized)
         cur.execute("UPDATE webhook_deliveries SET status = 'processed' WHERE id = %s", (delivery_row_id,))
     pg_conn.commit()
     redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
