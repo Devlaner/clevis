@@ -1,9 +1,11 @@
 """Tests for the webhook_events Redis Streams consumer (issue #191/S4 PR 1)."""
 
 import json
+from unittest.mock import MagicMock
 
 import psycopg
 import pytest
+import redis
 
 import event_consumer
 from config import settings
@@ -267,3 +269,184 @@ def test_full_loop_reads_from_redis_and_reclaims_a_crashed_consumers_entry(pg_co
         cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
         cur.execute("SELECT count(*) FROM repo_events WHERE delivery_id = %s", ("d-e2e-1",))
         assert cur.fetchone()[0] == 1
+
+
+def test_summarize_unknown_event_type_returns_the_event_type_itself():
+    assert event_consumer._summarize("deployment", {}) == "deployment"
+
+
+def test_normalize_returns_none_when_repository_full_name_is_missing():
+    assert event_consumer._normalize("push", {"sender": {"login": "octocat"}}, None) is None
+
+
+def test_process_entry_drops_malformed_json_payload(pg_conn, tenant_id):
+    conn, state = pg_conn
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO webhook_deliveries (tenant_id, delivery_id, event_type, payload, status)
+            VALUES (%s, 'd-malformed-1', 'push', %s, 'queued')
+            RETURNING id
+            """,
+            (tenant_id, b"not json"),
+        )
+        row_id = cur.fetchone()[0]
+    conn.commit()
+    state["delivery_ids"].append(row_id)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "push", tenant_id))
+
+    assert len(redis_client.acked) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "queued"
+
+
+def test_process_entry_drops_payload_missing_repository(pg_conn, tenant_id):
+    conn, state = pg_conn
+    row_id = _make_delivery(
+        conn, state, tenant_id=tenant_id, delivery_id="d-no-repo-1", event_type="push",
+        payload={"sender": {"login": "octocat"}},
+    )
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "push", tenant_id))
+
+    assert len(redis_client.acked) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "queued"
+
+
+def test_ensure_group_is_idempotent_when_group_already_exists(redis_client):
+    event_consumer._ensure_group(redis_client)
+    event_consumer._ensure_group(redis_client)  # BUSYGROUP the second time -- must not raise
+
+
+def test_ensure_group_reraises_non_busygroup_errors(monkeypatch):
+    fake = MagicMock()
+    fake.xgroup_create.side_effect = redis.ResponseError("some other error")
+    with pytest.raises(redis.ResponseError):
+        event_consumer._ensure_group(fake)
+
+
+def test_touch_heartbeat_writes_the_file():
+    event_consumer._touch_heartbeat()
+    assert event_consumer._HEARTBEAT_FILE.exists()
+
+
+def test_touch_heartbeat_swallows_oserror(monkeypatch):
+    monkeypatch.setattr(
+        event_consumer._HEARTBEAT_FILE.__class__, "write_text", MagicMock(side_effect=OSError("disk full"))
+    )
+    event_consumer._touch_heartbeat()  # must not raise
+
+
+def test_sweep_pending_with_nothing_pending_is_a_noop(pg_conn, redis_client):
+    conn, _state = pg_conn
+    event_consumer._ensure_group(redis_client)
+    event_consumer._sweep_pending(conn, redis_client)  # no pending entries -- returns early
+
+
+def test_sweep_pending_drops_entries_past_max_delivery_attempts(pg_conn, tenant_id, redis_client):
+    conn, state = pg_conn
+    payload = {"repository": {"full_name": "acme/widgets"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v3"}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-poison-1", event_type="create", payload=payload)
+
+    event_consumer._ensure_group(redis_client)
+    entry_id = redis_client.xadd(event_consumer._STREAM_KEY, _entry_fields(row_id, "create", tenant_id))
+    redis_client.xreadgroup(event_consumer._GROUP_NAME, "c1", {event_consumer._STREAM_KEY: ">"}, count=10)
+    # xclaim increments the delivery counter each call -- push it past _MAX_DELIVERY_ATTEMPTS.
+    for _ in range(event_consumer._MAX_DELIVERY_ATTEMPTS + 1):
+        redis_client.xclaim(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "c1", min_idle_time=0, message_ids=[entry_id])
+
+    # _sweep_pending only considers entries idle at least _RECLAIM_IDLE_MS -- these were
+    # just claimed, so drop it to 0 for this test rather than sleep for real.
+    original_idle = event_consumer._RECLAIM_IDLE_MS
+    event_consumer._RECLAIM_IDLE_MS = 0
+    try:
+        event_consumer._sweep_pending(conn, redis_client)
+    finally:
+        event_consumer._RECLAIM_IDLE_MS = original_idle
+
+    pending = redis_client.xpending_range(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, min="-", max="+", count=10)
+    assert pending == []  # dropped (acked), not reclaimed/reprocessed
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "queued"  # never actually processed
+
+
+def test_sweep_pending_logs_and_continues_when_claimed_entry_processing_raises(pg_conn, tenant_id, redis_client, monkeypatch):
+    conn, state = pg_conn
+    payload = {"repository": {"full_name": "acme/widgets"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v4"}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-raises-1", event_type="create", payload=payload)
+
+    event_consumer._ensure_group(redis_client)
+    redis_client.xadd(event_consumer._STREAM_KEY, _entry_fields(row_id, "create", tenant_id))
+    redis_client.xreadgroup(event_consumer._GROUP_NAME, "dead-consumer", {event_consumer._STREAM_KEY: ">"}, count=10)
+
+    monkeypatch.setattr(event_consumer, "_process_entry", MagicMock(side_effect=RuntimeError("boom")))
+    original_idle = event_consumer._RECLAIM_IDLE_MS
+    event_consumer._RECLAIM_IDLE_MS = 0
+    try:
+        event_consumer._sweep_pending(conn, redis_client)  # must not raise
+    finally:
+        event_consumer._RECLAIM_IDLE_MS = original_idle
+
+
+class _StopLoop(Exception):
+    pass
+
+
+def test_run_processes_a_stream_entry_then_stops(pg_conn, tenant_id, redis_client, monkeypatch):
+    conn, state = pg_conn
+    payload = {"repository": {"full_name": "acme/widgets"}, "sender": {"login": "octocat", "avatar_url": ""}, "ref_type": "tag", "ref": "v5"}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-run-loop-1", event_type="create", payload=payload)
+
+    event_consumer._ensure_group(redis_client)
+    redis_client.xadd(event_consumer._STREAM_KEY, _entry_fields(row_id, "create", tenant_id))
+
+    monkeypatch.setattr(event_consumer, "_redis_client", lambda: redis_client)
+    monkeypatch.setattr(event_consumer, "_BLOCK_MS", 100)
+    # _touch_heartbeat is called first thing every loop iteration -- no-op on the first
+    # call (let the iteration actually run), raise on the second so run()'s `while True`
+    # stops after processing exactly one batch.
+    monkeypatch.setattr(event_consumer, "_touch_heartbeat", MagicMock(side_effect=[None, _StopLoop]))
+
+    with pytest.raises(_StopLoop):
+        event_consumer.run()
+
+    with conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute("SELECT count(*) FROM repo_events WHERE delivery_id = %s", ("d-run-loop-1",))
+        assert cur.fetchone()[0] == 1
+
+
+def test_run_recovers_from_a_connection_error(monkeypatch):
+    # psycopg.connect raising is caught *inside* run()'s own try/except (by design --
+    # it must never let a connection blip kill the loop), so a sentinel raised there
+    # would just be swallowed by that same except, not reach this test. Use the
+    # _touch_heartbeat hook (called once per iteration, outside the try) to stop the
+    # loop instead, and assert connect() was retried across iterations.
+    monkeypatch.setattr(event_consumer, "_redis_client", lambda: MagicMock())
+    monkeypatch.setattr(event_consumer, "_ensure_group", MagicMock())
+    monkeypatch.setattr(event_consumer.psycopg, "connect", MagicMock(side_effect=psycopg.OperationalError("refused")))
+    monkeypatch.setattr(event_consumer.time, "sleep", MagicMock())
+    monkeypatch.setattr(event_consumer, "_touch_heartbeat", MagicMock(side_effect=[None, None, _StopLoop]))
+
+    with pytest.raises(_StopLoop):
+        event_consumer.run()
+
+    assert event_consumer.psycopg.connect.call_count == 2  # retried instead of crashing after the first failure
+
+
+def test_start_background_thread_runs_in_the_background(monkeypatch):
+    ran = []
+    monkeypatch.setattr(event_consumer, "run", lambda: ran.append(True))
+
+    thread = event_consumer.start_background_thread()
+    thread.join(timeout=2)
+
+    assert ran == [True]
+    assert not thread.is_alive()
