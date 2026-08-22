@@ -337,7 +337,9 @@ def test_security_alert_events_are_acked_but_not_normalized_into_repo_events(eve
     redis_client = _FakeRedis()
     event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, event_type, tenant_id))
 
-    assert len(redis_client.acked) == 1  # acked so it doesn't sit pending forever
+    # Exact args, not just a count -- proves this specific stream/group/entry was
+    # acked, not some other one.
+    assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
     with conn.cursor() as cur:
         cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
         cur.execute("SELECT count(*) FROM repo_events WHERE delivery_id = %s", (f"d-{event_type}-1",))
