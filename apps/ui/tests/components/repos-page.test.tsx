@@ -430,6 +430,99 @@ describe("ReposPage", () => {
     await waitFor(() => expect(screen.queryByText(/no recent activity/i)).not.toBeInTheDocument());
   });
 
+  it("marks the sparkline cell as estimated when the stats source is an aggregate", async () => {
+    reposListMock.mockResolvedValue({
+      org: "acme",
+      total: 1,
+      repos: [
+        {
+          name: "demo",
+          full_name: "acme/demo",
+          private: false,
+          description: null,
+          language: "Python",
+          stargazers_count: 3,
+          forks_count: 0,
+          watchers_count: 3,
+          open_issues_count: 1,
+          pushed_at: "2026-07-01T00:00:00Z",
+          default_branch: "main",
+          html_url: "https://github.com/acme/demo",
+        },
+      ],
+    });
+    reposStatsMock.mockResolvedValue({
+      repository: "acme/demo",
+      commit_activity: Array.from({ length: 8 }, (_, i) => ({ week: i, total: i + 1, days: [] })),
+      commit_activity_source: "aggregate",
+      participation: {},
+      contributors: [],
+      stargazers_count: 3,
+      forks_count: 0,
+      watchers_count: 3,
+      open_issues_count: 1,
+      default_branch: "main",
+      latest_release: null,
+    });
+
+    renderPage();
+
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    fireEvent.click(screen.getByRole("button", { name: /load repositories/i }));
+
+    await waitFor(() => expect(screen.getByText("demo")).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(/no recent activity/i)).not.toBeInTheDocument());
+    // Visible, not just a hover-only title -- touch/keyboard users must be able to see
+    // the estimate label too.
+    expect(screen.getByText("(est.)")).toBeInTheDocument();
+    expect(screen.getByTitle(/estimated from stored push events/i)).toBeInTheDocument();
+  });
+
+  it("still marks the cell as estimated when the aggregate source has zero recent activity", async () => {
+    reposListMock.mockResolvedValue({
+      org: "acme",
+      total: 1,
+      repos: [
+        {
+          name: "demo",
+          full_name: "acme/demo",
+          private: false,
+          description: null,
+          language: "Python",
+          stargazers_count: 3,
+          forks_count: 0,
+          watchers_count: 3,
+          open_issues_count: 1,
+          pushed_at: "2026-07-01T00:00:00Z",
+          default_branch: "main",
+          html_url: "https://github.com/acme/demo",
+        },
+      ],
+    });
+    reposStatsMock.mockResolvedValue({
+      repository: "acme/demo",
+      commit_activity: Array.from({ length: 8 }, () => ({ week: 0, total: 0, days: [] })),
+      commit_activity_source: "aggregate",
+      participation: {},
+      contributors: [],
+      stargazers_count: 3,
+      forks_count: 0,
+      watchers_count: 3,
+      open_issues_count: 1,
+      default_branch: "main",
+      latest_release: null,
+    });
+
+    renderPage();
+
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    fireEvent.click(screen.getByRole("button", { name: /load repositories/i }));
+
+    await waitFor(() => expect(screen.getByText("demo")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/no recent activity/i)).toBeInTheDocument());
+    expect(screen.getByText("(est.)")).toBeInTheDocument();
+  });
+
   it("keeps rendered rows scoped to the org they were loaded for, even if the org field is edited afterward without reloading", async () => {
     reposListMock.mockResolvedValue({
       org: "acme",

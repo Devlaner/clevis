@@ -146,6 +146,7 @@ export default function RepoDetailPage() {
   }
 
   const commitActivity = statsQuery.data?.commit_activity ?? []
+  const isEstimatedActivity = statsQuery.data?.commit_activity_source === "aggregate"
   const areaData = commitActivity.map((w) => ({
     week: new Date(w.week * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
     value: w.total,
@@ -240,8 +241,16 @@ export default function RepoDetailPage() {
         </div>
 
         <div className="card lg:col-span-2">
-          <div className="px-4 py-3 border-b border-border">
+          <div className="px-4 py-3 border-b border-border flex items-center gap-2">
             <span className="section-label">Commit activity — 52 weeks</span>
+            {isEstimatedActivity && (
+              <span
+                className="text-[0.6875rem] text-muted-foreground/70"
+                title="Estimated from stored push events, not GitHub's exact commit count."
+              >
+                (estimated)
+              </span>
+            )}
           </div>
           <div className="p-4">
             {statsQuery.isLoading ? (
@@ -257,8 +266,16 @@ export default function RepoDetailPage() {
         </div>
 
         <div className="card">
-          <div className="px-4 py-3 border-b border-border">
+          <div className="px-4 py-3 border-b border-border flex items-center gap-2">
             <span className="section-label">Activity calendar</span>
+            {isEstimatedActivity && (
+              <span
+                className="text-[0.6875rem] text-muted-foreground/70"
+                title="Estimated from stored push events, not GitHub's exact commit count."
+              >
+                (estimated)
+              </span>
+            )}
           </div>
           <div className="p-4">
             {statsQuery.isLoading ? (

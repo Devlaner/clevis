@@ -6,13 +6,14 @@ from datetime import date, datetime, timedelta, timezone
 import anyio
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
-from src.core.db import get_db
-from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
+from src.core.db import RepoEventDailyCount, get_db
+from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role, set_tenant_session_context
 from src.repositories import installation_repo, job_repo, org_repo, scan_results_repo, tenant_repo
-from src.routers.github import _cached_events
+from src.routers.github import _cached_events, _fetch_events_from_repo_events
 from src.schemas.analytics import (
     AnalyticsInput,
     AnalyticsResponse,
@@ -186,12 +187,90 @@ def _safe_member_count(owner: str, token: str) -> int:
         return 0
 
 
-def _safe_recent_events(owner: str, token: str) -> list[OrgEventSummary]:
+def _cockpit_connected_tenant(db: Session, user_id: int, owner: str) -> int | None:
+    # Unlike repos.py/github.py's org-scoped endpoints, the cockpit is a personal
+    # endpoint (require_auth only, no OrgContext/require_org_role) -- `owner` is
+    # whatever GitHub login the caller resolved a token for via resolve_owner_token,
+    # not necessarily a Clevis org the caller is a member of (bring-your-own-token is
+    # allowed here). Mirrors resolve_owner_token's own org-membership+role resolution
+    # (token_resolution.py) deliberately: without this membership check, any caller
+    # could read another org's repo_event_daily_counts/repo_events just by naming its
+    # login, the exact class of bug resolve_owner_token's own docstring says it guards
+    # against for token resolution -- "there exists a connected installation for this
+    # login" alone is not authorization to read its aggregate data.
+    org = org_repo.get_by_login_ci(db, owner)
+    if org is None:
+        return None
+    org = org_repo.ensure_tenant_linked(db, org)
+    if tenant_repo.get_membership(db, org.tenant_id, user_id) is None:
+        return None
+    installation = installation_repo.get_for_org(db, org_id=org.id, account_login=owner)
+    if installation is None or installation.installation_id is None:
+        return None
+    # Sets RLS session context for this connection so the aggregate reads below (repo_events/
+    # repo_event_daily_counts, migrations 0036/0037, both ENABLE ROW LEVEL SECURITY with a
+    # strict tenant_id filter) are correctly tenant-scoped -- resolve_owner_token
+    # itself doesn't set this (a separate, pre-existing gap in that shared helper, out of
+    # scope here; see its own docstring), so this is the first point in the cockpit's
+    # request handling where it's safe to do so, now that real membership is confirmed.
+    set_tenant_session_context(db, org.tenant_id, user_id)
+    return org.tenant_id
+
+
+def _safe_recent_events(db: Session, owner: str, token: str, tenant_id: int | None) -> list[OrgEventSummary]:
     try:
-        events = _cached_events(owner, token, per_page=10).events
+        if tenant_id is not None:
+            events = _fetch_events_from_repo_events(db, owner, tenant_id, per_page=10).events
+        else:
+            events = _cached_events(owner, token, per_page=10).events
         return [OrgEventSummary(**e.model_dump()) for e in events[:5]]
     except (httpx.HTTPStatusError, httpx.RequestError, HTTPException):
         return []
+
+
+def _cockpit_events_and_commit_activity(
+    db: Session, owner: str, token: str, tenant_id: int | None, repo_names: list[str]
+) -> tuple[list[OrgEventSummary], tuple[list[int], list[int]]]:
+    # Bundled into one call, not two independent asyncio.gather entries, because both
+    # branches below read `db` when tenant_id is set -- a SQLAlchemy Session isn't safe
+    # to use concurrently from two threads at once, unlike every other helper in the
+    # cockpit's gather, which only ever touches the GitHub token/client.
+    recent_events = _safe_recent_events(db, owner, token, tenant_id)
+    if tenant_id is not None:
+        commit_activity = _cockpit_commit_activity_from_aggregate(db, tenant_id)
+    else:
+        commit_activity = _safe_commit_activity_4w_and_heatmap_52w(owner, token, repo_names)
+    return recent_events, commit_activity
+
+
+def _cockpit_commit_activity_from_aggregate(db: Session, tenant_id: int) -> tuple[list[int], list[int]]:
+    """Same {4w, 52w} shape _safe_commit_activity_4w_and_heatmap_52w returns, built from
+    repo_event_daily_counts' push-event counts summed across every repo in the tenant
+    (the cockpit's commit_activity_4w/commit_heatmap_52w are org-wide, unlike repos.py's
+    per-repo aggregate) instead of GitHub's actual per-repo commit counts -- an
+    approximation for the same reason repos.py's aggregate is: a push can carry multiple
+    commits. Callers must set CockpitResponse.commit_activity_source="aggregate"."""
+    today = datetime.now(timezone.utc).date()
+    current_week_start = today - timedelta(days=(today.weekday() + 1) % 7)
+    oldest_week_start = current_week_start - timedelta(weeks=51)
+
+    rows = (
+        db.query(RepoEventDailyCount.day, func.sum(RepoEventDailyCount.count))
+        .filter(
+            RepoEventDailyCount.tenant_id == tenant_id,
+            RepoEventDailyCount.event_type == "push",
+            RepoEventDailyCount.day >= oldest_week_start,
+        )
+        .group_by(RepoEventDailyCount.day)
+        .all()
+    )
+    counts_by_day = {day: int(count) for day, count in rows}
+
+    totals_52w = [
+        sum(counts_by_day.get(oldest_week_start + timedelta(weeks=i, days=d), 0) for d in range(7))
+        for i in range(52)
+    ]
+    return totals_52w[-4:], totals_52w
 
 
 def _week_start(weeks_ago: int) -> date:
@@ -455,6 +534,7 @@ async def personal_analytics_cockpit(
     latest_score = scans[0]["score"] if scans else None
     score_trend = [s["score"] for s in reversed(scans)]
     cache_job_success_rate = _cache_job_success_rate(db)
+    connected_tenant_id = await anyio.to_thread.run_sync(lambda: _cockpit_connected_tenant(db, user.id, owner))
 
     try:
         repos = await anyio.to_thread.run_sync(lambda: _safe_list_repos(owner, token))
@@ -464,20 +544,20 @@ async def personal_analytics_cockpit(
 
     (
         member_count,
-        recent_events,
+        (recent_events, (commit_activity_4w, commit_heatmap_52w)),
         open_pr_count,
         pr_merge_rate_4w,
-        (commit_activity_4w, commit_heatmap_52w),
         total_cache_size_bytes,
         (milestones, at_risk_repos),
         pr_cycle_time_8w,
         release_cadence_4w,
     ) = await asyncio.gather(
         anyio.to_thread.run_sync(lambda: _safe_member_count(owner, token)),
-        anyio.to_thread.run_sync(lambda: _safe_recent_events(owner, token)),
+        anyio.to_thread.run_sync(
+            lambda: _cockpit_events_and_commit_activity(db, owner, token, connected_tenant_id, repo_names)
+        ),
         anyio.to_thread.run_sync(lambda: _safe_open_pr_count(owner, token)),
         anyio.to_thread.run_sync(lambda: _safe_pr_merge_rate_4w(owner, token)),
-        anyio.to_thread.run_sync(lambda: _safe_commit_activity_4w_and_heatmap_52w(owner, token, repo_names)),
         anyio.to_thread.run_sync(lambda: _safe_total_cache_bytes(owner, token, repo_names)),
         anyio.to_thread.run_sync(lambda: _safe_milestones(owner, token, repo_names)),
         anyio.to_thread.run_sync(lambda: _safe_pr_cycle_time_8w(owner, token)),
@@ -500,6 +580,7 @@ async def personal_analytics_cockpit(
         milestones=milestones,
         pr_cycle_time_8w=pr_cycle_time_8w,
         release_cadence_4w=release_cadence_4w,
+        commit_activity_source="aggregate" if connected_tenant_id is not None else "github",
     )
 
 

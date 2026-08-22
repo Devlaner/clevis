@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, SecretStr
 
 
@@ -41,6 +43,11 @@ class LatestRelease(BaseModel):
 class RepoStatsResponse(BaseModel):
     repository: str
     commit_activity: list[dict]
+    # "aggregate" when commit_activity is built from repo_event_daily_counts (S6) instead
+    # of a live GitHub stats/commit_activity call -- push-*event* counts, not actual
+    # commit counts, so the UI must label this as an estimate, not exact. See
+    # src.routers.repos._repo_commit_activity_from_aggregate.
+    commit_activity_source: Literal["github", "aggregate"] = "github"
     participation: dict
     contributors: list[dict]
     stargazers_count: int

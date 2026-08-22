@@ -65,3 +65,21 @@ class ReleaseSummary(BaseModel):
 class ReleaseTimelineResponse(BaseModel):
     org: str
     releases: list[ReleaseSummary]
+
+
+class ActivitySummaryEntry(BaseModel):
+    repo: str
+    event_type: str
+    count: int
+
+
+class ActivitySummaryResponse(BaseModel):
+    org: str
+    days: int
+    # False for a legacy PAT-only org (no GitHub App installation -> repo_event_daily_counts
+    # is never populated for its tenant) -- totals is always [] in that case, not an error,
+    # since a dashboard polling this should degrade gracefully rather than treat it as a
+    # failure. See src.routers.github's org_activity_summary docstring.
+    connected: bool
+    generated_at: datetime
+    totals: list[ActivitySummaryEntry]

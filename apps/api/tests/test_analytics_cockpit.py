@@ -7,10 +7,11 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import Job, User, get_db
-from src.repositories import org_repo, scan_results_repo
+from src.repositories import installation_repo, org_membership_repo, org_repo, scan_results_repo
 from src.routers.analytics import router
 
 _HTTP_ERROR = httpx.HTTPStatusError(
@@ -198,6 +199,188 @@ def test_cockpit_falls_back_to_client_supplied_token_header(http, db, mock_user)
         _stop_all(patchers)
 
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# S6: commit_activity_4w/commit_heatmap_52w + recent_events served from
+# repo_event_daily_counts/repo_events (not live GitHub) for an org the caller is
+# a member of with a connected GitHub App installation -- partial re-point,
+# everything else in CockpitResponse still comes from live GitHub calls (see
+# analytics.py's _cockpit_commit_activity_from_aggregate docstring and the
+# plan.md status update for the accuracy tradeoff).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def acme_org_with_installation(db, mock_user):
+    org = org_repo.get_or_create(db, github_login="acme")
+    org_membership_repo.get_or_create(db, org_id=org.id, user_id=mock_user.id, role="member")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=7, org_id=org.id
+    )
+    return org
+
+
+def _insert_daily_count(db, tenant_id, *, repo, event_type, day, count):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO repo_event_daily_counts (tenant_id, repo, event_type, day, count) "
+            "VALUES (:tenant_id, :repo, :event_type, :day, :count)"
+        ),
+        {"tenant_id": tenant_id, "repo": repo, "event_type": event_type, "day": day, "count": count},
+    )
+    db.commit()
+
+
+def _insert_repo_event(db, tenant_id, *, delivery_id, event_type, actor, repo, summary, occurred_at):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO repo_events (tenant_id, delivery_id, event_type, actor, actor_avatar, repo, summary, occurred_at) "
+            "VALUES (:tenant_id, :delivery_id, :event_type, :actor, '', :repo, :summary, :occurred_at)"
+        ),
+        {
+            "tenant_id": tenant_id,
+            "delivery_id": delivery_id,
+            "event_type": event_type,
+            "actor": actor,
+            "repo": repo,
+            "summary": summary,
+            "occurred_at": occurred_at,
+        },
+    )
+    db.commit()
+
+
+# Excludes the two helpers this section exercises for real -- every other GitHub-calling
+# helper stays mocked so a connected-org test doesn't also need to fake GitHub responses
+# for member_count/open_pr_count/etc.
+_CONNECTED_SAFE_MOCKS = {
+    target: kwargs
+    for target, kwargs in _DEFAULT_SAFE_MOCKS.items()
+    if target
+    not in (
+        "src.routers.analytics._safe_recent_events",
+        "src.routers.analytics._safe_commit_activity_4w_and_heatmap_52w",
+    )
+}
+
+
+def test_cockpit_connected_org_uses_aggregate_commit_activity(http, db, mock_user, acme_org_with_installation):
+    today = datetime.now(timezone.utc).date()
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=4)
+
+    patchers = [patch(target, **kwargs) for target, kwargs in _CONNECTED_SAFE_MOCKS.items()]
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["commit_activity_source"] == "aggregate"
+    assert len(body["commit_heatmap_52w"]) == 52
+    assert body["commit_heatmap_52w"][-1] == 4
+    assert body["commit_activity_4w"][-1] == 4
+
+
+def test_cockpit_connected_org_sums_commit_activity_across_repos(http, db, mock_user, acme_org_with_installation):
+    today = datetime.now(timezone.utc).date()
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=3)
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/worker", event_type="push", day=today, count=2)
+
+    patchers = [patch(target, **kwargs) for target, kwargs in _CONNECTED_SAFE_MOCKS.items()]
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    assert resp.json()["commit_heatmap_52w"][-1] == 5
+
+
+def test_cockpit_connected_org_uses_repo_events_for_recent_events_not_live_github(
+    http, db, mock_user, acme_org_with_installation
+):
+    _insert_repo_event(
+        db,
+        acme_org_with_installation.tenant_id,
+        delivery_id="d1",
+        event_type="push",
+        actor="octocat",
+        repo="acme/demo",
+        summary="pushed to main",
+        occurred_at=datetime.now(timezone.utc),
+    )
+
+    patchers = [patch(target, **kwargs) for target, kwargs in _CONNECTED_SAFE_MOCKS.items()]
+    _start_all(patchers)
+    try:
+        with (
+            patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+            patch("src.routers.analytics._cached_events") as mock_cached_events,
+        ):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    events = resp.json()["recent_events"]
+    assert len(events) == 1
+    assert events[0]["actor"] == "octocat"
+    mock_cached_events.assert_not_called()
+
+
+def test_cockpit_falls_back_to_github_when_the_installation_has_no_installation_id(
+    http, db, mock_user, acme_org_with_installation
+):
+    # Same sync_org_installation known-admin gap covered elsewhere (org_events,
+    # repos.py's _repo_org_connected): a row can exist with installation_id IS NULL.
+    inst = installation_repo.get_for_org(db, org_id=acme_org_with_installation.id, account_login="acme")
+    inst.installation_id = None
+    db.commit()
+
+    patchers = _patch_all()
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["commit_activity_source"] == "github"
+    assert body["commit_activity_4w"] == [1, 2, 3, 4]  # the default GitHub-path mock's value
+
+
+def test_cockpit_does_not_read_aggregate_for_org_the_caller_is_not_a_member_of(http, db, mock_user):
+    # A connected org exists, but mock_user has no membership row in it -- the
+    # bring-your-own-token path must not leak that unrelated org's internal
+    # repo_event_daily_counts just because the `owner` login happens to match.
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=7, org_id=org.id
+    )
+    _insert_daily_count(db, org.tenant_id, repo="acme/demo", event_type="push", day=datetime.now(timezone.utc).date(), count=99)
+
+    patchers = _patch_all()
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["commit_activity_source"] == "github"
+    assert body["commit_activity_4w"] == [1, 2, 3, 4]  # default mock's value, not the aggregate's 99
 
 
 # ---------------------------------------------------------------------------
