@@ -1,6 +1,6 @@
 """Tests for the repos router (Phase 8 groundwork)."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import httpx
@@ -388,7 +388,10 @@ def test_repo_stats_uses_aggregate_commit_activity_when_installation_connected(r
 def test_repo_stats_aggregate_commit_activity_buckets_by_week_and_excludes_outside_window(
     repos_client, db, acme_org_with_installation
 ):
-    today = date.today()
+    # A fixed Monday, not the real "today" -- if this test ran on a real Sunday,
+    # `today - timedelta(days=1)` would fall in the *previous* Sunday-starting week,
+    # breaking the "same week" assumption below (CodeRabbit finding on this PR).
+    today = date(2000, 1, 3)
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=2)
     _insert_daily_count(
         db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today - timedelta(days=1), count=1
@@ -400,8 +403,10 @@ def test_repo_stats_aggregate_commit_activity_buckets_by_week_and_excludes_outsi
     # A different event type on the same day -- must not be counted (commit_activity is push-only).
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="issues", day=today, count=50)
 
-    with patch("src.routers.repos.GitHubClient") as mock_client:
+    with patch("src.routers.repos.GitHubClient") as mock_client, patch("src.routers.repos.datetime") as mock_datetime:
         mock_client.return_value.request.side_effect = _stats_side_effect(repo_meta=_REPO_META, release_error=_not_found())
+        mock_datetime.now.return_value = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
         resp = repos_client.post(
             "/orgs/acme/repos/acme/demo/stats", json={"token": "ghp_testtoken123456789012345678901234"}
         )

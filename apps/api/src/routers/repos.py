@@ -1,7 +1,7 @@
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from checks.github_checks import BranchProtectionEnabled, SecretScanningEnabled
@@ -27,7 +27,7 @@ from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_to
 router = APIRouter()
 
 _STATS_CACHE_TTL_SECONDS = 600
-_stats_cache: dict[tuple[str, str, str], tuple[float, RepoStatsResponse]] = {}
+_stats_cache: dict[tuple[str, str, str, bool], tuple[float, RepoStatsResponse]] = {}
 
 
 def _token_hash(token: str) -> str:
@@ -89,7 +89,11 @@ def _repo_commit_activity_from_aggregate(db: Session, tenant_id: int, repo: str)
     actual commit counts. This is an approximation (a push can carry multiple commits,
     and doesn't 1:1 map to "commits" the way GitHub's own stat does) -- callers must set
     RepoStatsResponse.commit_activity_source="aggregate" so the UI can label it as such."""
-    today = date.today()
+    # UTC, not the process-local date: RepoEventDailyCount.day is always the UTC
+    # calendar day (repo_events_store.py forces UTC before deriving it), so bucketing
+    # against a non-UTC local date here could misalign the current/oldest week boundary
+    # (CodeRabbit finding on this PR).
+    today = datetime.now(timezone.utc).date()
     # weekday(): Monday=0..Sunday=6; this finds the Sunday on/before `today`.
     current_week_start = today - timedelta(days=(today.weekday() + 1) % 7)
     oldest_week_start = current_week_start - timedelta(weeks=51)
@@ -171,7 +175,10 @@ def _evict_expired_stats(now: float) -> None:
 
 
 def _cached_stats(owner: str, repo: str, token: str, db: Session, tenant_id: int, connected: bool) -> RepoStatsResponse:
-    key = (owner, repo, _token_hash(token))
+    # `connected` is part of the key, not just an argument to the miss path: without it,
+    # an installation connecting/disconnecting mid-TTL could serve a cached response with
+    # a stale commit_activity_source (CodeRabbit finding on this PR).
+    key = (owner, repo, _token_hash(token), connected)
     now = time.monotonic()
     cached = _stats_cache.get(key)
     if cached and now - cached[0] < _STATS_CACHE_TTL_SECONDS:

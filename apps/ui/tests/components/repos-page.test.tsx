@@ -472,6 +472,9 @@ describe("ReposPage", () => {
 
     await waitFor(() => expect(screen.getByText("demo")).toBeInTheDocument());
     await waitFor(() => expect(screen.queryByText(/no recent activity/i)).not.toBeInTheDocument());
+    // Visible, not just a hover-only title -- touch/keyboard users must be able to see
+    // the estimate label too (CodeRabbit finding on this PR).
+    expect(screen.getByText("(est.)")).toBeInTheDocument();
     expect(screen.getByTitle(/estimated from stored push events/i)).toBeInTheDocument();
   });
 
