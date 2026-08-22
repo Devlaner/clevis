@@ -38,6 +38,23 @@ def pg_conn():
         with conn.cursor() as cur:
             if state["delivery_ids"]:
                 cur.execute("DELETE FROM webhook_deliveries WHERE id = ANY(%s)", (state["delivery_ids"],))
+            # Unlike repo_events/security_alerts, clevis_api/clevis_worker ARE granted
+            # DELETE on org_members/repo_collaborators (migration 0040 -- the consumer
+            # deletes a row on member_removed/removed, so it needs the privilege anyway)
+            # -- clean up test rows scoped to the shared tenant rather than letting them
+            # accumulate across local runs, since there's no per-row id to track like
+            # delivery_ids. find-or-create's own SELECT (below) can return no row on a
+            # fresh DB where no test in this session has run yet -- guard against that.
+            cur.execute(
+                "SELECT tenants.id FROM tenants JOIN users ON users.id = tenants.personal_user_id "
+                "WHERE lower(users.email) = lower(%s)",
+                ("s4-consumer-tests@example.com",),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                cur.execute(f"SET app.tenant_id = {int(row[0])}")
+                cur.execute("DELETE FROM org_members WHERE tenant_id = %s", (row[0],))
+                cur.execute("DELETE FROM repo_collaborators WHERE tenant_id = %s", (row[0],))
         conn.commit()
         conn.close()
 
@@ -535,6 +552,194 @@ def test_parse_alert_timestamp_falls_back_on_missing_or_malformed_value():
     fallback = datetime(2026, 1, 1, tzinfo=timezone.utc)
     assert event_consumer._parse_alert_timestamp(None, fallback) == fallback
     assert event_consumer._parse_alert_timestamp("not-a-real-timestamp", fallback) == fallback
+
+
+def _org_member(conn, tenant_id, login):
+    with conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute("SELECT avatar_url, role FROM org_members WHERE tenant_id = %s AND login = %s", (tenant_id, login))
+        return cur.fetchone()
+
+
+def _repo_collaborator(conn, tenant_id, repo, login):
+    with conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute(
+            "SELECT permission, source, is_outside_collaborator FROM repo_collaborators "
+            "WHERE tenant_id = %s AND repo = %s AND login = %s",
+            (tenant_id, repo, login),
+        )
+        return cur.fetchone()
+
+
+def test_organization_member_added_upserts_org_member(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {
+        "action": "member_added",
+        "membership": {"role": "admin", "user": {"login": "octocat", "avatar_url": "https://example.com/o.png"}},
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-member-added-1", event_type="organization", payload=payload)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "organization", tenant_id))
+
+    assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
+    row = _org_member(conn, tenant_id, "octocat")
+    assert row == ("https://example.com/o.png", "admin")
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "processed"
+
+
+def test_organization_member_removed_deletes_org_member(pg_conn, tenant_id):
+    conn, state = pg_conn
+    added_payload = {
+        "action": "member_added",
+        "membership": {"role": "member", "user": {"login": "removeme", "avatar_url": ""}},
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-member-remove-1", event_type="organization", payload=added_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "organization", tenant_id))
+    assert _org_member(conn, tenant_id, "removeme") is not None
+
+    removed_payload = {"action": "member_removed", "membership": {"user": {"login": "removeme"}}}
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-member-remove-2", event_type="organization", payload=removed_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "organization", tenant_id))
+
+    assert _org_member(conn, tenant_id, "removeme") is None
+
+
+def test_organization_member_invited_is_a_noop_for_org_members(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {"action": "member_invited", "membership": {"user": {"login": "pending-invite"}}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-invited-1", event_type="organization", payload=payload)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "organization", tenant_id))
+
+    assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
+    assert _org_member(conn, tenant_id, "pending-invite") is None
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "processed"
+
+
+def test_redelivered_member_added_does_not_overwrite_role(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {"action": "member_added", "membership": {"role": "admin", "user": {"login": "stable-role", "avatar_url": "https://example.com/a.png"}}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-role-1", event_type="organization", payload=payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "organization", tenant_id))
+
+    # Redelivery (or a re-add with a stale role snapshot) must not clobber a role a
+    # future reconciliation poll may have already corrected -- see org_membership_store.py.
+    redelivered_payload = {"action": "member_added", "membership": {"role": "member", "user": {"login": "stable-role", "avatar_url": "https://example.com/b.png"}}}
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-role-2", event_type="organization", payload=redelivered_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "organization", tenant_id))
+
+    row = _org_member(conn, tenant_id, "stable-role")
+    assert row == ("https://example.com/b.png", "admin")  # avatar refreshed, role untouched
+
+
+def test_member_added_upserts_repo_collaborator(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {
+        "action": "added",
+        "repository": {"full_name": "acme/widgets"},
+        "member": {"login": "collab1"},
+        "changes": {"permission": {"to": "push"}},
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-member-added-1", event_type="member", payload=payload)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "member", tenant_id))
+
+    assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
+    row = _repo_collaborator(conn, tenant_id, "acme/widgets", "collab1")
+    assert row == ("push", "direct", False)
+
+
+def test_member_edited_updates_permission(pg_conn, tenant_id):
+    conn, state = pg_conn
+    added_payload = {
+        "action": "added", "repository": {"full_name": "acme/widgets"}, "member": {"login": "collab2"},
+        "changes": {"permission": {"to": "pull"}},
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-member-edit-1", event_type="member", payload=added_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "member", tenant_id))
+
+    edited_payload = {
+        "action": "edited", "repository": {"full_name": "acme/widgets"}, "member": {"login": "collab2"},
+        "changes": {"permission": {"from": "pull", "to": "admin"}},
+    }
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-member-edit-2", event_type="member", payload=edited_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "member", tenant_id))
+
+    row = _repo_collaborator(conn, tenant_id, "acme/widgets", "collab2")
+    assert row == ("admin", "direct", False)
+
+
+def test_member_removed_deletes_repo_collaborator(pg_conn, tenant_id):
+    conn, state = pg_conn
+    added_payload = {
+        "action": "added", "repository": {"full_name": "acme/widgets"}, "member": {"login": "collab3"},
+        "changes": {"permission": {"to": "push"}},
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-member-remove-1", event_type="member", payload=added_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "member", tenant_id))
+    assert _repo_collaborator(conn, tenant_id, "acme/widgets", "collab3") is not None
+
+    removed_payload = {"action": "removed", "repository": {"full_name": "acme/widgets"}, "member": {"login": "collab3"}}
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-member-remove-2", event_type="member", payload=removed_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "member", tenant_id))
+
+    assert _repo_collaborator(conn, tenant_id, "acme/widgets", "collab3") is None
+
+
+@pytest.mark.parametrize("event_type", ["membership", "team"])
+def test_membership_and_team_events_are_acked_but_not_normalized(event_type, pg_conn, tenant_id):
+    # Team-based repo access is explicitly deferred (org_membership_store.py's module
+    # docstring) -- these event types are durably queued (webhooks.py) but have no
+    # consumer yet, same placeholder posture PR #350 used for the security alerts.
+    conn, state = pg_conn
+    row_id = _make_delivery(
+        conn, state, tenant_id=tenant_id, delivery_id=f"d-{event_type}-1", event_type=event_type,
+        payload={"action": "added"},
+    )
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, event_type, tenant_id))
+
+    assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "queued"  # left as-is, not marked processed
+
+
+def test_member_event_with_missing_login_is_dropped_not_crashed(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {"action": "added", "repository": {"full_name": "acme/widgets"}, "member": {}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-member-no-login-1", event_type="member", payload=payload)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "member", tenant_id))
+
+    assert len(redis_client.acked) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "queued"
+
+
+def test_organization_member_added_with_missing_login_is_dropped_not_crashed(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {"action": "member_added", "membership": {"role": "member", "user": {}}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-no-login-1", event_type="organization", payload=payload)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "organization", tenant_id))
+
+    assert len(redis_client.acked) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "queued"
 
 
 def test_process_entry_drops_malformed_json_payload(pg_conn, tenant_id):

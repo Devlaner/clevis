@@ -278,6 +278,37 @@ def test_security_alert_event_writes_webhook_delivery_row_and_queues_it(event, d
     assert entries[0][1]["event_type"] == event
 
 
+@pytest.mark.parametrize("event", ["member", "organization", "membership", "team"])
+def test_collaborators_event_writes_webhook_delivery_row_and_queues_it(event, db, webhook_client, redis_client):
+    # Same generic-receiver proof as the security-alert parametrized test above --
+    # member/organization are normalized by event_consumer.py (post-S6 Collaborators PR 1);
+    # membership/team are durably queued but acked-and-skipped for now (team-based repo
+    # access is deferred, see event_consumer.py's docstring).
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=org.id
+    )
+
+    resp = _post(
+        webhook_client,
+        event,
+        {"installation": {"id": 42}, "action": "added"},
+        headers_extra={"X-GitHub-Delivery": f"delivery-{event}"},
+    )
+
+    assert resp.status_code == 200
+    row = db.query(WebhookDelivery).filter(WebhookDelivery.delivery_id == f"delivery-{event}").first()
+    assert row is not None
+    assert row.event_type == event
+    assert row.installation_id == 42
+    assert row.tenant_id is not None
+    assert row.status == "queued"
+
+    entries = redis_client.xrange(_WEBHOOK_STREAM_KEY)
+    assert len(entries) == 1
+    assert entries[0][1]["event_type"] == event
+
+
 def test_unrecognized_event_type_does_not_write_a_webhook_delivery_row(db, webhook_client, redis_client):
     resp = _post(webhook_client, "ping", {"zen": "hello"})
 

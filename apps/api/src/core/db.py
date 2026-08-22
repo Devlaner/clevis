@@ -230,6 +230,62 @@ class SecurityAlert(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class OrgMember(Base):
+    """Normalized store for org membership, migration 0040 (Collaborators PR 1 of 3).
+    Populated by apps/worker's event_consumer.py from the `organization` webhook event's
+    member_added/member_removed actions. Not read by the API yet -- that's PR 3's job.
+
+    Represents current membership, not a log: a row is deleted on member_removed, not
+    soft-marked. `role` is captured from the member_added payload's membership.role at
+    add-time (accurate then), but no webhook event covers a role changing *afterward* at
+    all (verified against GitHub's docs -- no member_updated/role-change action exists) --
+    so this column can silently drift stale for an existing member whose role later
+    changes, until a future reconciliation poll (Collaborators PR 2, not built yet)
+    corrects it. See migration 0040's docstring for the full rationale."""
+
+    __tablename__ = "org_members"
+    __table_args__ = (
+        Index("ix_org_members_tenant_id", "tenant_id"),
+        UniqueConstraint("tenant_id", "login", name="uq_org_members_tenant_login"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    login: Mapped[str] = mapped_column(String, nullable=False)
+    avatar_url: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False, server_default="member")
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RepoCollaborator(Base):
+    """Normalized store for direct repo access grants, migration 0040 (Collaborators PR 1
+    of 3). Populated by apps/worker's event_consumer.py from the `member` webhook event's
+    added/edited/removed actions. Not read by the API yet -- that's PR 3's job.
+
+    `source` is 'direct' only in this PR -- team-based repo access ('team') is explicitly
+    deferred (requires joining the `team` event against `membership`'s per-team roster, a
+    materially bigger modeling problem than a direct grant, and GitHub's own team-event
+    payloads don't reliably convey the permission level either). See migration 0040's
+    docstring for the full rationale. Represents current access, not a log: a row is
+    deleted on a `removed` action, not soft-marked."""
+
+    __tablename__ = "repo_collaborators"
+    __table_args__ = (
+        Index("ix_repo_collaborators_tenant_id", "tenant_id"),
+        Index("ix_repo_collaborators_tenant_id_repo", "tenant_id", "repo"),
+        UniqueConstraint("tenant_id", "repo", "login", name="uq_repo_collaborators_tenant_repo_login"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    repo: Mapped[str] = mapped_column(String, nullable=False)
+    login: Mapped[str] = mapped_column(String, nullable=False)
+    permission: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False, server_default="direct")
+    is_outside_collaborator: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ActivitySyncCursor(Base):
     """Per-tenant "how far synced" cursor (issue #192, S5 PR 2), migration 0038. One row per
     tenant, upserted by apps/worker's github.backfill_repo_events handler after every successful

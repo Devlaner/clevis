@@ -111,6 +111,23 @@ BEGIN
 END
 $do$;
 
+-- org_members + repo_collaborators (migration 0040, Collaborators PR 1): same reasoning as
+-- security_alerts immediately above -- both upsert AND delete (a row is removed on
+-- member_removed/removed, not soft-marked), so DELETE is needed alongside SELECT/INSERT/UPDATE;
+-- both have a surrogate id sequence.
+DO $do$
+BEGIN
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'org_members') THEN
+    GRANT SELECT, INSERT, UPDATE, DELETE ON org_members TO clevis_api;
+    GRANT USAGE, SELECT ON org_members_id_seq TO clevis_api;
+  END IF;
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'repo_collaborators') THEN
+    GRANT SELECT, INSERT, UPDATE, DELETE ON repo_collaborators TO clevis_api;
+    GRANT USAGE, SELECT ON repo_collaborators_id_seq TO clevis_api;
+  END IF;
+END
+$do$;
+
 -- resolve_installation_tenant_id() (migration 0035) REVOKEs its default PUBLIC EXECUTE
 -- and re-GRANTs it only to clevis_api -- but that migration's own GRANT is itself
 -- conditional on clevis_api already existing, which isn't true the first time this

@@ -34,6 +34,7 @@ from pathlib import Path
 import psycopg
 import redis
 
+import org_membership_store
 import repo_events_store
 import security_alerts_store
 from config import settings
@@ -56,6 +57,14 @@ _CONSUMER_NAME = f"worker-{os.getpid()}"
 # don't fit repo_events's insert-once activity-log model. _process_entry branches on
 # this set before calling the repo_events path.
 _SECURITY_ALERT_EVENT_TYPES = {"dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}
+
+# member/organization normalize into org_members/repo_collaborators (Collaborators PR 1 of 3).
+# membership/team are durably queued (same webhooks.py change) but have no normalizer yet --
+# team-based repo access is deferred, see org_membership_store.py's module docstring -- so
+# _process_entry acks-and-skips them via _NOT_YET_NORMALIZED_EVENT_TYPES, same placeholder
+# pattern PR #350 used for the security alerts before their own consumer existed.
+_ORG_MEMBERSHIP_EVENT_TYPES = {"member", "organization"}
+_NOT_YET_NORMALIZED_EVENT_TYPES = {"membership", "team"}
 
 # How long a claimed-but-unacked entry sits idle before another pass reclaims it --
 # comfortably longer than any single event's normalize+insert should ever take.
@@ -247,6 +256,48 @@ def _normalize_security_alert(event_type: str, payload: dict, received_at: datet
     }
 
 
+def _normalize_member_event(payload: dict) -> dict | None:
+    """Returns repo_collaborators column values for a `member` event payload, or None if
+    it can't be normalized (missing repository/member.login). action is 'added'/'edited'/
+    'removed'; permission comes from changes.permission.to, present on both 'added' and
+    'edited' per GitHub's webhook docs (only absent on 'removed', where it's moot -- the
+    row is deleted, not updated). is_outside_collaborator can't be determined from this
+    event alone (GitHub's member payload doesn't carry org-membership status) -- defaults
+    False here, corrected by the future reconciliation poll (Collaborators PR 2), same
+    known-staleness posture as org_members.role."""
+    repository = payload.get("repository") or {}
+    repo_full_name = repository.get("full_name")
+    member = payload.get("member") or {}
+    login = member.get("login")
+    if not repo_full_name or not login:
+        return None
+
+    permission = ((payload.get("changes") or {}).get("permission") or {}).get("to")
+    return {
+        "repo": repo_full_name,
+        "login": login,
+        "permission": permission or "unknown",
+        "is_outside_collaborator": False,
+    }
+
+
+def _normalize_organization_event(payload: dict) -> dict | None:
+    """Returns org_members column values for an `organization` event's member_added
+    payload, or None if it can't be normalized (missing membership.user.login) -- also
+    None (a no-op) for actions other than member_added/member_removed (member_invited/
+    renamed/deleted don't affect this table)."""
+    membership = payload.get("membership") or {}
+    user = membership.get("user") or {}
+    login = user.get("login")
+    if not login:
+        return None
+    return {
+        "login": login,
+        "avatar_url": user.get("avatar_url", ""),
+        "role": membership.get("role", "member"),
+    }
+
+
 def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry_id: str, fields: dict) -> None:
     delivery_row_id = fields.get("delivery_row_id")
     if delivery_row_id is None:
@@ -275,10 +326,60 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
         redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
         return
 
+    if event_type in _NOT_YET_NORMALIZED_EVENT_TYPES:
+        # Team-based repo access (membership/team events) is explicitly deferred -- see
+        # org_membership_store.py's module docstring. Ack so this entry doesn't sit
+        # pending forever; leave webhook_deliveries.status as 'queued' (not 'processed')
+        # so a future consumer can still find it by event_type, same posture as PR #350's
+        # original placeholder for the security alerts.
+        log.debug("webhook_deliveries row %s is a %s event with no consumer yet, leaving queued", delivery_row_id, event_type)
+        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+        return
+
     try:
         payload = json.loads(payload_bytes)
     except json.JSONDecodeError:
         log.error("webhook_deliveries row %s has malformed JSON payload, dropping", delivery_row_id)
+        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+        return
+
+    if event_type in _ORG_MEMBERSHIP_EVENT_TYPES:
+        with pg_conn.cursor() as cur:
+            cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+            if event_type == "member":
+                member_normalized = _normalize_member_event(payload)
+                action = payload.get("action")
+                if member_normalized is None:
+                    log.error("webhook_deliveries row %s has no repository.full_name or member.login, dropping", delivery_row_id)
+                    redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+                    return
+                if action == "removed":
+                    org_membership_store.remove_repo_collaborator(
+                        cur, tenant_id=tenant_id, repo=member_normalized["repo"], login=member_normalized["login"]
+                    )
+                else:
+                    org_membership_store.upsert_repo_collaborator(cur, tenant_id=tenant_id, granted_at=received_at, **member_normalized)
+            else:  # organization
+                action = payload.get("action")
+                if action == "member_removed":
+                    login = ((payload.get("membership") or {}).get("user") or {}).get("login")
+                    if not login:
+                        log.error("webhook_deliveries row %s has no membership.user.login, dropping", delivery_row_id)
+                        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+                        return
+                    org_membership_store.remove_org_member(cur, tenant_id=tenant_id, login=login)
+                elif action == "member_added":
+                    org_normalized = _normalize_organization_event(payload)
+                    if org_normalized is None:
+                        log.error("webhook_deliveries row %s has no membership.user.login, dropping", delivery_row_id)
+                        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+                        return
+                    org_membership_store.upsert_org_member(cur, tenant_id=tenant_id, added_at=received_at, **org_normalized)
+                else:
+                    # member_invited/renamed/deleted don't affect org_members -- ack as a no-op.
+                    log.debug("webhook_deliveries row %s is an organization/%s event, no-op for org_members", delivery_row_id, action)
+            cur.execute("UPDATE webhook_deliveries SET status = 'processed' WHERE id = %s", (delivery_row_id,))
+        pg_conn.commit()
         redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
         return
 
