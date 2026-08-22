@@ -35,6 +35,7 @@ import psycopg
 import redis
 
 import repo_events_store
+import security_alerts_store
 from config import settings
 
 log = logging.getLogger(__name__)
@@ -50,16 +51,11 @@ _CONSUMER_NAME = f"worker-{os.getpid()}"
 
 # Security alert events (dependabot_alert/code_scanning_alert/secret_scanning_alert,
 # S6-follow-on PR 1) are durably queued by the receiver onto the same shared stream as
-# every other ingested event type, but have no normalizer here yet -- a dedicated alert
-# consumer + per-repo alert tables are future work, not built yet. _process_entry checks
-# this set before calling _normalize: without it, these events would fall through
-# _normalize's generic "does payload.repository.full_name exist" check (GitHub's alert
-# payloads do have one) and get written into repo_events/repo_event_daily_counts with a
-# meaningless summary (_summarize's unknown-event-type fallback just echoes the event
-# type string back), and worse, get marked webhook_deliveries.status='processed' and
-# XACKed off the stream -- making them unrecoverable for whatever future alert consumer
-# eventually needs to read them.
-_NOT_YET_NORMALIZED_EVENT_TYPES = {"dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}
+# every other ingested event type, but normalize into security_alerts (post-S6 PR 2),
+# not repo_events -- their payload.alert shape and upsert-on-state-change semantics
+# don't fit repo_events's insert-once activity-log model. _process_entry branches on
+# this set before calling the repo_events path.
+_SECURITY_ALERT_EVENT_TYPES = {"dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}
 
 # How long a claimed-but-unacked entry sits idle before another pass reclaims it --
 # comfortably longer than any single event's normalize+insert should ever take.
@@ -174,6 +170,79 @@ def _normalize(event_type: str, payload: dict, received_at: datetime) -> dict | 
     }
 
 
+# event_type -> security_alerts.kind. Kept separate from the event_type string itself
+# (rather than storing "dependabot_alert" verbatim) so a future consumer of this table
+# (PR 3's Security dashboard repoint) works with the same short vocabulary GitHub's own
+# REST API uses for these alert categories (dependabot/code-scanning/secret-scanning),
+# not webhook-specific event-type naming.
+_ALERT_KIND_BY_EVENT_TYPE = {
+    "dependabot_alert": "dependabot",
+    "code_scanning_alert": "code_scanning",
+    "secret_scanning_alert": "secret_scanning",
+}
+
+
+def _parse_alert_timestamp(value: str | None, fallback: datetime) -> datetime:
+    """GitHub sends alert.created_at/updated_at as ISO 8601 with a trailing 'Z', which
+    datetime.fromisoformat only accepts starting in Python 3.11 -- normalize by hand
+    rather than assume the runtime's exact minor version. Falls back to received_at
+    (webhook_deliveries ingestion time) for a missing/malformed value, same defensive
+    posture as _normalize's occurred_at fallback."""
+    if not value:
+        return fallback
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return fallback
+
+
+def _normalize_security_alert(event_type: str, payload: dict, received_at: datetime) -> dict | None:
+    """Returns the security_alerts column values for this alert webhook payload, or
+    None if it can't be normalized (missing repository/alert/number -- shouldn't happen
+    for a real GitHub delivery, but defend against a malformed/test payload rather than
+    crash the consumer loop, same posture as _normalize)."""
+    repository = payload.get("repository") or {}
+    repo_full_name = repository.get("full_name")
+    alert = payload.get("alert") or {}
+    number = alert.get("number")
+    if not repo_full_name or number is None:
+        return None
+
+    kind = _ALERT_KIND_BY_EVENT_TYPE[event_type]
+    if kind == "dependabot":
+        severity = (alert.get("security_advisory") or {}).get("severity")
+        details = {
+            "action": payload.get("action"),
+            "dependency": alert.get("dependency"),
+            "security_advisory": alert.get("security_advisory"),
+        }
+    elif kind == "code_scanning":
+        severity = (alert.get("rule") or {}).get("severity")
+        details = {
+            "action": payload.get("action"),
+            "rule": alert.get("rule"),
+            "tool": alert.get("tool"),
+        }
+    else:  # secret_scanning -- no severity in GitHub's payload for this alert type
+        severity = None
+        details = {
+            "action": payload.get("action"),
+            "secret_type": alert.get("secret_type"),
+            "secret_type_display_name": alert.get("secret_type_display_name"),
+        }
+
+    return {
+        "repo": repo_full_name,
+        "kind": kind,
+        "number": number,
+        "state": alert.get("state", ""),
+        "severity": severity,
+        "details": details,
+        "created_at": _parse_alert_timestamp(alert.get("created_at"), received_at),
+        "updated_at": _parse_alert_timestamp(alert.get("updated_at"), received_at),
+    }
+
+
 def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry_id: str, fields: dict) -> None:
     delivery_row_id = fields.get("delivery_row_id")
     if delivery_row_id is None:
@@ -194,13 +263,6 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
         return
 
     tenant_id, delivery_id, event_type, payload_bytes, received_at = row
-    if event_type in _NOT_YET_NORMALIZED_EVENT_TYPES:
-        # Ack so this entry doesn't sit pending forever; leave webhook_deliveries.status
-        # as 'queued' (not 'processed') so a future alert consumer can still find it by
-        # event_type -- see _NOT_YET_NORMALIZED_EVENT_TYPES's docstring above.
-        log.debug("webhook_deliveries row %s is a %s event with no consumer yet, leaving queued", delivery_row_id, event_type)
-        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
-        return
     if tenant_id is None:
         # Deliberate scope decision (see S4 PR 1's plan notes): an unresolved
         # installation has no tenant to scope a normalized row to. Ack so this entry
@@ -213,6 +275,23 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
         payload = json.loads(payload_bytes)
     except json.JSONDecodeError:
         log.error("webhook_deliveries row %s has malformed JSON payload, dropping", delivery_row_id)
+        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+        return
+
+    if event_type in _SECURITY_ALERT_EVENT_TYPES:
+        alert_normalized = _normalize_security_alert(event_type, payload, received_at)
+        if alert_normalized is None:
+            log.error("webhook_deliveries row %s has no repository.full_name or alert.number, dropping", delivery_row_id)
+            redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+            return
+
+        with pg_conn.cursor() as cur:
+            # Mirrors src.core.rbac.set_tenant_session_context -- see the repo_events
+            # branch below for the full rationale, same mechanism applies here.
+            cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+            security_alerts_store.upsert_security_alert(cur, tenant_id=tenant_id, **alert_normalized)
+            cur.execute("UPDATE webhook_deliveries SET status = 'processed' WHERE id = %s", (delivery_row_id,))
+        pg_conn.commit()
         redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
         return
 

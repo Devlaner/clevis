@@ -318,32 +318,160 @@ def test_null_tenant_delivery_is_skipped_not_normalized(pg_conn):
         assert cur.fetchone()[0] == "queued"  # left as-is, not marked processed
 
 
-@pytest.mark.parametrize("event_type", ["dependabot_alert", "code_scanning_alert", "secret_scanning_alert"])
-def test_security_alert_events_are_acked_but_not_normalized_into_repo_events(event_type, pg_conn, tenant_id):
-    # Regression test (CodeRabbit finding on PR #350): these event types have a real
-    # payload.repository.full_name, so they'd otherwise pass _normalize's generic check
-    # and get written into repo_events with a meaningless summary, then get marked
-    # 'processed' and permanently lost to a future alert consumer.
+def _security_alert(conn, tenant_id, repo, kind, number):
+    with conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute(
+            "SELECT state, severity, details, created_at, updated_at FROM security_alerts "
+            "WHERE tenant_id = %s AND repo = %s AND kind = %s AND number = %s",
+            (tenant_id, repo, kind, number),
+        )
+        return cur.fetchone()
+
+
+_ALERT_PAYLOADS = [
+    (
+        "dependabot_alert",
+        "dependabot",
+        {
+            "action": "created",
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "octocat"},
+            "alert": {
+                "number": 7,
+                "state": "open",
+                "security_advisory": {"severity": "high"},
+                "dependency": {"package": {"name": "lodash"}},
+                "created_at": "2026-08-20T10:00:00Z",
+                "updated_at": "2026-08-20T10:00:00Z",
+            },
+        },
+    ),
+    (
+        "code_scanning_alert",
+        "code_scanning",
+        {
+            "action": "created",
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "octocat"},
+            "alert": {
+                "number": 3,
+                "state": "open",
+                "rule": {"id": "js/sql-injection", "severity": "error"},
+                "tool": {"name": "CodeQL"},
+                "created_at": "2026-08-20T11:00:00Z",
+                "updated_at": "2026-08-20T11:00:00Z",
+            },
+        },
+    ),
+    (
+        "secret_scanning_alert",
+        "secret_scanning",
+        {
+            "action": "created",
+            "repository": {"full_name": "acme/widgets"},
+            "sender": {"login": "octocat"},
+            "alert": {
+                "number": 1,
+                "state": "open",
+                "secret_type": "github_personal_access_token",
+                "secret_type_display_name": "GitHub Personal Access Token",
+                "created_at": "2026-08-20T12:00:00Z",
+                "updated_at": "2026-08-20T12:00:00Z",
+            },
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("event_type,kind,payload", _ALERT_PAYLOADS)
+def test_normalizes_each_security_alert_kind_into_security_alerts(event_type, kind, payload, pg_conn, tenant_id):
     conn, state = pg_conn
+    number = payload["alert"]["number"]
     row_id = _make_delivery(
-        conn,
-        state,
-        tenant_id=tenant_id,
-        delivery_id=f"d-{event_type}-1",
-        event_type=event_type,
-        payload={"repository": {"full_name": "acme/widgets"}, "sender": {"login": "octocat"}},
+        conn, state, tenant_id=tenant_id, delivery_id=f"d-{event_type}-1", event_type=event_type, payload=payload
     )
 
     redis_client = _FakeRedis()
     event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, event_type, tenant_id))
 
-    # Exact args, not just a count -- proves this specific stream/group/entry was
-    # acked, not some other one.
     assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
+    row = _security_alert(conn, tenant_id, "acme/widgets", kind, number)
+    assert row is not None
+    state_col, severity, details, created_at, updated_at = row
+    assert state_col == "open"
+    assert created_at == event_consumer._parse_alert_timestamp(payload["alert"]["created_at"], None)
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "processed"
+
+
+def test_security_alert_severity_and_details_are_kind_specific(pg_conn, tenant_id):
+    conn, state = pg_conn
+    dependabot_payload = _ALERT_PAYLOADS[0][2]
+    row_id = _make_delivery(
+        conn, state, tenant_id=tenant_id, delivery_id="d-dependabot-severity-1", event_type="dependabot_alert", payload=dependabot_payload
+    )
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "dependabot_alert", tenant_id))
+    _, severity, details, _, _ = _security_alert(conn, tenant_id, "acme/widgets", "dependabot", 7)
+    assert severity == "high"
+    assert details["dependency"]["package"]["name"] == "lodash"
+
+    secret_payload = _ALERT_PAYLOADS[2][2]
+    row_id_2 = _make_delivery(
+        conn, state, tenant_id=tenant_id, delivery_id="d-secret-severity-1", event_type="secret_scanning_alert", payload=secret_payload
+    )
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "secret_scanning_alert", tenant_id))
+    _, severity_2, details_2, _, _ = _security_alert(conn, tenant_id, "acme/widgets", "secret_scanning", 1)
+    assert severity_2 is None  # secret-scanning alerts carry no severity in GitHub's payload
+    assert details_2["secret_type"] == "github_personal_access_token"
+
+
+def test_redelivered_security_alert_updates_state_instead_of_duplicating(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {
+        "action": "created",
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": "octocat"},
+        "alert": {
+            "number": 42,
+            "state": "open",
+            "security_advisory": {"severity": "critical"},
+            "dependency": {},
+            "created_at": "2026-08-20T09:00:00Z",
+            "updated_at": "2026-08-20T09:00:00Z",
+        },
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-alert-dismiss-1", event_type="dependabot_alert", payload=payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "dependabot_alert", tenant_id))
+
+    dismissed_payload = {**payload, "action": "dismissed", "alert": {**payload["alert"], "state": "dismissed", "updated_at": "2026-08-21T09:00:00Z"}}
+    row_id_2 = _make_delivery(
+        conn, state, tenant_id=tenant_id, delivery_id="d-alert-dismiss-2", event_type="dependabot_alert", payload=dismissed_payload
+    )
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "dependabot_alert", tenant_id))
+
     with conn.cursor() as cur:
         cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
-        cur.execute("SELECT count(*) FROM repo_events WHERE delivery_id = %s", (f"d-{event_type}-1",))
-        assert cur.fetchone()[0] == 0
+        cur.execute(
+            "SELECT count(*) FROM security_alerts WHERE tenant_id = %s AND repo = %s AND kind = %s AND number = %s",
+            (tenant_id, "acme/widgets", "dependabot", 42),
+        )
+        assert cur.fetchone()[0] == 1  # one row, upserted, not duplicated
+    row = _security_alert(conn, tenant_id, "acme/widgets", "dependabot", 42)
+    assert row[0] == "dismissed"
+
+
+def test_security_alert_with_missing_alert_number_is_dropped_not_crashed(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {"repository": {"full_name": "acme/widgets"}, "sender": {"login": "octocat"}, "alert": {"state": "open"}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-alert-no-number-1", event_type="dependabot_alert", payload=payload)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "dependabot_alert", tenant_id))
+
+    assert len(redis_client.acked) == 1
+    with conn.cursor() as cur:
         cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
         assert cur.fetchone()[0] == "queued"  # left as-is, not marked processed
 

@@ -98,6 +98,19 @@ BEGIN
 END
 $do$;
 
+-- security_alerts (migration 0039, post-S6 PR 2): same reasoning as activity_sync_cursors
+-- immediately above -- CI runs apps/worker's tests as clevis_api, and this table upserts
+-- (not just inserts), so UPDATE is needed alongside SELECT/INSERT; it does have a
+-- surrogate id sequence, unlike the two tables above.
+DO $do$
+BEGIN
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'security_alerts') THEN
+    GRANT SELECT, INSERT, UPDATE ON security_alerts TO clevis_api;
+    GRANT USAGE, SELECT ON security_alerts_id_seq TO clevis_api;
+  END IF;
+END
+$do$;
+
 -- resolve_installation_tenant_id() (migration 0035) REVOKEs its default PUBLIC EXECUTE
 -- and re-GRANTs it only to clevis_api -- but that migration's own GRANT is itself
 -- conditional on clevis_api already existing, which isn't true the first time this
