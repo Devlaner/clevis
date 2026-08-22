@@ -318,6 +318,36 @@ def test_null_tenant_delivery_is_skipped_not_normalized(pg_conn):
         assert cur.fetchone()[0] == "queued"  # left as-is, not marked processed
 
 
+@pytest.mark.parametrize("event_type", ["dependabot_alert", "code_scanning_alert", "secret_scanning_alert"])
+def test_security_alert_events_are_acked_but_not_normalized_into_repo_events(event_type, pg_conn, tenant_id):
+    # Regression test (CodeRabbit finding on PR #350): these event types have a real
+    # payload.repository.full_name, so they'd otherwise pass _normalize's generic check
+    # and get written into repo_events with a meaningless summary, then get marked
+    # 'processed' and permanently lost to a future alert consumer.
+    conn, state = pg_conn
+    row_id = _make_delivery(
+        conn,
+        state,
+        tenant_id=tenant_id,
+        delivery_id=f"d-{event_type}-1",
+        event_type=event_type,
+        payload={"repository": {"full_name": "acme/widgets"}, "sender": {"login": "octocat"}},
+    )
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, event_type, tenant_id))
+
+    # Exact args, not just a count -- proves this specific stream/group/entry was
+    # acked, not some other one.
+    assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
+    with conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute("SELECT count(*) FROM repo_events WHERE delivery_id = %s", (f"d-{event_type}-1",))
+        assert cur.fetchone()[0] == 0
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "queued"  # left as-is, not marked processed
+
+
 def test_unknown_stream_entry_missing_delivery_row_id_is_dropped_not_crashed(pg_conn):
     conn, _state = pg_conn
     redis_client = _FakeRedis()

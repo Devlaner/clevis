@@ -248,6 +248,36 @@ def test_ingested_event_without_installation_still_queues_with_null_tenant(db, w
     assert entries[0][1]["tenant_id"] == ""
 
 
+@pytest.mark.parametrize("event", ["dependabot_alert", "code_scanning_alert", "secret_scanning_alert"])
+def test_security_alert_event_writes_webhook_delivery_row_and_queues_it(event, db, webhook_client, redis_client):
+    # No consumer normalizes these into per-repo alert tables yet (a later PR) -- this
+    # only proves the receiver durably lands them via the same generic path push/issues
+    # already use, same as test_push_event_writes_webhook_delivery_row_and_queues_it.
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=org.id
+    )
+
+    resp = _post(
+        webhook_client,
+        event,
+        {"installation": {"id": 42}, "action": "created"},
+        headers_extra={"X-GitHub-Delivery": f"delivery-{event}"},
+    )
+
+    assert resp.status_code == 200
+    row = db.query(WebhookDelivery).filter(WebhookDelivery.delivery_id == f"delivery-{event}").first()
+    assert row is not None
+    assert row.event_type == event
+    assert row.installation_id == 42
+    assert row.tenant_id is not None
+    assert row.status == "queued"
+
+    entries = redis_client.xrange(_WEBHOOK_STREAM_KEY)
+    assert len(entries) == 1
+    assert entries[0][1]["event_type"] == event
+
+
 def test_unrecognized_event_type_does_not_write_a_webhook_delivery_row(db, webhook_client, redis_client):
     resp = _post(webhook_client, "ping", {"zen": "hello"})
 

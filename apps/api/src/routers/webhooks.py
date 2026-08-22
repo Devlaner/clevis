@@ -25,15 +25,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Mirrors the event types apps/api/src/routers/github.py's Activity Feed already
-# summarizes (PushEvent/PullRequestEvent/IssuesEvent/ReleaseEvent/CreateEvent via
-# GitHub's Events API) -- these are the webhook equivalents (X-GitHub-Event header
-# names, not GitHub Events API `type` strings, hence "create" not "CreateEvent").
-# S4 (a future event-processor fleet, out of scope here) is what will eventually let
-# the Activity Feed move from polling to these queued rows; until then they just
-# accumulate in webhook_deliveries with status="queued", which is the expected
-# handoff state, not a bug.
-_INGESTED_EVENT_TYPES = {"push", "pull_request", "issues", "release", "create"}
+# Two families of durably-queued event types (X-GitHub-Event header names, not GitHub
+# Events API `type` strings, hence "create" not "CreateEvent"):
+#   - Activity Feed events (push/pull_request/issues/release/create) -- normalized by
+#     S4's event-processor fleet into repo_events/repo_event_daily_counts.
+#   - Security alert events (dependabot_alert/code_scanning_alert/secret_scanning_alert,
+#     added for the Security dashboard's per-repo compliance matrix + alerts panel,
+#     issue #191-follow-on) -- landed here durably as of this PR; a consumer to
+#     normalize them into per-repo alert tables is a later PR, not built yet. Requires
+#     the Clevis GitHub App's own webhook subscriptions + permissions (Dependabot
+#     alerts: read, Code scanning alerts: read, Secret scanning alerts: read) to be
+#     turned on for GitHub to actually send these -- see docs/self-hosting.md.
+# Either way, an ingested event just accumulates in webhook_deliveries with
+# status="queued" until its consumer exists -- that's the expected handoff state, not
+# a bug.
+_INGESTED_EVENT_TYPES = {
+    "push",
+    "pull_request",
+    "issues",
+    "release",
+    "create",
+    "dependabot_alert",
+    "code_scanning_alert",
+    "secret_scanning_alert",
+}
 
 # Redis Stream key the ingestion path XADDs onto; a future S4 consumer group reads
 # from this same key.
