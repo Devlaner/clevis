@@ -356,6 +356,39 @@ def _insert_daily_count(db, tenant_id, *, repo, event_type, day, count):
     db.commit()
 
 
+def test_repo_stats_cache_is_isolated_by_tenant_id(db, acme_org_with_installation):
+    # Defense in depth: orgs.github_login is unique, so two tenants can't legitimately
+    # share the same (owner, repo) through the normal org-resolution path today -- but the
+    # cache itself must not rely on that invariant. Bypasses the HTTP layer (owner==org_login
+    # is enforced there) to call _cached_stats directly with the same owner/repo/token for
+    # two different tenants, mirroring what the route handler's own tenant resolution does.
+    from src.core.rbac import set_tenant_session_context
+    from src.routers.repos import _cached_stats, _stats_cache
+
+    _stats_cache.clear()
+    other_user = User(id=2, email="other@example.com", name=None, password_hash=None, is_workspace_admin=False)
+    db.add(other_user)
+    db.commit()
+    other_org = org_repo.get_or_create(db, github_login="other")
+    org_membership_repo.get_or_create(db, org_id=other_org.id, user_id=other_user.id, role="member")
+
+    today = date.today()
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=5)
+    _insert_daily_count(db, other_org.tenant_id, repo="acme/demo", event_type="push", day=today, count=9)
+
+    with patch("src.routers.repos.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _stats_side_effect(repo_meta=_REPO_META, release_error=_not_found())
+
+        set_tenant_session_context(db, acme_org_with_installation.tenant_id, _ADMIN.id)
+        first = _cached_stats("acme", "demo", "shared-token", db, acme_org_with_installation.tenant_id, True)
+
+        set_tenant_session_context(db, other_org.tenant_id, other_user.id)
+        second = _cached_stats("acme", "demo", "shared-token", db, other_org.tenant_id, True)
+
+    assert first["commit_activity"][-1]["total"] == 5
+    assert second["commit_activity"][-1]["total"] == 9
+
+
 def test_repo_stats_uses_aggregate_commit_activity_when_installation_connected(repos_client, db, acme_org_with_installation):
     today = date.today()
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=3)
@@ -390,7 +423,7 @@ def test_repo_stats_aggregate_commit_activity_buckets_by_week_and_excludes_outsi
 ):
     # A fixed Monday, not the real "today" -- if this test ran on a real Sunday,
     # `today - timedelta(days=1)` would fall in the *previous* Sunday-starting week,
-    # breaking the "same week" assumption below (CodeRabbit finding on this PR).
+    # breaking the "same week" assumption below.
     today = date(2000, 1, 3)
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=2)
     _insert_daily_count(
