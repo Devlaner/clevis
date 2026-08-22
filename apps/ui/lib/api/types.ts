@@ -522,7 +522,9 @@ export interface SecretAlert {
   created_at: string
   resolved_at: string | null
   repo: string
-  url: string
+  // null when no usable link exists (e.g. aggregate-sourced alerts don't store GitHub's
+  // html_url) -- the UI renders a plain non-link row in that case.
+  url: string | null
 }
 
 export interface SecretScanningResponse {

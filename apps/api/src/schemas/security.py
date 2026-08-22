@@ -59,7 +59,10 @@ class SecretAlert(BaseModel):
     created_at: datetime
     resolved_at: datetime | None
     repo: str
-    url: str
+    # None when no usable link exists -- the aggregate path (security_alerts) doesn't
+    # store GitHub's html_url (CodeRabbit finding on PR #352: returning "" made every
+    # aggregate-sourced alert render as a broken link instead of plain text).
+    url: str | None
 
 
 class SecretScanningResponse(BaseModel):

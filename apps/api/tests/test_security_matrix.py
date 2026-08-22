@@ -298,6 +298,28 @@ def test_security_matrix_uses_aggregate_when_installation_connected(connected_cl
     assert row["unknown_dimensions"] == []
 
 
+def test_security_matrix_aggregate_dependabot_enabled_with_only_dismissed_alerts(connected_client, db, acme_org_with_installation):
+    """CodeRabbit finding on PR #352: dependabot_enabled must consider every state, not
+    just 'open' -- a repo whose only Dependabot alert has been dismissed still has
+    Dependabot enabled, and must not read identically to one with it disabled."""
+    _insert_security_alert(
+        db, acme_org_with_installation.tenant_id, repo="acme/api", kind="dependabot", number=1,
+        state="dismissed", severity="critical", details={"dependency": {}},
+    )
+
+    with patch("src.routers.security.GitHubClient") as mock_client:
+        mock_client.return_value.request_paginated.return_value = [
+            {"name": "api", "default_branch": "main", "security_and_analysis": {"secret_scanning": {"status": "enabled"}}},
+        ]
+        mock_client.return_value.request.return_value = {"protected": True, "protection": {"allow_force_pushes": {"enabled": False}}}
+        resp = connected_client.get("/me/analytics/security-matrix/acme", headers={"X-GitHub-Token": "ghp_test"})
+
+    row = resp.json()["repos"][0]
+    assert row["dependabot_enabled"] is True
+    assert row["dependabot_critical_count"] == 0  # dismissed, not a live finding
+    assert row["score"] == 100
+
+
 def test_security_matrix_aggregate_repo_with_no_alerts_is_clean(connected_client, db, acme_org_with_installation):
     """No security_alerts rows for this repo at all -- reads as dependabot_enabled=False
     (the known aggregate-path approximation, see _dependabot_and_code_scanning_from_aggregate's
@@ -425,3 +447,6 @@ def test_secret_scanning_uses_aggregate_when_installation_connected(connected_cl
     assert alerts[2]["resolved_reason"] == "revoked"
     assert alerts[2]["resolved_at"] is not None
     assert "secret" not in alerts[1]
+    # CodeRabbit finding on PR #352: url must be None (not a fake ""), since
+    # security_alerts doesn't store GitHub's html_url.
+    assert alerts[1]["url"] is None

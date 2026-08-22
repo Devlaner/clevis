@@ -76,20 +76,20 @@ def _security_connected_tenant(db: Session, user_id: int, owner: str) -> int | N
 
 
 def _open_alerts_by_repo(db: Session, tenant_id: int, repo_full_names: list[str]) -> dict[str, list]:
-    """One query for every scanned repo's open dependabot/code_scanning security_alerts
-    rows, not one query per repo -- also sidesteps ThreadPoolExecutor entirely: _repo_row
+    """One query for every scanned repo's dependabot/code_scanning security_alerts rows
+    (every state, not just open -- see _dependabot_and_code_scanning_from_aggregate for
+    why), not one query per repo -- also sidesteps ThreadPoolExecutor entirely: _repo_row
     below runs concurrently across repos (existing pattern), and a SQLAlchemy Session
     isn't safe to share across threads, so this pre-fetches everything up front on the
     request thread and hands each worker a plain dict slice instead of `db` itself."""
     if not repo_full_names:
         return {}
     rows = (
-        db.query(SecurityAlert.repo, SecurityAlert.kind, SecurityAlert.severity)
+        db.query(SecurityAlert.repo, SecurityAlert.kind, SecurityAlert.severity, SecurityAlert.state)
         .filter(
             SecurityAlert.tenant_id == tenant_id,
             SecurityAlert.repo.in_(repo_full_names),
             SecurityAlert.kind.in_(("dependabot", "code_scanning")),
-            SecurityAlert.state == "open",
         )
         .all()
     )
@@ -101,18 +101,25 @@ def _open_alerts_by_repo(db: Session, tenant_id: int, repo_full_names: list[str]
 
 def _dependabot_and_code_scanning_from_aggregate(alert_rows: list) -> dict:
     """dependabot/code_scanning dimensions from security_alerts (post-S6 PR 3) instead of
-    two live GitHub calls per repo. dependabot_enabled is an approximation here: security_alerts
-    only has rows for alerts that actually occurred, so a repo with Dependabot enabled but
-    zero alerts ever looks identical to one with it disabled -- both read as
-    dependabot_enabled=False, critical/high=0. This under-reports the "enabled" badge for a
-    clean repo but never affects the score (an all-zero count scores as compliant either
-    way, matching the live path's own 404-disabled handling)."""
+    two live GitHub calls per repo. dependabot_enabled considers every state (open,
+    dismissed, fixed, ...) -- a repo whose only Dependabot alerts have all been dismissed
+    still has Dependabot enabled, so restricting this to state=="open" would wrongly read
+    as disabled (CodeRabbit finding on PR #352). critical_count/high_count/code_scanning_clear
+    only count 'open' rows, since only a currently-open alert is a live finding.
+
+    This is still an approximation in one direction: security_alerts only has rows for
+    alerts that actually occurred, so a repo with Dependabot enabled but zero alerts ever
+    (dismissed or otherwise) looks identical to one with it disabled. This under-reports
+    the "enabled" badge for a genuinely clean repo but never affects the score (an
+    all-zero count scores as compliant either way, matching the live path's own
+    404-disabled handling)."""
     dependabot_rows = [r for r in alert_rows if r.kind == "dependabot"]
+    open_dependabot_rows = [r for r in dependabot_rows if r.state == "open"]
     return {
         "dependabot_enabled": len(dependabot_rows) > 0,
-        "critical_count": sum(1 for r in dependabot_rows if r.severity == "critical"),
-        "high_count": sum(1 for r in dependabot_rows if r.severity == "high"),
-        "code_scanning_clear": not any(r.kind == "code_scanning" for r in alert_rows),
+        "critical_count": sum(1 for r in open_dependabot_rows if r.severity == "critical"),
+        "high_count": sum(1 for r in open_dependabot_rows if r.severity == "high"),
+        "code_scanning_clear": not any(r.kind == "code_scanning" and r.state == "open" for r in alert_rows),
     }
 
 
@@ -262,9 +269,9 @@ def personal_security_matrix(
 
 def _secret_scanning_alerts_from_aggregate(db: Session, tenant_id: int, owner: str, repo: str) -> list[SecretAlert]:
     """security_alerts (post-S6 PR 3) instead of a live GitHub call. No `url` field is
-    stored (only the live GitHub API response carries html_url) -- left empty, same as
-    an alert this table has no row for; the UI only uses it as an outbound link, not for
-    anything that gates alert-handling logic."""
+    stored (only the live GitHub API response carries html_url) -- None, not "" (a
+    fake/broken link), since SecretAlert.url is nullable precisely for this case (CodeRabbit
+    finding on PR #352); the UI renders a plain non-link row when url is missing."""
     rows = (
         db.query(SecurityAlert)
         .filter(
@@ -284,7 +291,7 @@ def _secret_scanning_alerts_from_aggregate(db: Session, tenant_id: int, owner: s
             created_at=row.created_at,
             resolved_at=row.updated_at if row.state != "open" else None,
             repo=f"{owner}/{repo}",
-            url="",
+            url=None,
         )
         for row in rows
     ]

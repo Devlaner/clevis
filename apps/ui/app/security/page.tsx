@@ -524,25 +524,31 @@ export default function SecurityPage() {
               <p className="p-4 text-sm text-muted-foreground">No secret scanning alerts for this repo</p>
             ) : (
               <div className="divide-y divide-border">
-                {secretScanning.data!.alerts.map((a) => (
-                  <a
-                    key={a.number}
-                    href={a.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center justify-between px-4 py-2.5 text-sm hover:bg-elevated transition-colors"
-                  >
-                    <span className="flex flex-col">
-                      <span className="text-foreground/90">{a.secret_type_display}</span>
-                      <span className="text-[0.6875rem] text-muted-foreground">#{a.number}</span>
-                    </span>
-                    <span
-                      className={`stat-chip ${a.state === "open" ? "text-red-400 border-red-500/30" : ""}`}
-                    >
-                      {a.state}
-                    </span>
-                  </a>
-                ))}
+                {secretScanning.data!.alerts.map((a) => {
+                  const row = (
+                    <>
+                      <span className="flex flex-col">
+                        <span className="text-foreground/90">{a.secret_type_display}</span>
+                        <span className="text-[0.6875rem] text-muted-foreground">#{a.number}</span>
+                      </span>
+                      <span
+                        className={`stat-chip ${a.state === "open" ? "text-red-400 border-red-500/30" : ""}`}
+                      >
+                        {a.state}
+                      </span>
+                    </>
+                  )
+                  const rowClassName = "flex items-center justify-between px-4 py-2.5 text-sm hover:bg-elevated transition-colors"
+                  return a.url ? (
+                    <a key={a.number} href={a.url} target="_blank" rel="noreferrer" className={rowClassName}>
+                      {row}
+                    </a>
+                  ) : (
+                    <div key={a.number} className={rowClassName}>
+                      {row}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
