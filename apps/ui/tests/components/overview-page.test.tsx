@@ -24,11 +24,12 @@ function renderPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <OverviewPage />
     </QueryClientProvider>,
   );
+  return { ...result, queryClient };
 }
 
 const EMPTY_COCKPIT = {
@@ -141,10 +142,10 @@ describe("OverviewPage cockpit", () => {
       commit_activity_4w: [1, 2, 3, 4],
     });
 
-    renderPage();
+    const { queryClient } = renderPage();
 
     await waitFor(() => {
-      expect(cockpitMock).toHaveBeenCalled();
+      expect(queryClient.getQueryState(["analytics.cockpit", "acme"])?.status).toBe("success");
     });
     expect(screen.queryByText("(estimated)")).not.toBeInTheDocument();
   });

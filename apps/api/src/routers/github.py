@@ -14,16 +14,16 @@ sibling org-scoped router's convention of defining its complete path locally.
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from src.core.db import RepoEvent, RepoEventDailyCount, get_db
-from src.core.rbac import OrgContext, require_org_role
+from src.core.db import RepoEvent, RepoEventDailyCount, SessionLocal, get_db
+from src.core.rbac import OrgContext, require_org_role, set_tenant_session_context
 from src.repositories import installation_repo
 from src.schemas.github import (
     ActivitySummaryEntry,
@@ -269,7 +269,7 @@ def _activity_summary_snapshot(db: Session, org_login: str, ctx: OrgContext, day
     connected = _org_installation_connected(db, org_login, ctx)
     totals: list[ActivitySummaryEntry] = []
     if connected:
-        cutoff = date.today() - timedelta(days=days - 1)
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
         rows = (
             db.query(RepoEventDailyCount.repo, RepoEventDailyCount.event_type, func.sum(RepoEventDailyCount.count))
             .filter(RepoEventDailyCount.tenant_id == ctx.org.tenant_id, RepoEventDailyCount.day >= cutoff)
@@ -325,17 +325,37 @@ def org_activity_summary(
     return _activity_summary_snapshot(db, org_login, ctx, days)
 
 
+def _activity_summary_stream_session(org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
+    """Owns a dedicated DB session for the SSE connection's whole lifetime instead of the
+    request-scoped `Depends(get_db)` session: FastAPI 0.116.1 runs a yield-dependency's
+    cleanup as soon as the route handler *returns* the StreamingResponse object, not after
+    this generator finishes streaming its body -- a borrowed request session would already
+    be closed (and its tenant/user SET vars RESET) before this loop's first poll runs."""
+    db = SessionLocal()
+    try:
+        set_tenant_session_context(db, ctx.org.tenant_id, ctx.membership.user_id)
+        yield from _activity_summary_stream(db, org_login, ctx, days, poll_interval)
+    finally:
+        try:
+            db.rollback()
+            db.execute(text("RESET app.tenant_id"))
+            db.execute(text("RESET app.user_id"))
+            db.commit()
+        finally:
+            db.close()
+
+
 @router.get("/github/orgs/{org_login}/activity-summary/stream")
 def org_activity_summary_stream(
     org_login: str,
     days: int = _ACTIVITY_SUMMARY_DEFAULT_DAYS,
     ctx: OrgContext = Depends(require_org_role(min_role="member")),
-    db: Session = Depends(get_db),
 ):
     """SSE channel pushing the same shape org_activity_summary returns, whenever it
-    changes. First concrete piece of S6's "+ SSE" half -- see _activity_summary_stream."""
+    changes. First concrete piece of S6's "+ SSE" half -- see _activity_summary_stream
+    and _activity_summary_stream_session."""
     days = max(1, min(days, _ACTIVITY_SUMMARY_MAX_DAYS))
-    return StreamingResponse(_activity_summary_stream(db, org_login, ctx, days), media_type="text/event-stream")
+    return StreamingResponse(_activity_summary_stream_session(org_login, ctx, days), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------

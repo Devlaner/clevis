@@ -51,11 +51,13 @@ function RepoActivityCell({ org, repo, token }: { org: string; repo: string; tok
         <Skeleton className="h-8 w-24" />
       ) : isError ? (
         <CellLoadError />
-      ) : weeks.length === 0 || weeks.every((n) => n === 0) ? (
-        <span className="text-muted-foreground text-[0.6875rem]">— no recent activity</span>
       ) : (
         <>
-          <MiniSparkline data={weeks} height={28} />
+          {weeks.length === 0 || weeks.every((n) => n === 0) ? (
+            <span className="text-muted-foreground text-[0.6875rem]">— no recent activity</span>
+          ) : (
+            <MiniSparkline data={weeks} height={28} />
+          )}
           {isEstimated && (
             <span
               className="text-[0.625rem] text-muted-foreground/70 shrink-0"

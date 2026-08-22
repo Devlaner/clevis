@@ -2,7 +2,7 @@
 concrete piece of the feat/aggregates-api-sse foundation -- see docs/plan.md's S6 section."""
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -81,6 +81,33 @@ def test_activity_summary_excludes_counts_outside_the_window(client, db, acme_or
     resp = client.get("/github/orgs/acme/activity-summary", params={"days": 7})
 
     assert resp.json()["totals"] == [{"repo": "acme/api", "event_type": "push", "count": 3}]
+
+
+def test_activity_summary_cutoff_uses_utc_calendar_not_host_local_time(client, db, acme_org_with_installation, monkeypatch):
+    """Regression test (CodeRabbit finding on PR #349): RepoEventDailyCount.day is always
+    a UTC date, so the cutoff must be derived from the UTC calendar, not date.today()'s
+    host-local one -- a host running behind UTC could otherwise treat the newest UTC day's
+    row as not-yet-arrived and omit it."""
+    import src.routers.github as github_module
+
+    fixed_now = datetime(2026, 1, 10, 0, 30, tzinfo=timezone.utc)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(github_module, "datetime", _FixedDateTime)
+
+    # days=1 -> cutoff must be the UTC date of fixed_now (Jan 10), not Jan 9, which is
+    # what a host running e.g. US-Pacific local time (UTC-8) would compute at this same
+    # instant via date.today().
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/api", event_type="push", day=date(2026, 1, 10), count=7)
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/api", event_type="push", day=date(2026, 1, 9), count=99)
+
+    resp = client.get("/github/orgs/acme/activity-summary", params={"days": 1})
+
+    assert resp.json()["totals"] == [{"repo": "acme/api", "event_type": "push", "count": 7}]
 
 
 def test_activity_summary_groups_by_repo_and_event_type(client, db, acme_org_with_installation):
@@ -192,6 +219,42 @@ def test_stream_reports_unconnected_for_a_legacy_pat_org(db, acme_org, rbac_ctx_
 
     payload = json.loads(first.removeprefix("event: activity_summary\ndata: ").strip())
     assert payload["connected"] is False
+
+
+def test_stream_session_wrapper_opens_and_closes_its_own_session(monkeypatch):
+    """Regression test (CodeRabbit finding on PR #349): the SSE route must not reuse the
+    request-scoped `Depends(get_db)` session, which FastAPI 0.116.1 closes (and RESETs its
+    tenant/user SET vars on) as soon as the route handler returns the StreamingResponse --
+    before this generator has streamed anything. Verifies the wrapper opens its own
+    session via SessionLocal, sets tenant context on it, and closes it once the stream
+    ends, independent of _activity_summary_stream's own query logic (covered above)."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import src.routers.github as github_module
+
+    fake_db = MagicMock()
+    monkeypatch.setattr(github_module, "SessionLocal", lambda: fake_db)
+
+    captured: dict = {}
+
+    def _fake_inner_stream(db, org_login, ctx, days, poll_interval):
+        captured["db"] = db
+        yield "event: activity_summary\ndata: {}\n\n"
+
+    monkeypatch.setattr(github_module, "_activity_summary_stream", _fake_inner_stream)
+
+    ctx = SimpleNamespace(org=SimpleNamespace(tenant_id=42), membership=SimpleNamespace(user_id=7))
+    gen = github_module._activity_summary_stream_session("acme", ctx, days=1, poll_interval=0)
+    first = next(gen)
+    gen.close()
+
+    assert first == "event: activity_summary\ndata: {}\n\n"
+    assert captured["db"] is fake_db
+    executed_sql = [c.args[0].text for c in fake_db.execute.call_args_list]
+    assert "SET app.tenant_id = 42" in executed_sql
+    assert "SET app.user_id = 7" in executed_sql
+    fake_db.close.assert_called_once()
 
 
 @pytest.fixture()

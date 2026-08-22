@@ -53,6 +53,7 @@ function renderPage() {
   );
   return {
     ...utils,
+    queryClient,
     rerenderSamePage: () =>
       utils.rerender(
         <QueryClientProvider client={queryClient}>
@@ -157,9 +158,11 @@ describe("RepoDetailPage", () => {
       contributors: [],
     });
 
-    renderPage();
+    const { queryClient } = renderPage();
 
-    await waitFor(() => expect(screen.queryByText(/no commit activity available yet/i)).not.toBeInTheDocument());
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["repo-detail-stats", "acme", "demo", ""])?.status).toBe("success");
+    });
     expect(screen.queryByText("(estimated)")).not.toBeInTheDocument();
   });
 
