@@ -425,6 +425,7 @@ def test_security_alert_severity_and_details_are_kind_specific(pg_conn, tenant_i
     _, severity_2, details_2, _, _ = _security_alert(conn, tenant_id, "acme/widgets", "secret_scanning", 1)
     assert severity_2 is None  # secret-scanning alerts carry no severity in GitHub's payload
     assert details_2["secret_type"] == "github_personal_access_token"
+    assert details_2["resolution"] is None  # not yet resolved on the initial "created" webhook
 
 
 def test_redelivered_security_alert_updates_state_instead_of_duplicating(pg_conn, tenant_id):
@@ -528,6 +529,12 @@ def test_summarize_unknown_event_type_returns_the_event_type_itself():
 
 def test_normalize_returns_none_when_repository_full_name_is_missing():
     assert event_consumer._normalize("push", {"sender": {"login": "octocat"}}, None) is None
+
+
+def test_parse_alert_timestamp_falls_back_on_missing_or_malformed_value():
+    fallback = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert event_consumer._parse_alert_timestamp(None, fallback) == fallback
+    assert event_consumer._parse_alert_timestamp("not-a-real-timestamp", fallback) == fallback
 
 
 def test_process_entry_drops_malformed_json_payload(pg_conn, tenant_id):

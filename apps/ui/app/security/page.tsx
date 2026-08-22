@@ -402,7 +402,17 @@ export default function SecurityPage() {
         <div className="grid gap-4 lg:grid-cols-2 mt-6">
           <div className="card">
             <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-              <span className="section-title">Compliance Matrix</span>
+              <span className="flex items-center gap-2">
+                <span className="section-title">Compliance Matrix</span>
+                {matrixMutation.data?.repos.some((r) => r.alerts_source === "aggregate") && (
+                  <span
+                    className="text-[0.6875rem] text-muted-foreground/70"
+                    title="Dependabot/code-scanning columns are from ingested webhook events, not a live GitHub call."
+                  >
+                    (estimated)
+                  </span>
+                )}
+              </span>
               {matrixMutation.data && (
                 <span className="stat-chip">{matrixMutation.data.summary.fully_compliant_count} fully compliant</span>
               )}
@@ -481,7 +491,17 @@ export default function SecurityPage() {
 
           <div className="card">
             <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
-              <span className="section-title">Secret Scanning Alerts</span>
+              <span className="flex items-center gap-2">
+                <span className="section-title">Secret Scanning Alerts</span>
+                {secretScanning.data?.source === "aggregate" && (
+                  <span
+                    className="text-[0.6875rem] text-muted-foreground/70"
+                    title="From ingested webhook events, not a live GitHub call."
+                  >
+                    (estimated)
+                  </span>
+                )}
+              </span>
               {matrixMutation.data && matrixMutation.data.repos.length > 0 && (
                 <select
                   value={selectedRepo}

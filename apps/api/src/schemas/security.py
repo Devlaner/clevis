@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -13,6 +14,12 @@ class RepoSecurityRow(BaseModel):
     code_scanning: bool
     force_push_allowed: bool
     score: int
+    # "aggregate" when dependabot/code_scanning came from security_alerts (post-S6 PR 3)
+    # instead of a live per-repo GitHub call -- branch_protection/force_push/secret_scanning
+    # have no ingested event covering them and stay live either way, so this only
+    # describes those two dimensions (dependabot_enabled is an approximation in the
+    # "aggregate" case too -- see _repo_row_from_aggregate's docstring).
+    alerts_source: Literal["github", "aggregate"] = "github"
     # Dimension names ("branch_protection", "dependabot", "code_scanning") the token
     # couldn't evaluate (403/429/network error) rather than genuinely observed as
     # compliant or not -- excluded from `score`'s denominator so a repo the token
@@ -58,3 +65,4 @@ class SecretAlert(BaseModel):
 class SecretScanningResponse(BaseModel):
     repository: str
     alerts: list[SecretAlert]
+    source: Literal["github", "aggregate"] = "github"

@@ -229,6 +229,10 @@ def _normalize_security_alert(event_type: str, payload: dict, received_at: datet
             "action": payload.get("action"),
             "secret_type": alert.get("secret_type"),
             "secret_type_display_name": alert.get("secret_type_display_name"),
+            # Only present once the alert is resolved -- None on the initial "created"
+            # webhook. Needed by the Security dashboard's secret-scanning panel (post-S6
+            # PR 3) to show why an alert was closed, matching GitHub's own live API shape.
+            "resolution": alert.get("resolution"),
         }
 
     return {
