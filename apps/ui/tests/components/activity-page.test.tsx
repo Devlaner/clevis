@@ -204,6 +204,22 @@ describe("ActivityPage", () => {
     expect(screen.queryByText("No commit activity in the last year")).not.toBeInTheDocument();
   });
 
+  it("labels the commit heatmap as estimated when the cockpit source is an aggregate", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    githubEventsMock.mockResolvedValue({ org: "acme", events: [] });
+    analyticsCockpitMock.mockResolvedValue({
+      repo_count: 1, member_count: 1, latest_score: null, score_trend: [], recent_events: [],
+      open_pr_count: 0, pr_merge_rate_4w: [], commit_activity_4w: [], total_cache_size_bytes: 0,
+      cache_job_success_rate: 0, commit_heatmap_52w: Array.from({ length: 52 }, (_, i) => (i === 51 ? 5 : 0)),
+      commit_activity_source: "aggregate" as const,
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("(estimated)")).toBeInTheDocument();
+  });
+
   it("groups open PRs by author under the PR Board tab", async () => {
     localStorage.setItem("default_org", "acme");
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });

@@ -228,8 +228,16 @@ export default function ActivityPage() {
       {hasOrg && (
         <div className="grid gap-4 lg:grid-cols-2 mt-4">
           <div className="card lg:col-span-2">
-            <div className="px-4 py-3 border-b border-border">
+            <div className="px-4 py-3 border-b border-border flex items-center gap-2">
               <span className="section-label">Commit Heatmap (52w)</span>
+              {cockpitQuery.data?.commit_activity_source === "aggregate" && (
+                <span
+                  className="text-[0.6875rem] text-muted-foreground/70"
+                  title="Estimated from stored push events, not GitHub's exact commit count."
+                >
+                  (estimated)
+                </span>
+              )}
             </div>
             <div className="p-4">
               {(cockpitQuery.data?.commit_heatmap_52w ?? []).some((n) => n > 0) ? (

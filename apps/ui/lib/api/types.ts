@@ -389,6 +389,7 @@ export interface CockpitResponse {
   milestones: MilestoneSummary[]
   pr_cycle_time_8w: PrCycleTimeWeek[]
   release_cadence_4w: number[]
+  commit_activity_source: "github" | "aggregate"
 }
 
 export interface MyViewPRSummary {

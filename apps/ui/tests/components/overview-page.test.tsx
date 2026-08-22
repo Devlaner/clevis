@@ -46,6 +46,7 @@ const EMPTY_COCKPIT = {
   milestones: [],
   pr_cycle_time_8w: [],
   release_cadence_4w: [],
+  commit_activity_source: "github" as const,
 };
 
 const EMPTY_MY_VIEW = {
@@ -114,6 +115,38 @@ describe("OverviewPage cockpit", () => {
     // A single cockpit call once the token-resolve fetch settles -- not a second
     // waterfalled fetch for jobs/overview like the pre-cockpit page used to do.
     expect(cockpitMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels commit activity as estimated when the cockpit source is an aggregate", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({
+      ...EMPTY_COCKPIT,
+      commit_activity_4w: [1, 2, 3, 4],
+      commit_activity_source: "aggregate" as const,
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("(estimated)")).toBeInTheDocument();
+    });
+  });
+
+  it("does not show the estimated caption when the cockpit source is github", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({
+      ...EMPTY_COCKPIT,
+      commit_activity_4w: [1, 2, 3, 4],
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(cockpitMock).toHaveBeenCalled();
+    });
+    expect(screen.queryByText("(estimated)")).not.toBeInTheDocument();
   });
 
   it("renders empty states for charts and activity when the org has no data yet", async () => {
