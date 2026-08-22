@@ -82,6 +82,7 @@ class CockpitResponse(BaseModel):
     milestones: list[MilestoneSummary] = []
     pr_cycle_time_8w: list[PrCycleTimeWeek] = []
     release_cadence_4w: list[int] = []
+    commit_activity_source: Literal["github", "aggregate"] = "github"
 
 
 class PRSummary(BaseModel):
