@@ -107,6 +107,9 @@ export interface LatestRelease {
 export interface RepoStatsResponse {
   repository: string
   commit_activity: CommitActivityWeek[]
+  // "aggregate" when commit_activity is estimated from stored push-event counts
+  // (S6) instead of GitHub's own commit-level stats/commit_activity endpoint.
+  commit_activity_source: "github" | "aggregate"
   participation: { all?: number[]; owner?: number[] }
   contributors: { author?: { login?: string }; total: number }[]
   stargazers_count: number

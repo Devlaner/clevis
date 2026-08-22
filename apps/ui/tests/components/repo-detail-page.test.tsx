@@ -133,6 +133,36 @@ describe("RepoDetailPage", () => {
     expect(screen.getByText(/top contributors/i)).toBeInTheDocument();
   });
 
+  it("labels the commit-activity chart and calendar as estimated when the source is an aggregate", async () => {
+    reposStatsMock.mockResolvedValue({
+      repository: "acme/demo",
+      commit_activity: Array.from({ length: 4 }, (_, i) => ({ week: 1700000000 + i * 604800, total: i + 1, days: [] })),
+      commit_activity_source: "aggregate",
+      participation: {},
+      contributors: [],
+    });
+
+    renderPage();
+
+    const captions = await screen.findAllByText("(estimated)");
+    expect(captions).toHaveLength(2);
+  });
+
+  it("does not show the estimated caption when the source is github", async () => {
+    reposStatsMock.mockResolvedValue({
+      repository: "acme/demo",
+      commit_activity: Array.from({ length: 4 }, (_, i) => ({ week: 1700000000 + i * 604800, total: i + 1, days: [] })),
+      commit_activity_source: "github",
+      participation: {},
+      contributors: [],
+    });
+
+    renderPage();
+
+    await waitFor(() => expect(screen.queryByText(/no commit activity available yet/i)).not.toBeInTheDocument());
+    expect(screen.queryByText("(estimated)")).not.toBeInTheDocument();
+  });
+
   it("maps a contributor's real (nested) GitHub login instead of falling back to 'unknown'", async () => {
     // Regression test for the c.login vs c.author.login bug -- exercises the mapping
     // function directly the same way the component does, since recharts' XAxis tick

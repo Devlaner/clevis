@@ -1,15 +1,17 @@
 """Tests for the repos router (Phase 8 groundwork)."""
 
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import User, get_db
-from src.repositories import org_membership_repo, org_repo
+from src.repositories import installation_repo, org_membership_repo, org_repo
 from src.routers.repos import router as repos_router
 from src.routers.repos import _stats_cache
 
@@ -323,6 +325,165 @@ def test_repo_stats_different_tokens_are_not_served_from_the_same_cache_entry(re
     # Each distinct token triggers its own fetch (5 calls) rather than reusing the
     # other token's cached response -- 10 total, not 5.
     assert mock_client.return_value.request.call_count == 10
+
+
+# ---------------------------------------------------------------------------
+# S6: commit_activity served from repo_event_daily_counts for orgs with a
+# connected GitHub App installation -- partial re-point, everything else in
+# RepoStatsResponse still comes from live GitHub calls (see repos.py's
+# _fetch_stats docstring and the plan.md status update for the accuracy
+# tradeoff -- push-event counts, not exact commit counts).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def acme_org_with_installation(db, acme_org):
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=7, org_id=acme_org.id
+    )
+    return acme_org
+
+
+def _insert_daily_count(db, tenant_id, *, repo, event_type, day, count):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO repo_event_daily_counts (tenant_id, repo, event_type, day, count) "
+            "VALUES (:tenant_id, :repo, :event_type, :day, :count)"
+        ),
+        {"tenant_id": tenant_id, "repo": repo, "event_type": event_type, "day": day, "count": count},
+    )
+    db.commit()
+
+
+def test_repo_stats_cache_is_isolated_by_tenant_id(db, acme_org_with_installation):
+    # Defense in depth: orgs.github_login is unique, so two tenants can't legitimately
+    # share the same (owner, repo) through the normal org-resolution path today -- but the
+    # cache itself must not rely on that invariant. Bypasses the HTTP layer (owner==org_login
+    # is enforced there) to call _cached_stats directly with the same owner/repo/token for
+    # two different tenants, mirroring what the route handler's own tenant resolution does.
+    from src.core.rbac import set_tenant_session_context
+    from src.routers.repos import _cached_stats, _stats_cache
+
+    _stats_cache.clear()
+    other_user = User(id=2, email="other@example.com", name=None, password_hash=None, is_workspace_admin=False)
+    db.add(other_user)
+    db.commit()
+    other_org = org_repo.get_or_create(db, github_login="other")
+    org_membership_repo.get_or_create(db, org_id=other_org.id, user_id=other_user.id, role="member")
+
+    today = date.today()
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=5)
+    _insert_daily_count(db, other_org.tenant_id, repo="acme/demo", event_type="push", day=today, count=9)
+
+    with patch("src.routers.repos.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _stats_side_effect(repo_meta=_REPO_META, release_error=_not_found())
+
+        set_tenant_session_context(db, acme_org_with_installation.tenant_id, _ADMIN.id)
+        first = _cached_stats("acme", "demo", "shared-token", db, acme_org_with_installation.tenant_id, True)
+
+        set_tenant_session_context(db, other_org.tenant_id, other_user.id)
+        second = _cached_stats("acme", "demo", "shared-token", db, other_org.tenant_id, True)
+
+    assert first["commit_activity"][-1]["total"] == 5
+    assert second["commit_activity"][-1]["total"] == 9
+
+
+def test_repo_stats_uses_aggregate_commit_activity_when_installation_connected(repos_client, db, acme_org_with_installation):
+    today = date.today()
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=3)
+
+    with patch("src.routers.repos.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _stats_side_effect(
+            repo_meta=_REPO_META,
+            participation={"all": [1], "owner": [1]},
+            contributors=[{"login": "octocat", "total": 5}],
+            release_error=_not_found(),
+        )
+        resp = repos_client.post(
+            "/orgs/acme/repos/acme/demo/stats", json={"token": "ghp_testtoken123456789012345678901234"}
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["commit_activity_source"] == "aggregate"
+    assert len(body["commit_activity"]) == 52
+    assert body["commit_activity"][-1]["total"] == 3
+    # commit_activity is skipped entirely -- 4 live calls, not 5.
+    assert mock_client.return_value.request.call_count == 4
+    called_paths = {c.args[1] for c in mock_client.return_value.request.call_args_list}
+    assert "/repos/acme/demo/stats/commit_activity" not in called_paths
+    # Other fields still come from the live GitHub calls, unchanged.
+    assert body["stargazers_count"] == 24
+    assert body["contributors"] == [{"login": "octocat", "total": 5}]
+
+
+def test_repo_stats_aggregate_commit_activity_buckets_by_week_and_excludes_outside_window(
+    repos_client, db, acme_org_with_installation
+):
+    # A fixed Monday, not the real "today" -- if this test ran on a real Sunday,
+    # `today - timedelta(days=1)` would fall in the *previous* Sunday-starting week,
+    # breaking the "same week" assumption below.
+    today = date(2000, 1, 3)
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today, count=2)
+    _insert_daily_count(
+        db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today - timedelta(days=1), count=1
+    )
+    # Well outside the 52-week window -- must not be counted anywhere.
+    _insert_daily_count(
+        db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="push", day=today - timedelta(weeks=60), count=99
+    )
+    # A different event type on the same day -- must not be counted (commit_activity is push-only).
+    _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/demo", event_type="issues", day=today, count=50)
+
+    with patch("src.routers.repos.GitHubClient") as mock_client, patch("src.routers.repos.datetime") as mock_datetime:
+        mock_client.return_value.request.side_effect = _stats_side_effect(repo_meta=_REPO_META, release_error=_not_found())
+        mock_datetime.now.return_value = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        mock_datetime.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        resp = repos_client.post(
+            "/orgs/acme/repos/acme/demo/stats", json={"token": "ghp_testtoken123456789012345678901234"}
+        )
+
+    body = resp.json()
+    weeks = body["commit_activity"]
+    assert sum(w["total"] for w in weeks) == 3
+    assert weeks[-1]["total"] == 3
+
+
+def test_repo_stats_falls_back_to_github_when_the_installation_has_no_installation_id(repos_client, db, acme_org):
+    # Mirrors the same gap covered in test_github_events.py -- a row can exist with
+    # installation_id IS NULL (sync_org_installation's known-admin re-sync path) with no
+    # actual App installation, and therefore no repo_event_daily_counts rows, behind it.
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=None, org_id=acme_org.id
+    )
+
+    with patch("src.routers.repos.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _stats_side_effect(
+            repo_meta=_REPO_META, commit_activity=[{"week": 1, "total": 5}], release_error=_not_found()
+        )
+        resp = repos_client.post(
+            "/orgs/acme/repos/acme/demo/stats", json={"token": "ghp_testtoken123456789012345678901234"}
+        )
+
+    body = resp.json()
+    assert body["commit_activity_source"] == "github"
+    assert body["commit_activity"] == [{"week": 1, "total": 5}]
+    assert mock_client.return_value.request.call_count == 5
+
+
+def test_repo_stats_commit_activity_source_is_github_for_a_legacy_pat_org(repos_client):
+    # acme_org (no installation fixture) -- regression check that the fully unchanged
+    # live-GitHub path is still what a legacy PAT-only org gets.
+    with patch("src.routers.repos.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _stats_side_effect(
+            repo_meta=_REPO_META, commit_activity=[{"week": 1, "total": 5}], release_error=_not_found()
+        )
+        resp = repos_client.post(
+            "/orgs/acme/repos/acme/demo/stats", json={"token": "ghp_testtoken123456789012345678901234"}
+        )
+
+    assert resp.json()["commit_activity_source"] == "github"
 
 
 def test_list_repos_maps_github_request_error_to_503(repos_client):

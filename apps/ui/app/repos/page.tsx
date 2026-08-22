@@ -44,8 +44,9 @@ function RepoActivityCell({ org, repo, token }: { org: string; repo: string; tok
   })
 
   const weeks = (data?.commit_activity ?? []).slice(-8).map((w) => w.total)
+  const isEstimated = data?.commit_activity_source === "aggregate"
   return (
-    <div ref={ref}>
+    <div ref={ref} className="flex items-center gap-1.5">
       {!inView || isLoading ? (
         <Skeleton className="h-8 w-24" />
       ) : isError ? (
@@ -53,7 +54,17 @@ function RepoActivityCell({ org, repo, token }: { org: string; repo: string; tok
       ) : weeks.length === 0 || weeks.every((n) => n === 0) ? (
         <span className="text-muted-foreground text-[0.6875rem]">— no recent activity</span>
       ) : (
-        <MiniSparkline data={weeks} height={28} />
+        <>
+          <MiniSparkline data={weeks} height={28} />
+          {isEstimated && (
+            <span
+              className="text-[0.625rem] text-muted-foreground/70 shrink-0"
+              title="Estimated from stored push events, not exact commit counts."
+            >
+              (est.)
+            </span>
+          )}
+        </>
       )}
     </div>
   )
