@@ -402,7 +402,17 @@ export default function SecurityPage() {
         <div className="grid gap-4 lg:grid-cols-2 mt-6">
           <div className="card">
             <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-              <span className="section-title">Compliance Matrix</span>
+              <span className="flex items-center gap-2">
+                <span className="section-title">Compliance Matrix</span>
+                {matrixMutation.data?.repos.some((r) => r.alerts_source === "aggregate") && (
+                  <span
+                    className="text-[0.6875rem] text-muted-foreground/70"
+                    title="Dependabot/code-scanning columns are from ingested webhook events, not a live GitHub call."
+                  >
+                    (estimated)
+                  </span>
+                )}
+              </span>
               {matrixMutation.data && (
                 <span className="stat-chip">{matrixMutation.data.summary.fully_compliant_count} fully compliant</span>
               )}
@@ -481,7 +491,17 @@ export default function SecurityPage() {
 
           <div className="card">
             <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
-              <span className="section-title">Secret Scanning Alerts</span>
+              <span className="flex items-center gap-2">
+                <span className="section-title">Secret Scanning Alerts</span>
+                {secretScanning.data?.source === "aggregate" && (
+                  <span
+                    className="text-[0.6875rem] text-muted-foreground/70"
+                    title="From ingested webhook events, not a live GitHub call."
+                  >
+                    (estimated)
+                  </span>
+                )}
+              </span>
               {matrixMutation.data && matrixMutation.data.repos.length > 0 && (
                 <select
                   value={selectedRepo}
@@ -504,25 +524,31 @@ export default function SecurityPage() {
               <p className="p-4 text-sm text-muted-foreground">No secret scanning alerts for this repo</p>
             ) : (
               <div className="divide-y divide-border">
-                {secretScanning.data!.alerts.map((a) => (
-                  <a
-                    key={a.number}
-                    href={a.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center justify-between px-4 py-2.5 text-sm hover:bg-elevated transition-colors"
-                  >
-                    <span className="flex flex-col">
-                      <span className="text-foreground/90">{a.secret_type_display}</span>
-                      <span className="text-[0.6875rem] text-muted-foreground">#{a.number}</span>
-                    </span>
-                    <span
-                      className={`stat-chip ${a.state === "open" ? "text-red-400 border-red-500/30" : ""}`}
-                    >
-                      {a.state}
-                    </span>
-                  </a>
-                ))}
+                {secretScanning.data!.alerts.map((a) => {
+                  const row = (
+                    <>
+                      <span className="flex flex-col">
+                        <span className="text-foreground/90">{a.secret_type_display}</span>
+                        <span className="text-[0.6875rem] text-muted-foreground">#{a.number}</span>
+                      </span>
+                      <span
+                        className={`stat-chip ${a.state === "open" ? "text-red-400 border-red-500/30" : ""}`}
+                      >
+                        {a.state}
+                      </span>
+                    </>
+                  )
+                  const rowClassName = "flex items-center justify-between px-4 py-2.5 text-sm hover:bg-elevated transition-colors"
+                  return a.url ? (
+                    <a key={a.number} href={a.url} target="_blank" rel="noreferrer" className={rowClassName}>
+                      {row}
+                    </a>
+                  ) : (
+                    <div key={a.number} className={rowClassName}>
+                      {row}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
