@@ -20,6 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from src.core.config import settings
@@ -194,6 +195,39 @@ class RepoEventDailyCount(Base):
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     day: Mapped[date] = mapped_column(Date, nullable=False)
     count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class SecurityAlert(Base):
+    """Normalized store for GitHub Security-alert webhook events (dependabot_alert/
+    code_scanning_alert/secret_scanning_alert), migration 0039 (post-S6, PR 2 of 3).
+    Populated by apps/worker's event_consumer.py from webhook_deliveries rows already
+    durably queued since PR #350. Not read by the API yet -- that's PR 3's job, same
+    deferral pattern as RepoEvent was under S4 before S6 read it.
+
+    One polymorphic table (kind discriminates dependabot/code_scanning/secret_scanning)
+    rather than three near-identical tables -- see migration 0039's docstring for the
+    full rationale. Upserted (not insert-and-skip like RepoEvent): a redelivered alert
+    webhook reflects a real state transition (e.g. open -> dismissed), not a duplicate
+    of an immutable log entry, so (tenant_id, repo, kind, number) is an upsert key, not
+    a dedupe-and-drop key."""
+
+    __tablename__ = "security_alerts"
+    __table_args__ = (
+        Index("ix_security_alerts_tenant_id", "tenant_id"),
+        Index("ix_security_alerts_tenant_id_repo", "tenant_id", "repo"),
+        UniqueConstraint("tenant_id", "repo", "kind", "number", name="uq_security_alerts_tenant_repo_kind_number"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    repo: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str | None] = mapped_column(String, nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ActivitySyncCursor(Base):
