@@ -48,6 +48,19 @@ _STREAM_KEY = "webhook_events"
 _GROUP_NAME = "event_processors"
 _CONSUMER_NAME = f"worker-{os.getpid()}"
 
+# Security alert events (dependabot_alert/code_scanning_alert/secret_scanning_alert,
+# S6-follow-on PR 1) are durably queued by the receiver onto the same shared stream as
+# every other ingested event type, but have no normalizer here yet -- a dedicated alert
+# consumer + per-repo alert tables are future work, not built yet. _process_entry checks
+# this set before calling _normalize: without it, these events would fall through
+# _normalize's generic "does payload.repository.full_name exist" check (GitHub's alert
+# payloads do have one) and get written into repo_events/repo_event_daily_counts with a
+# meaningless summary (_summarize's unknown-event-type fallback just echoes the event
+# type string back), and worse, get marked webhook_deliveries.status='processed' and
+# XACKed off the stream -- making them unrecoverable for whatever future alert consumer
+# eventually needs to read them.
+_NOT_YET_NORMALIZED_EVENT_TYPES = {"dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}
+
 # How long a claimed-but-unacked entry sits idle before another pass reclaims it --
 # comfortably longer than any single event's normalize+insert should ever take.
 _RECLAIM_IDLE_MS = 60_000
@@ -181,6 +194,13 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
         return
 
     tenant_id, delivery_id, event_type, payload_bytes, received_at = row
+    if event_type in _NOT_YET_NORMALIZED_EVENT_TYPES:
+        # Ack so this entry doesn't sit pending forever; leave webhook_deliveries.status
+        # as 'queued' (not 'processed') so a future alert consumer can still find it by
+        # event_type -- see _NOT_YET_NORMALIZED_EVENT_TYPES's docstring above.
+        log.debug("webhook_deliveries row %s is a %s event with no consumer yet, leaving queued", delivery_row_id, event_type)
+        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+        return
     if tenant_id is None:
         # Deliberate scope decision (see S4 PR 1's plan notes): an unresolved
         # installation has no tenant to scope a normalized row to. Ack so this entry
