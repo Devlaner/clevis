@@ -639,6 +639,58 @@ def test_redelivered_member_added_does_not_overwrite_role(pg_conn, tenant_id):
     assert row == ("https://example.com/b.png", "admin")  # avatar refreshed, role untouched
 
 
+def test_out_of_order_member_removed_does_not_delete_a_newer_repo_collaborator(pg_conn, tenant_id):
+    # Simulates a reclaimed/retried "removed" delivery (received_at earlier) processed
+    # AFTER a later "added" delivery already landed -- the stale removal must not delete
+    # the newer grant. See org_membership_store.py's module docstring.
+    conn, state = pg_conn
+    earlier = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
+
+    added_payload = {"action": "added", "repository": {"full_name": "acme/widgets"}, "member": {"login": "out-of-order-1"}, "changes": {"permission": {"to": "push"}}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-ooo-member-added", event_type="member", payload=added_payload, received_at=later)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "member", tenant_id))
+
+    stale_removed_payload = {"action": "removed", "repository": {"full_name": "acme/widgets"}, "member": {"login": "out-of-order-1"}}
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-ooo-member-removed", event_type="member", payload=stale_removed_payload, received_at=earlier)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "member", tenant_id))
+
+    assert _repo_collaborator(conn, tenant_id, "acme/widgets", "out-of-order-1") is not None
+
+
+def test_out_of_order_member_added_does_not_overwrite_a_newer_edit(pg_conn, tenant_id):
+    conn, state = pg_conn
+    earlier = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
+
+    later_edit_payload = {"action": "edited", "repository": {"full_name": "acme/widgets"}, "member": {"login": "out-of-order-2"}, "changes": {"permission": {"to": "admin"}}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-ooo-member-edit", event_type="member", payload=later_edit_payload, received_at=later)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "member", tenant_id))
+
+    stale_added_payload = {"action": "added", "repository": {"full_name": "acme/widgets"}, "member": {"login": "out-of-order-2"}, "changes": {"permission": {"to": "pull"}}}
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-ooo-member-stale-add", event_type="member", payload=stale_added_payload, received_at=earlier)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "member", tenant_id))
+
+    row = _repo_collaborator(conn, tenant_id, "acme/widgets", "out-of-order-2")
+    assert row[0] == "admin"  # the stale, earlier "added" (permission=pull) must not win
+
+
+def test_out_of_order_organization_member_removed_does_not_delete_a_newer_member(pg_conn, tenant_id):
+    conn, state = pg_conn
+    earlier = datetime(2026, 8, 20, 10, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 8, 20, 11, 0, tzinfo=timezone.utc)
+
+    added_payload = {"action": "member_added", "membership": {"role": "member", "user": {"login": "ooo-org-1", "avatar_url": ""}}}
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-ooo-org-added", event_type="organization", payload=added_payload, received_at=later)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "organization", tenant_id))
+
+    stale_removed_payload = {"action": "member_removed", "membership": {"user": {"login": "ooo-org-1"}}}
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-ooo-org-removed", event_type="organization", payload=stale_removed_payload, received_at=earlier)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "organization", tenant_id))
+
+    assert _org_member(conn, tenant_id, "ooo-org-1") is not None
+
+
 def test_member_added_upserts_repo_collaborator(pg_conn, tenant_id):
     conn, state = pg_conn
     payload = {
@@ -654,7 +706,7 @@ def test_member_added_upserts_repo_collaborator(pg_conn, tenant_id):
 
     assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
     row = _repo_collaborator(conn, tenant_id, "acme/widgets", "collab1")
-    assert row == ("push", "direct", False)
+    assert row == ("push", "direct", None)
 
 
 def test_member_edited_updates_permission(pg_conn, tenant_id):
@@ -674,7 +726,7 @@ def test_member_edited_updates_permission(pg_conn, tenant_id):
     event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "member", tenant_id))
 
     row = _repo_collaborator(conn, tenant_id, "acme/widgets", "collab2")
-    assert row == ("admin", "direct", False)
+    assert row == ("admin", "direct", None)
 
 
 def test_member_removed_deletes_repo_collaborator(pg_conn, tenant_id):

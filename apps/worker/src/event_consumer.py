@@ -259,12 +259,15 @@ def _normalize_security_alert(event_type: str, payload: dict, received_at: datet
 def _normalize_member_event(payload: dict) -> dict | None:
     """Returns repo_collaborators column values for a `member` event payload, or None if
     it can't be normalized (missing repository/member.login). action is 'added'/'edited'/
-    'removed'; permission comes from changes.permission.to, present on both 'added' and
-    'edited' per GitHub's webhook docs (only absent on 'removed', where it's moot -- the
-    row is deleted, not updated). is_outside_collaborator can't be determined from this
-    event alone (GitHub's member payload doesn't carry org-membership status) -- defaults
-    False here, corrected by the future reconciliation poll (Collaborators PR 2), same
-    known-staleness posture as org_members.role."""
+    'removed'; permission is read from changes.permission.to. Per GitHub's own webhook
+    payload schemas (octokit/webhooks' JSON schemas, the authoritative source -- the
+    prose docs don't spell this out clearly), `changes.permission` is *optional* on both
+    'added' and 'edited', not guaranteed on either -- so this can legitimately come back
+    None (falls back to "unknown" below) for a real delivery, not just a malformed test
+    payload. is_outside_collaborator can't be determined from this event alone (GitHub's
+    member payload doesn't carry org-membership status) -- None here (an honest "not yet
+    known", not a False claim), filled in by the future reconciliation poll
+    (Collaborators PR 2), same known-staleness posture as org_members.role."""
     repository = payload.get("repository") or {}
     repo_full_name = repository.get("full_name")
     member = payload.get("member") or {}
@@ -277,7 +280,7 @@ def _normalize_member_event(payload: dict) -> dict | None:
         "repo": repo_full_name,
         "login": login,
         "permission": permission or "unknown",
-        "is_outside_collaborator": False,
+        "is_outside_collaborator": None,
     }
 
 
@@ -355,7 +358,8 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
                     return
                 if action == "removed":
                     org_membership_store.remove_repo_collaborator(
-                        cur, tenant_id=tenant_id, repo=member_normalized["repo"], login=member_normalized["login"]
+                        cur, tenant_id=tenant_id, repo=member_normalized["repo"], login=member_normalized["login"],
+                        event_received_at=received_at,
                     )
                 else:
                     org_membership_store.upsert_repo_collaborator(cur, tenant_id=tenant_id, granted_at=received_at, **member_normalized)
@@ -367,7 +371,7 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
                         log.error("webhook_deliveries row %s has no membership.user.login, dropping", delivery_row_id)
                         redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
                         return
-                    org_membership_store.remove_org_member(cur, tenant_id=tenant_id, login=login)
+                    org_membership_store.remove_org_member(cur, tenant_id=tenant_id, login=login, event_received_at=received_at)
                 elif action == "member_added":
                     org_normalized = _normalize_organization_event(payload)
                     if org_normalized is None:

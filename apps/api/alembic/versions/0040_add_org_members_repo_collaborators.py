@@ -30,6 +30,12 @@ change) but acked-and-skipped by the consumer for now, not silently dropped -- s
 event_consumer.py's own guard for the exact mechanism, mirroring the security-alert stage's PR 1
 placeholder pattern.
 
+repo_collaborators.is_outside_collaborator is nullable, not a False default: the `member`
+event's payload alone can't determine org-membership status (GitHub doesn't include it there),
+so this column is NULL ("not yet known") until the reconciliation poll (Collaborators PR 2)
+fills it in -- a False default would misrepresent unknown data as a confirmed "this is a direct
+org member," which is a real, different claim.
+
 RLS is ENABLE-only, no FORCE -- same reasoning as every migration since 0030: the table-owning
 migration role is unaffected either way, and this only starts enforcing for a non-owner role
 once that role is actually granted access to it (this migration).
@@ -87,7 +93,12 @@ def upgrade() -> None:
         # 'direct' only in this PR -- see this migration's own docstring for why 'team' is
         # deferred rather than built now.
         sa.Column("source", sa.String(), nullable=False, server_default="direct"),
-        sa.Column("is_outside_collaborator", sa.Boolean(), nullable=False, server_default=sa.false()),
+        # Nullable, not a False default: the `member` event alone can't determine
+        # org-membership status (see this migration's docstring) -- NULL means "not yet
+        # known", distinct from a real "confirmed direct org member" False (CodeRabbit
+        # finding on Collaborators PR 1: a False default would misrepresent unknown data
+        # as a known negative).
+        sa.Column("is_outside_collaborator", sa.Boolean(), nullable=True),
         sa.Column("granted_at", sa.DateTime(timezone=True), nullable=False),
     )
     op.create_index("ix_repo_collaborators_tenant_id", "repo_collaborators", ["tenant_id"])

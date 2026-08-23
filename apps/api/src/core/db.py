@@ -282,7 +282,10 @@ class RepoCollaborator(Base):
     login: Mapped[str] = mapped_column(String, nullable=False)
     permission: Mapped[str] = mapped_column(String, nullable=False)
     source: Mapped[str] = mapped_column(String, nullable=False, server_default="direct")
-    is_outside_collaborator: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # NULL means "not yet known" -- the `member` event alone can't determine org-membership
+    # status; a False default would misrepresent that as a confirmed direct-member claim.
+    # See migration 0040's docstring.
+    is_outside_collaborator: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
