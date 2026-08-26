@@ -591,6 +591,25 @@ def test_organization_member_added_upserts_org_member(pg_conn, tenant_id):
         assert cur.fetchone()[0] == "processed"
 
 
+def test_organization_member_added_with_explicit_null_role_and_avatar_falls_back(pg_conn, tenant_id):
+    conn, state = pg_conn
+    payload = {
+        "action": "member_added",
+        "membership": {"role": None, "user": {"login": "null-fields", "avatar_url": None}},
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-org-null-role-1", event_type="organization", payload=payload)
+
+    redis_client = _FakeRedis()
+    event_consumer._process_entry(conn, redis_client, "1-0", _entry_fields(row_id, "organization", tenant_id))
+
+    assert redis_client.acked == [(event_consumer._STREAM_KEY, event_consumer._GROUP_NAME, "1-0")]
+    row = _org_member(conn, tenant_id, "null-fields")
+    assert row == ("", "member")
+    with conn.cursor() as cur:
+        cur.execute("SELECT status FROM webhook_deliveries WHERE id = %s", (row_id,))
+        assert cur.fetchone()[0] == "processed"
+
+
 def test_organization_member_removed_deletes_org_member(pg_conn, tenant_id):
     conn, state = pg_conn
     added_payload = {

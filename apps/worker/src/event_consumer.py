@@ -288,7 +288,16 @@ def _normalize_organization_event(payload: dict) -> dict | None:
     """Returns org_members column values for an `organization` event's member_added
     payload, or None if it can't be normalized (missing membership.user.login) -- also
     None (a no-op) for actions other than member_added/member_removed (member_invited/
-    renamed/deleted don't affect this table)."""
+    renamed/deleted don't affect this table).
+
+    `role`/`avatar_url` use `or` fallbacks, not `dict.get(key, default)` -- a payload
+    can carry an explicit JSON `null` for either (GitHub doesn't guarantee non-null
+    here any more than it guarantees `changes.permission` on a `member` event, see
+    `_normalize_member_event`'s docstring), and `.get(key, default)` only applies the
+    default when the key is *missing*, not when it's present with a null value. Both
+    columns are NOT NULL on org_members (migration 0040), so an unguarded None would
+    crash the insert and leave the stream entry unacked forever (CodeRabbit finding on
+    Collaborators PR 1's fix commit)."""
     membership = payload.get("membership") or {}
     user = membership.get("user") or {}
     login = user.get("login")
@@ -296,8 +305,8 @@ def _normalize_organization_event(payload: dict) -> dict | None:
         return None
     return {
         "login": login,
-        "avatar_url": user.get("avatar_url", ""),
-        "role": membership.get("role", "member"),
+        "avatar_url": user.get("avatar_url") or "",
+        "role": membership.get("role") or "member",
     }
 
 
