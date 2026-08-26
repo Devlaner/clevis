@@ -359,6 +359,15 @@ def _handle_reconcile_org_membership(conn: psycopg.Connection, job_id: int, payl
         log.warning("job %d hit a network error (attempt %d): %s", job_id, retry_count + 1, error)
         _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
         return
+    except membership_reconcile.RosterIncomplete as error:
+        # Never treat a truncated members/admins/outside_collaborators fetch as ground truth --
+        # reconcile_org_members would DELETE real members that just landed on a page this run
+        # didn't retrieve. Requeue and retry rather than mark_failed: this is very likely
+        # transient (a mid-fetch rate-limit reset, an org that just crossed _MAX_PAGES worth
+        # of members) and self-heals on the next attempt.
+        log.warning("job %d got an incomplete roster (attempt %d): %s", job_id, retry_count + 1, error)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
+        return
 
     two_factor_disabled = roster["two_factor_disabled_logins"]
     members = [

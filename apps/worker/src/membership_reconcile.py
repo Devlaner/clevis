@@ -24,6 +24,46 @@ _PER_PAGE = 100
 _MAX_RETRY_AFTER_SECONDS = 60
 
 
+class RosterIncomplete(Exception):
+    """Raised when _get_all_pages can't return the full page set -- either _MAX_PAGES was
+    exhausted while a next link still remained, or GitHub returned a non-list body for a page.
+
+    Distinct from httpx.HTTPStatusError/RequestError: those mean "the request failed", this
+    means "requests succeeded but the result is a silent truncation" -- reconcile_org_members
+    treats fetch_org_roster's member list as authoritative and DELETEs anyone not in it, so
+    returning a partial list here would look identical to real departures and wipe real
+    members. Must never be swallowed by the members/admins/outside_collaborators calls; the
+    2FA overlay call treats it the same as a failed overlay (best-effort, preserves existing
+    values) since it isn't destructive the same way.
+    """
+
+
+def _get_all_pages(client: httpx.Client, base: str, headers: dict, path: str, params: dict) -> list[dict]:
+    """Follows the Link: rel="next" header up to _MAX_PAGES -- an org roster can genuinely
+    exceed one page, unlike backfill.py's Events API call which self-limits to recent
+    activity. Raises httpx.HTTPStatusError/RequestError once _get_with_retry's own retries
+    are exhausted, or RosterIncomplete if the page set couldn't be fully retrieved; callers
+    decide requeue-vs-fail."""
+    results: list[dict] = []
+    url = f"{base}{path}"
+    page_params: dict | None = {**params, "per_page": _PER_PAGE}
+    for _ in range(_MAX_PAGES):
+        resp = _get_with_retry(client, url, headers, page_params)
+        resp.raise_for_status()
+        page = resp.json()
+        if not isinstance(page, list):
+            raise RosterIncomplete(f"expected a list page from {path!r}, got {type(page).__name__}")
+        results.extend(page)
+        next_link = resp.links.get("next")
+        if not next_link:
+            break
+        url = next_link["url"]
+        page_params = None  # already encoded in the next link's URL
+    else:
+        raise RosterIncomplete(f"{path!r} has more than _MAX_PAGES={_MAX_PAGES} pages of results")
+    return results
+
+
 def _is_secondary_rate_limit(resp: httpx.Response) -> bool:
     if resp.status_code != 403:
         return False
@@ -66,29 +106,6 @@ def _get_with_retry(client: httpx.Client, url: str, headers: dict, params: dict 
     raise RuntimeError("request loop exhausted without returning")
 
 
-def _get_all_pages(client: httpx.Client, base: str, headers: dict, path: str, params: dict) -> list[dict]:
-    """Follows the Link: rel="next" header up to _MAX_PAGES -- an org roster can genuinely
-    exceed one page, unlike backfill.py's Events API call which self-limits to recent
-    activity. Raises httpx.HTTPStatusError/RequestError once _get_with_retry's own retries
-    are exhausted; callers decide requeue-vs-fail."""
-    results: list[dict] = []
-    url = f"{base}{path}"
-    page_params: dict | None = {**params, "per_page": _PER_PAGE}
-    for _ in range(_MAX_PAGES):
-        resp = _get_with_retry(client, url, headers, page_params)
-        resp.raise_for_status()
-        page = resp.json()
-        if not isinstance(page, list):
-            break
-        results.extend(page)
-        next_link = resp.links.get("next")
-        if not next_link:
-            break
-        url = next_link["url"]
-        page_params = None  # already encoded in the next link's URL
-    return results
-
-
 def fetch_org_roster(client: httpx.Client, base: str, headers: dict, org_login: str) -> dict:
     """Returns {"members": [...], "two_factor_disabled_logins": set|None, "outside_logins": set}.
 
@@ -118,7 +135,7 @@ def fetch_org_roster(client: httpx.Client, base: str, headers: dict, org_login: 
     try:
         no_2fa_raw = _get_all_pages(client, base, headers, f"/orgs/{org_login}/members", {"filter": "2fa_disabled"})
         two_factor_disabled_logins = {m["login"] for m in no_2fa_raw if "login" in m}
-    except (httpx.HTTPStatusError, httpx.RequestError):
+    except (httpx.HTTPStatusError, httpx.RequestError, RosterIncomplete):
         two_factor_disabled_logins = None
 
     outside_raw = _get_all_pages(client, base, headers, f"/orgs/{org_login}/outside_collaborators", {})

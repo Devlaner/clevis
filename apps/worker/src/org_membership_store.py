@@ -186,6 +186,13 @@ def reconcile_repo_collaborator_outside_status(
     repo_collaborators rows (that's still the webhook path's job); a login this tenant has
     never seen via a `member` event has no row to update here regardless of what GitHub's
     roster says about it."""
+    if not member_logins:
+        # An empty roster is never legitimate (an org always has at least its owner as a
+        # member) -- bail out before the unconditional UPDATE below, which would otherwise mark
+        # every existing repo_collaborators row as outside on what's more likely a caller bug
+        # than a real 0-member org. reconcile_org_members already guards this same case for
+        # org_members; this mirrors that guard for repo_collaborators.
+        return
     cur.execute(
         "UPDATE repo_collaborators SET is_outside_collaborator = TRUE WHERE tenant_id = %(tenant_id)s",
         {"tenant_id": tenant_id},

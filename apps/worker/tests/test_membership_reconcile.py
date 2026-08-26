@@ -141,6 +141,60 @@ def test_get_all_pages_raises_after_exhausting_retries():
         membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
 
 
+def test_get_all_pages_raises_roster_incomplete_on_a_non_list_page():
+    # A malformed/non-list body (e.g. an error object GitHub returned with a 200) must never
+    # be silently treated as "zero results" -- that would look identical to a real empty page
+    # to reconcile_org_members, which deletes anyone not in the returned set.
+    client = _FakeClient({"/orgs/acme/members": [_FakeResponse({"message": "unexpected"})]})
+
+    with pytest.raises(membership_reconcile.RosterIncomplete):
+        membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
+
+
+def test_get_all_pages_raises_roster_incomplete_when_more_pages_remain_past_max_pages():
+    # _MAX_PAGES consecutive pages, each still pointing at a next page -- the loop must not
+    # silently stop and return a partial list once it runs out of iterations.
+    pages = [
+        _FakeResponse([_member(f"m{i}")], links={"next": {"url": f"https://api.github.com/orgs/acme/members?page={i + 1}"}})
+        for i in range(membership_reconcile._MAX_PAGES)
+    ]
+    client = _FakeClient({"/orgs/acme/members": pages})
+
+    with pytest.raises(membership_reconcile.RosterIncomplete):
+        membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
+
+
+def test_fetch_org_roster_2fa_overlay_is_none_when_incomplete():
+    client = _FakeClient(
+        {
+            "/orgs/acme/members": [
+                _FakeResponse([]),  # role=admin
+                _FakeResponse([_member("someone")]),  # role=all
+                _FakeResponse({"message": "unexpected"}),  # filter=2fa_disabled -- non-list page
+            ],
+            "/orgs/acme/outside_collaborators": [_FakeResponse([])],
+        }
+    )
+
+    roster = membership_reconcile.fetch_org_roster(client, "https://api.github.com", {}, "acme")
+
+    assert roster["two_factor_disabled_logins"] is None
+
+
+def test_fetch_org_roster_propagates_roster_incomplete_for_the_members_call():
+    # Unlike the 2FA overlay, an incomplete members/admins/outside_collaborators fetch must
+    # propagate -- it isn't best-effort, it's the data reconcile_org_members deletes against.
+    client = _FakeClient(
+        {
+            "/orgs/acme/members": [_FakeResponse({"message": "unexpected"})],
+            "/orgs/acme/outside_collaborators": [_FakeResponse([])],
+        }
+    )
+
+    with pytest.raises(membership_reconcile.RosterIncomplete):
+        membership_reconcile.fetch_org_roster(client, "https://api.github.com", {}, "acme")
+
+
 # ---------------------------------------------------------------------------
 # worker._handle_reconcile_org_membership: error paths, mirroring test_backfill.py's
 # _FakeConn/_FakeCursor + patch("worker.httpx.Client") convention.
@@ -227,6 +281,18 @@ def test_handler_requeues_on_network_error():
     with patch("worker.membership_reconcile.fetch_org_roster", side_effect=httpx.RequestError("connection reset")), patch(
         "worker.httpx.Client"
     ):
+        worker._handle_reconcile_org_membership(conn, 4, _payload(), 0)
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+
+
+def test_handler_requeues_on_roster_incomplete():
+    conn = _FakeConn()
+    with patch(
+        "worker.membership_reconcile.fetch_org_roster",
+        side_effect=membership_reconcile.RosterIncomplete("more than _MAX_PAGES pages"),
+    ), patch("worker.httpx.Client"):
         worker._handle_reconcile_org_membership(conn, 4, _payload(), 0)
 
     sql, params = conn._cursor.calls[0]
@@ -375,6 +441,15 @@ def test_handler_removes_a_member_no_longer_in_the_roster(pg_conn, tenant_id):
 
 
 def test_handler_empty_roster_does_not_wipe_existing_members(pg_conn, tenant_id):
+    with pg_conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute(
+            "INSERT INTO repo_collaborators (tenant_id, repo, login, permission, source, is_outside_collaborator, granted_at) "
+            "VALUES (%s, 'acme/empty-org-repo', 'reconcile-survivor', 'push', 'direct', FALSE, %s) "
+            "ON CONFLICT (tenant_id, repo, login) DO UPDATE SET is_outside_collaborator = FALSE",
+            (tenant_id, datetime.now(timezone.utc)),
+        )
+
     seeded = {
         "members": [{"login": "reconcile-survivor", "avatar_url": "a", "role": "member"}],
         "two_factor_disabled_logins": set(),
@@ -389,10 +464,21 @@ def test_handler_empty_roster_does_not_wipe_existing_members(pg_conn, tenant_id)
     # A genuinely empty roster from the GitHub API is treated as a no-op, not "remove
     # everyone" -- see org_membership_store.reconcile_org_members's docstring for why (an
     # org always has at least one owner, so an empty response is almost certainly a
-    # transient upstream problem, not a real zero-member org).
+    # transient upstream problem, not a real zero-member org). Same posture for
+    # reconcile_repo_collaborator_outside_status: an empty member_logins set must not mark
+    # every existing repo_collaborators row as outside.
     with patch("worker.membership_reconcile.fetch_org_roster", return_value=empty), patch("worker.httpx.Client"):
         worker._handle_reconcile_org_membership(pg_conn, 111, _payload_for(tenant_id, "empty-org"), 0)
     assert len(_org_members(pg_conn, tenant_id)) == 1
+
+    with pg_conn.cursor() as cur:
+        cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        cur.execute(
+            "SELECT is_outside_collaborator FROM repo_collaborators WHERE tenant_id = %s AND login = 'reconcile-survivor'",
+            (tenant_id,),
+        )
+        (is_outside,) = cur.fetchone()
+    assert is_outside is False
 
 
 def test_handler_backfills_is_outside_collaborator_on_existing_repo_collaborators(pg_conn, tenant_id):
@@ -422,8 +508,12 @@ def test_handler_backfills_is_outside_collaborator_on_existing_repo_collaborator
 
     with pg_conn.cursor() as cur:
         cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+        # Scoped to this test's own repo, not "every row for this tenant" -- tenant_id is a
+        # shared get-or-create fixture across this whole test file (real commits, not rolled
+        # back), so other tests' seeded repo_collaborators rows for other repos coexist here.
         cur.execute(
-            "SELECT login, is_outside_collaborator FROM repo_collaborators WHERE tenant_id = %s ORDER BY login",
+            "SELECT login, is_outside_collaborator FROM repo_collaborators "
+            "WHERE tenant_id = %s AND repo = 'acme/widgets' ORDER BY login",
             (tenant_id,),
         )
         rows = cur.fetchall()
