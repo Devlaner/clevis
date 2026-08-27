@@ -19,38 +19,47 @@ import time
 
 import httpx
 
-_MAX_PAGES = 20
 _PER_PAGE = 100
 _MAX_RETRY_AFTER_SECONDS = 60
 
 
 class RosterIncomplete(Exception):
-    """Raised when _get_all_pages can't return the full page set -- either _MAX_PAGES was
-    exhausted while a next link still remained, or GitHub returned a non-list body for a page.
+    """Raised when _get_all_pages can't return the full page set -- GitHub's pagination looped
+    back to an already-fetched URL, a page body wasn't a list, or a page body wasn't valid JSON.
 
     Distinct from httpx.HTTPStatusError/RequestError: those mean "the request failed", this
-    means "requests succeeded but the result is a silent truncation" -- reconcile_org_members
-    treats fetch_org_roster's member list as authoritative and DELETEs anyone not in it, so
-    returning a partial list here would look identical to real departures and wipe real
-    members. Must never be swallowed by the members/admins/outside_collaborators calls; the
-    2FA overlay call treats it the same as a failed overlay (best-effort, preserves existing
-    values) since it isn't destructive the same way.
+    means "requests succeeded but the result can't be trusted as complete" --
+    reconcile_org_members treats fetch_org_roster's member list as authoritative and DELETEs
+    anyone not in it, so returning a partial list here would look identical to real departures
+    and wipe real members. Must never be swallowed by the members/admins/outside_collaborators
+    calls; the 2FA overlay call treats it the same as a failed overlay (best-effort, preserves
+    existing values) since it isn't destructive the same way.
     """
 
 
 def _get_all_pages(client: httpx.Client, base: str, headers: dict, path: str, params: dict) -> list[dict]:
-    """Follows the Link: rel="next" header up to _MAX_PAGES -- an org roster can genuinely
-    exceed one page, unlike backfill.py's Events API call which self-limits to recent
-    activity. Raises httpx.HTTPStatusError/RequestError once _get_with_retry's own retries
-    are exhausted, or RosterIncomplete if the page set couldn't be fully retrieved; callers
-    decide requeue-vs-fail."""
+    """Follows the Link: rel="next" header until it runs out -- an org roster can genuinely
+    span far more pages than backfill.py's self-limited Events API call, so this doesn't cap
+    at some fixed page count (a real large org would just permanently fail to reconcile).
+    Instead it tracks visited URLs and raises RosterIncomplete if pagination ever loops back to
+    one -- the only page-count anomaly that's actually a bug, not just "a big org". Also raises
+    RosterIncomplete for a non-list or non-JSON page body. Raises
+    httpx.HTTPStatusError/RequestError once _get_with_retry's own retries are exhausted;
+    callers decide requeue-vs-fail for either exception."""
     results: list[dict] = []
     url = f"{base}{path}"
     page_params: dict | None = {**params, "per_page": _PER_PAGE}
-    for _ in range(_MAX_PAGES):
+    seen_urls: set[str] = set()
+    while True:
+        if url in seen_urls:
+            raise RosterIncomplete(f"{path!r} pagination looped back to an already-fetched page")
+        seen_urls.add(url)
         resp = _get_with_retry(client, url, headers, page_params)
         resp.raise_for_status()
-        page = resp.json()
+        try:
+            page = resp.json()
+        except ValueError as error:
+            raise RosterIncomplete(f"non-JSON page body from {path!r}: {error}") from error
         if not isinstance(page, list):
             raise RosterIncomplete(f"expected a list page from {path!r}, got {type(page).__name__}")
         results.extend(page)
@@ -59,8 +68,6 @@ def _get_all_pages(client: httpx.Client, base: str, headers: dict, path: str, pa
             break
         url = next_link["url"]
         page_params = None  # already encoded in the next link's URL
-    else:
-        raise RosterIncomplete(f"{path!r} has more than _MAX_PAGES={_MAX_PAGES} pages of results")
     return results
 
 

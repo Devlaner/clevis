@@ -151,14 +151,40 @@ def test_get_all_pages_raises_roster_incomplete_on_a_non_list_page():
         membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
 
 
-def test_get_all_pages_raises_roster_incomplete_when_more_pages_remain_past_max_pages():
-    # _MAX_PAGES consecutive pages, each still pointing at a next page -- the loop must not
-    # silently stop and return a partial list once it runs out of iterations.
+def test_get_all_pages_follows_more_pages_than_the_old_fixed_cap_used_to_allow():
+    # A large org's roster can genuinely span more than 20 pages (2000+ members) -- pagination
+    # must keep following next links rather than giving up at some fixed page count.
+    page_count = 25
     pages = [
-        _FakeResponse([_member(f"m{i}")], links={"next": {"url": f"https://api.github.com/orgs/acme/members?page={i + 1}"}})
-        for i in range(membership_reconcile._MAX_PAGES)
+        _FakeResponse(
+            [_member(f"m{i}")],
+            links={"next": {"url": f"https://api.github.com/orgs/acme/members?page={i + 2}"}} if i < page_count - 1 else None,
+        )
+        for i in range(page_count)
     ]
     client = _FakeClient({"/orgs/acme/members": pages})
+
+    results = membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
+
+    assert [m["login"] for m in results] == [f"m{i}" for i in range(page_count)]
+
+
+def test_get_all_pages_raises_roster_incomplete_on_a_pagination_loop():
+    # A next link pointing back at an already-fetched URL is a real bug (GitHub misbehaving,
+    # or a stub in a test) -- must be detected and raised, not followed forever.
+    looping_url = "https://api.github.com/orgs/acme/members?page=2"
+    page1 = _FakeResponse([_member("a")], links={"next": {"url": looping_url}})
+    page2 = _FakeResponse([_member("b")], links={"next": {"url": looping_url}})
+    client = _FakeClient({"/orgs/acme/members": [page1, page2]})
+
+    with pytest.raises(membership_reconcile.RosterIncomplete):
+        membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
+
+
+def test_get_all_pages_raises_roster_incomplete_on_invalid_json():
+    bad_json = _FakeResponse([])
+    bad_json.json = MagicMock(side_effect=ValueError("Expecting value: line 1 column 1 (char 0)"))
+    client = _FakeClient({"/orgs/acme/members": [bad_json]})
 
     with pytest.raises(membership_reconcile.RosterIncomplete):
         membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
@@ -291,11 +317,11 @@ def test_handler_requeues_on_roster_incomplete():
     conn = _FakeConn()
     with patch(
         "worker.membership_reconcile.fetch_org_roster",
-        side_effect=membership_reconcile.RosterIncomplete("more than _MAX_PAGES pages"),
+        side_effect=membership_reconcile.RosterIncomplete("pagination looped back to an already-fetched page"),
     ), patch("worker.httpx.Client"):
         worker._handle_reconcile_org_membership(conn, 4, _payload(), 0)
 
-    sql, params = conn._cursor.calls[0]
+    sql, _params = conn._cursor.calls[0]
     assert "status='queued'" in sql
 
 
