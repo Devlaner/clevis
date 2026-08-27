@@ -56,6 +56,35 @@ def _insert_org_member(db, tenant_id, *, login, avatar_url="", role="member"):
     db.commit()
 
 
+def _seed_membership_cursor(db, tenant_id, org_login="acme"):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO org_membership_sync_cursors (tenant_id, org_login, last_synced_at) "
+            "VALUES (:tenant_id, :org_login, :last_synced_at)"
+        ),
+        {"tenant_id": tenant_id, "org_login": org_login, "last_synced_at": datetime.now(timezone.utc)},
+    )
+    db.commit()
+
+
+def _seed_activity_cursor(db, tenant_id, account_login="acme", account_type="Organization"):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO activity_sync_cursors (tenant_id, account_login, account_type, last_synced_at) "
+            "VALUES (:tenant_id, :account_login, :account_type, :last_synced_at)"
+        ),
+        {"tenant_id": tenant_id, "account_login": account_login, "account_type": account_type, "last_synced_at": datetime.now(timezone.utc)},
+    )
+    db.commit()
+
+
+def _seed_both_cursors(db, tenant_id):
+    _seed_membership_cursor(db, tenant_id)
+    _seed_activity_cursor(db, tenant_id)
+
+
 def _insert_push_event(db, tenant_id, *, repo, actor, occurred_at, delivery_id):
     db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
     db.execute(
@@ -166,6 +195,7 @@ def test_permission_audit_outsider_forbidden(db):
 
 
 def test_inactive_members_from_ingested_db_flags_member_with_no_push_events(db, acme_org_with_installation):
+    _seed_both_cursors(db, acme_org_with_installation.tenant_id)
     _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="member")
     app = FastAPI()
     app.include_router(collab_router)
@@ -185,6 +215,7 @@ def test_inactive_members_from_ingested_db_flags_member_with_no_push_events(db, 
 
 
 def test_inactive_members_from_ingested_db_excludes_recently_active_member(db, acme_org_with_installation):
+    _seed_both_cursors(db, acme_org_with_installation.tenant_id)
     _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="member")
     _insert_push_event(
         db,
@@ -206,6 +237,7 @@ def test_inactive_members_from_ingested_db_excludes_recently_active_member(db, a
 
 
 def test_inactive_members_from_ingested_db_flags_member_with_only_stale_push(db, acme_org_with_installation):
+    _seed_both_cursors(db, acme_org_with_installation.tenant_id)
     _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="member")
     _insert_push_event(
         db,
@@ -235,6 +267,7 @@ def test_inactive_members_from_ingested_db_uses_most_recent_push_across_all_repo
     # considers every repo with a push event -- a recent push to a second repo must still
     # exclude the member even though their first/older repo alone would flag them.
     tenant_id = acme_org_with_installation.tenant_id
+    _seed_both_cursors(db, tenant_id)
     _insert_org_member(db, tenant_id, login="alice", role="member")
     _insert_push_event(
         db, tenant_id, repo="acme/old-repo", actor="alice", occurred_at=datetime.now(timezone.utc) - timedelta(days=90), delivery_id="d3"
@@ -251,6 +284,38 @@ def test_inactive_members_from_ingested_db_uses_most_recent_push_across_all_repo
 
     assert resp.status_code == 200
     assert resp.json()["members"] == []
+
+
+def test_inactive_members_falls_back_to_live_when_only_one_cursor_has_synced(db, acme_org_with_installation):
+    # CodeRabbit finding on PR #355: this endpoint needs BOTH org_members (membership cursor)
+    # and repo_events (activity cursor) to be trustworthy -- seeding only one must still fall
+    # back to the live path rather than serve a half-ingested answer.
+    _seed_membership_cursor(db, acme_org_with_installation.tenant_id)
+    _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="member")
+
+    def _paginated_side_effect(path, params=None):
+        if path == "/orgs/acme/members" and params == {"role": "admin"}:
+            return []
+        if path == "/orgs/acme/members":
+            return [{"login": "alice", "avatar_url": ""}]
+        if path == "/orgs/acme/repos":
+            return [{"name": "api"}]
+        return []
+
+    app = FastAPI()
+    app.include_router(collab_router)
+    app.dependency_overrides[require_auth] = lambda: _ADMIN
+    app.dependency_overrides[get_db] = lambda: db
+
+    with patch("src.routers.collab.resolve_org_token", return_value="ghp_test"), patch(
+        "src.routers.collab.GitHubClient"
+    ) as mock_client:
+        mock_client.return_value.request_paginated.side_effect = _paginated_side_effect
+        mock_client.return_value.request.return_value = []
+        resp = TestClient(app).get("/github/orgs/acme/inactive-members?days=30")
+
+    assert resp.status_code == 200
+    mock_client.return_value.request_paginated.assert_any_call("/orgs/acme/members", params={"role": "admin"})
 
 
 def test_inactive_members_no_token_returns_400(client):

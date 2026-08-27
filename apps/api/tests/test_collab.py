@@ -65,6 +65,18 @@ def collab_client(db, acme_org):
     return TestClient(app)
 
 
+def _seed_membership_cursor(db, tenant_id, org_login="acme"):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO org_membership_sync_cursors (tenant_id, org_login, last_synced_at) "
+            "VALUES (:tenant_id, :org_login, :last_synced_at)"
+        ),
+        {"tenant_id": tenant_id, "org_login": org_login, "last_synced_at": datetime.now(timezone.utc)},
+    )
+    db.commit()
+
+
 def _insert_org_member(db, tenant_id, *, login, avatar_url="", role="member", two_factor_enabled=None):
     db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
     db.execute(
@@ -229,6 +241,7 @@ def test_members_2fa_overlay_degrades_gracefully_on_network_error(collab_client)
 
 
 def test_members_reads_from_ingested_org_members_when_connected(db, acme_org_with_installation):
+    _seed_membership_cursor(db, acme_org_with_installation.tenant_id)
     _insert_org_member(
         db, acme_org_with_installation.tenant_id, login="alice", role="admin", two_factor_enabled=True
     )
@@ -255,6 +268,7 @@ def test_members_reads_from_ingested_org_members_when_connected(db, acme_org_wit
 
 
 def test_members_from_ingested_db_respects_role_filter(db, acme_org_with_installation):
+    _seed_membership_cursor(db, acme_org_with_installation.tenant_id)
     _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="admin")
     _insert_org_member(db, acme_org_with_installation.tenant_id, login="bob", role="member")
     app = FastAPI()
@@ -272,6 +286,7 @@ def test_members_from_ingested_db_respects_role_filter(db, acme_org_with_install
 def test_members_from_ingested_db_overlay_unavailable_when_never_polled(db, acme_org_with_installation):
     # two_factor_enabled is NULL on every row until the reconciliation poll's first tick --
     # a brand-new installation whose only org_members rows came from the webhook path.
+    _seed_membership_cursor(db, acme_org_with_installation.tenant_id)
     _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="member", two_factor_enabled=None)
     app = FastAPI()
     app.include_router(collab_router)
@@ -284,6 +299,48 @@ def test_members_from_ingested_db_overlay_unavailable_when_never_polled(db, acme
     body = resp.json()
     assert body["two_factor_overlay_available"] is False
     assert body["members"][0]["two_factor_enabled"] is None
+
+
+def test_members_from_ingested_db_overlay_unavailable_when_partially_polled(db, acme_org_with_installation):
+    # CodeRabbit finding on PR #355: one member with a known 2FA reading and another with NULL
+    # (e.g. added via webhook after the last successful reconciliation run) must report the
+    # overlay as unavailable overall, not merely "some data exists" -- the UI's "Members without
+    # 2FA: N" footer would otherwise undercount without any indication the count is incomplete.
+    _seed_membership_cursor(db, acme_org_with_installation.tenant_id)
+    _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="member", two_factor_enabled=False)
+    _insert_org_member(db, acme_org_with_installation.tenant_id, login="bob", role="member", two_factor_enabled=None)
+    app = FastAPI()
+    app.include_router(collab_router)
+    app.dependency_overrides[require_auth] = lambda: _ADMIN
+    app.dependency_overrides[get_db] = lambda: db
+
+    resp = TestClient(app).get("/github/orgs/acme/members")
+
+    assert resp.status_code == 200
+    assert resp.json()["two_factor_overlay_available"] is False
+
+
+def test_members_falls_back_to_live_when_installation_connected_but_never_synced(db, acme_org_with_installation):
+    # CodeRabbit finding on PR #355: installation_id presence alone doesn't prove the
+    # reconciliation poll has ever completed -- org_members could still be empty (or stale)
+    # right after connecting. Must fall back to the live path until org_membership_sync_cursors
+    # actually has a row, not just because an installation exists.
+    _insert_org_member(db, acme_org_with_installation.tenant_id, login="alice", role="member")
+    app = FastAPI()
+    app.include_router(collab_router)
+    app.dependency_overrides[require_auth] = lambda: _ADMIN
+    app.dependency_overrides[get_db] = lambda: db
+
+    with patch("src.routers.collab.resolve_org_token", return_value="ghp_test"), patch(
+        "src.routers.collab.GitHubClient"
+    ) as mock_client:
+        mock_client.return_value.request_paginated.side_effect = [[_BOB], [_BOB, _CAROL], []]
+        resp = TestClient(app).get("/github/orgs/acme/members")
+
+    assert resp.status_code == 200
+    mock_client.assert_called_once()
+    logins = {m["login"] for m in resp.json()["members"]}
+    assert logins == {"bob", "carol"}
 
 
 def test_members_falls_back_to_client_supplied_token_header_when_no_installation(collab_client):

@@ -88,6 +88,37 @@ def _installation_connected(db: Session, ctx: OrgContext) -> bool:
     return installation is not None and installation.installation_id is not None
 
 
+def _org_members_synced(db: Session, ctx: OrgContext) -> bool:
+    """True only once org_membership_sync_cursors has a row for this tenant -- i.e. at least
+    one reconciliation poll has actually completed, not merely that an installation exists.
+    Installation presence alone isn't enough: right after connecting, org_members can still be
+    empty (only the webhook path may have touched it) until the poll's first sweep tick runs
+    (up to membership_reconcile_poll_seconds, default 15 minutes) -- reading org_members as
+    authoritative in that window would show 0 members for an org that actually has some, which
+    is actively misleading rather than merely stale (CodeRabbit finding on PR #355). A cursor
+    row is only ever written in the same transaction as a successful reconcile_org_members call
+    (worker.py's _handle_reconcile_org_membership), so its presence reliably means the table is
+    now trustworthy."""
+    if not _installation_connected(db, ctx):
+        return False
+    row = db.execute(
+        text("SELECT 1 FROM org_membership_sync_cursors WHERE tenant_id = :tenant_id"), {"tenant_id": ctx.org.tenant_id}
+    ).first()
+    return row is not None
+
+
+def _activity_synced(db: Session, ctx: OrgContext) -> bool:
+    """Same reasoning as _org_members_synced, but gates inactive_members' repo_events read on
+    activity_sync_cursors instead -- the S5 backfill/gap-heal cursor, same "row exists only
+    after a successful sync" invariant."""
+    if not _installation_connected(db, ctx):
+        return False
+    row = db.execute(
+        text("SELECT 1 FROM activity_sync_cursors WHERE tenant_id = :tenant_id"), {"tenant_id": ctx.org.tenant_id}
+    ).first()
+    return row is not None
+
+
 def _ingested_org_members(db: Session, tenant_id: int, role: Literal["all", "member", "admin"]) -> list[OrgMemberRow]:
     query = db.query(OrgMemberRow).filter(OrgMemberRow.tenant_id == tenant_id)
     if role != "all":
@@ -103,7 +134,7 @@ def list_members(
     db: Session = Depends(get_db),
     x_github_token: str | None = Header(default=None),
 ):
-    if _installation_connected(db, ctx):
+    if _org_members_synced(db, ctx):
         rows = _ingested_org_members(db, ctx.org.tenant_id, role)
         members = [
             OrgMember(
@@ -121,11 +152,14 @@ def list_members(
         return OrgMembersResponse(
             org=org_login,
             members=members,
-            # True iff at least one member has an actual (non-None) 2FA reading -- a brand-new
-            # org-kind tenant can have org_members rows from the webhook path before its first
-            # reconciliation poll tick has run, so two_factor_enabled may still be NULL on every
-            # row for a short window after connecting.
-            two_factor_overlay_available=any(m.two_factor_enabled is not None for m in members),
+            # True only if EVERY member has an actual (non-None) 2FA reading -- the UI's
+            # "Members without 2FA: N" footer (members/page.tsx) is gated on this flag and
+            # counts strictly `two_factor_enabled is False`, so a partial reading (some members
+            # polled, some not -- possible here since COALESCE preserves a per-member value
+            # across reconciliation runs, unlike the live path's single all-or-nothing overlay
+            # call) would silently undercount rather than honestly report "not fully known"
+            # (CodeRabbit finding on PR #355).
+            two_factor_overlay_available=bool(members) and all(m.two_factor_enabled is not None for m in members),
         )
 
     token = _resolve_token(db, ctx, org_login, x_github_token)
@@ -443,7 +477,10 @@ def inactive_members(
     db: Session = Depends(get_db),
     x_github_token: str | None = Header(default=None),
 ):
-    if _installation_connected(db, ctx):
+    # Needs both cursors: the member/role list comes from org_members (_org_members_synced),
+    # last-activity comes from repo_events (_activity_synced) -- either one not yet having
+    # completed its first sync means this endpoint can't yet trust the ingested tables.
+    if _org_members_synced(db, ctx) and _activity_synced(db, ctx):
         return _inactive_members_from_ingested(db, ctx, org_login, days)
 
     token = _resolve_token(db, ctx, org_login, x_github_token)
