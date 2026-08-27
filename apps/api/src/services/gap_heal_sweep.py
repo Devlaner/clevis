@@ -21,9 +21,12 @@ from sqlalchemy.orm import Session
 from src.core.app_config import get_config
 from src.core.db import set_session_tenant
 from src.services import backfill_service
+from src.services.sweep_lock import try_acquire_sweep_slot
 from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token, resolve_personal_token
 
 logger = logging.getLogger(__name__)
+
+_JOB_TYPE = "github.backfill_repo_events"
 
 
 def _read_stale_hours() -> int:
@@ -46,11 +49,11 @@ def _has_active_backfill_job(db: Session, tenant_id: int) -> bool:
     job_repo.enqueue always writes tenant_id as a JSON number under this exact job_type."""
     row = db.execute(
         text(
-            "SELECT 1 FROM jobs WHERE job_type = 'github.backfill_repo_events' "
+            "SELECT 1 FROM jobs WHERE job_type = :job_type "
             "AND status IN ('queued', 'processing') "
             "AND (payload::jsonb ->> 'tenant_id')::int = :tenant_id LIMIT 1"
         ),
-        {"tenant_id": tenant_id},
+        {"job_type": _JOB_TYPE, "tenant_id": tenant_id},
     ).fetchone()
     return row is not None
 
@@ -81,7 +84,14 @@ def run_gap_heal_sweep(db: Session) -> None:
         account_login, account_type, last_synced_at = cursor_row
         if last_synced_at is not None and last_synced_at >= cutoff:
             continue
+        # Acquired before the active-job check (not after) so the whole check-then-enqueue
+        # window for this tenant is mutually exclusive across concurrent sweep passes (e.g.
+        # two API replicas) -- a losing process skips this tenant entirely this tick rather
+        # than re-deriving a now-stale "no active job" answer. See sweep_lock.py.
+        if not try_acquire_sweep_slot(db, _JOB_TYPE, tenant_id):
+            continue
         if _has_active_backfill_job(db, tenant_id):
+            db.commit()  # nothing to persist; releases the advisory lock promptly
             continue
 
         try:
@@ -95,11 +105,13 @@ def run_gap_heal_sweep(db: Session) -> None:
                 db, tenant_id=tenant_id, account_login=account_login, account_type=account_type, token=token
             )
         except NoGitHubTokenAvailable as exc:
+            db.commit()  # nothing to persist; releases the advisory lock promptly
             logger.warning("gap-heal sweep skipping %s (tenant %d): %s", account_login, tenant_id, exc)
         except Exception:
             # A DB-level error here (e.g. from job_repo.enqueue's own commit) would leave this
             # shared Session's transaction aborted -- roll back so the sweep can keep going for
-            # the remaining tenants instead of every subsequent iteration failing too. Same
-            # posture as installations.py's _enqueue_backfill_best_effort.
+            # the remaining tenants instead of every subsequent iteration failing too (also
+            # releases the advisory lock). Same posture as installations.py's
+            # _enqueue_backfill_best_effort.
             db.rollback()
             logger.exception("gap-heal sweep failed to enqueue a backfill for %s (tenant %d)", account_login, tenant_id)

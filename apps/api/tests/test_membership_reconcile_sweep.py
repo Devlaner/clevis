@@ -93,6 +93,27 @@ def test_sweep_does_not_double_enqueue_while_a_reconcile_job_is_still_active(db)
     assert len(_reconcile_jobs(db)) == 1
 
 
+def test_sweep_skips_a_tenant_whose_lock_is_held_by_another_connection(db, _engine):
+    # Regression test: the sweep's check-then-enqueue is only safe within a single sweep
+    # pass. Two concurrent passes (e.g. two API replicas) could both see "no active job"
+    # before either commits and both enqueue -- proven here with a second real connection
+    # holding the (job_type, tenant_id) advisory lock for the whole call, which the running
+    # sweep must lose and skip this tenant entirely (not just avoid enqueueing twice within
+    # one connection, which the dedupe test above already covers).
+    org = org_repo.get_or_create(db, github_login="acme-reconcile-locked")
+
+    with _engine.connect() as other_conn:
+        other_conn.begin()
+        other_conn.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:job_type), :tenant_id)"),
+            {"job_type": "github.reconcile_org_membership", "tenant_id": org.tenant_id},
+        )
+        with patch("src.services.membership_reconcile_sweep.resolve_org_token", return_value="tok"):
+            run_membership_reconcile_sweep(db)
+
+    assert _reconcile_jobs(db) == []
+
+
 def test_sweep_re_enqueues_once_the_active_job_reaches_a_terminal_state(db):
     org_repo.get_or_create(db, github_login="acme-reconcile-retry")
 

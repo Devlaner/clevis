@@ -21,9 +21,12 @@ from sqlalchemy.orm import Session
 from src.core.app_config import get_config
 from src.core.db import set_session_tenant
 from src.services import membership_reconcile_service
+from src.services.sweep_lock import try_acquire_sweep_slot
 from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token
 
 logger = logging.getLogger(__name__)
+
+_JOB_TYPE = "github.reconcile_org_membership"
 
 
 def _read_stale_hours() -> int:
@@ -41,11 +44,11 @@ def _has_active_reconcile_job(db: Session, tenant_id: int) -> bool:
     still look stale on every subsequent sweep tick and get re-enqueued repeatedly."""
     row = db.execute(
         text(
-            "SELECT 1 FROM jobs WHERE job_type = 'github.reconcile_org_membership' "
+            "SELECT 1 FROM jobs WHERE job_type = :job_type "
             "AND status IN ('queued', 'processing') "
             "AND (payload::jsonb ->> 'tenant_id')::int = :tenant_id LIMIT 1"
         ),
-        {"tenant_id": tenant_id},
+        {"job_type": _JOB_TYPE, "tenant_id": tenant_id},
     ).fetchone()
     return row is not None
 
@@ -76,17 +79,26 @@ def run_membership_reconcile_sweep(db: Session) -> None:
             (last_synced_at,) = cursor_row
             if last_synced_at is not None and last_synced_at >= cutoff:
                 continue
+        # Acquired before the active-job check (not after) so the whole check-then-enqueue
+        # window for this tenant is mutually exclusive across concurrent sweep passes (e.g.
+        # two API replicas) -- a losing process skips this tenant entirely this tick rather
+        # than re-deriving a now-stale "no active job" answer. See sweep_lock.py.
+        if not try_acquire_sweep_slot(db, _JOB_TYPE, tenant_id):
+            continue
         if _has_active_reconcile_job(db, tenant_id):
+            db.commit()  # nothing to persist; releases the advisory lock promptly
             continue
 
         try:
             token = resolve_org_token(db, org_id=org_id, account_login=org_login, client_token=None)
             membership_reconcile_service.enqueue(db, tenant_id=tenant_id, org_login=org_login, token=token)
         except NoGitHubTokenAvailable as exc:
+            db.commit()  # nothing to persist; releases the advisory lock promptly
             logger.warning("membership-reconcile sweep skipping %s (tenant %d): %s", org_login, tenant_id, exc)
         except Exception:
             # A DB-level error here would leave this shared Session's transaction aborted --
-            # roll back so the sweep can keep going for the remaining tenants. Same posture
-            # as gap_heal_sweep.py's own except-Exception branch.
+            # roll back so the sweep can keep going for the remaining tenants (also releases
+            # the advisory lock). Same posture as gap_heal_sweep.py's own except-Exception
+            # branch.
             db.rollback()
             logger.exception("membership-reconcile sweep failed to enqueue for %s (tenant %d)", org_login, tenant_id)
