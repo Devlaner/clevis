@@ -77,8 +77,8 @@ def _security_connected_tenant(db: Session, user_id: int, owner: str) -> int | N
 
 def _open_alerts_by_repo(db: Session, tenant_id: int, repo_full_names: list[str]) -> dict[str, list]:
     """One query for every scanned repo's dependabot/code_scanning security_alerts rows
-    (every state, not just open -- see _dependabot_and_code_scanning_from_aggregate for
-    why), not one query per repo -- also sidesteps ThreadPoolExecutor entirely: _repo_row
+    (every state, not just open -- see _dependabot_from_aggregate for why), not one query
+    per repo -- also sidesteps ThreadPoolExecutor entirely: _repo_row
     below runs concurrently across repos (existing pattern), and a SQLAlchemy Session
     isn't safe to share across threads, so this pre-fetches everything up front on the
     request thread and hands each worker a plain dict slice instead of `db` itself."""
@@ -99,26 +99,35 @@ def _open_alerts_by_repo(db: Session, tenant_id: int, repo_full_names: list[str]
     return by_repo
 
 
-def _dependabot_and_code_scanning_from_aggregate(alert_rows: list) -> dict:
-    """dependabot/code_scanning dimensions from security_alerts (post-S6 PR 3) instead of
-    two live GitHub calls per repo. dependabot_enabled considers every state (open,
-    dismissed, fixed, ...) -- a repo whose only Dependabot alerts have all been dismissed
-    still has Dependabot enabled, so restricting this to state=="open" would wrongly read
-    as disabled (CodeRabbit finding on PR #352). critical_count/high_count/code_scanning_clear
-    only count 'open' rows, since only a currently-open alert is a live finding.
+def _dependabot_from_aggregate(dependabot_rows: list) -> dict:
+    """dependabot dimension from security_alerts rows already filtered to kind=='dependabot'
+    (post-S6 PR 3) instead of a live GitHub call. Considers every state (open, dismissed,
+    fixed, ...) for dependabot_enabled -- a repo whose only Dependabot alerts have all been
+    dismissed still has Dependabot enabled, so restricting this to state=="open" would wrongly
+    read as disabled (CodeRabbit finding on PR #352). critical_count/high_count only count
+    'open' rows, since only a currently-open alert is a live finding.
 
-    Caller (_repo_row) only reaches this with a non-empty alert_rows -- a repo with zero ingested
-    rows falls back to the live GitHub path instead (CodeRabbit finding on PR #356), since an
-    empty security_alerts result is ambiguous (genuinely no alerts ever vs. not-yet-ingested) and
-    security_alerts has no completeness cursor to tell the two apart."""
-    dependabot_rows = [r for r in alert_rows if r.kind == "dependabot"]
-    open_dependabot_rows = [r for r in dependabot_rows if r.state == "open"]
+    Caller (_repo_row) only reaches this with a non-empty dependabot_rows -- a repo with zero
+    ingested dependabot rows falls back to the live GitHub path instead (CodeRabbit finding on
+    PR #356), since an empty result is ambiguous (genuinely no alerts ever vs. not-yet-ingested)
+    and security_alerts has no completeness cursor to tell the two apart. Gated independently
+    of code_scanning rows -- one kind can be ingested for a repo while the other isn't yet
+    (CodeRabbit finding on PR #356, round 2), so trusting the aggregate for one kind says
+    nothing about completeness for the other."""
+    open_rows = [r for r in dependabot_rows if r.state == "open"]
     return {
         "dependabot_enabled": len(dependabot_rows) > 0,
-        "critical_count": sum(1 for r in open_dependabot_rows if r.severity == "critical"),
-        "high_count": sum(1 for r in open_dependabot_rows if r.severity == "high"),
-        "code_scanning_clear": not any(r.kind == "code_scanning" and r.state == "open" for r in alert_rows),
+        "critical_count": sum(1 for r in open_rows if r.severity == "critical"),
+        "high_count": sum(1 for r in open_rows if r.severity == "high"),
     }
+
+
+def _code_scanning_clear_from_aggregate(code_scanning_rows: list) -> bool:
+    """code_scanning dimension from security_alerts rows already filtered to
+    kind=='code_scanning'. Same completeness/per-kind reasoning as
+    _dependabot_from_aggregate's docstring -- caller only reaches this with a non-empty
+    code_scanning_rows."""
+    return not any(r.state == "open" for r in code_scanning_rows)
 
 
 def _repo_row(client: GitHubClient, owner: str, repo: dict, alerts_by_repo: dict[str, list] | None = None) -> RepoSecurityRow:
@@ -152,17 +161,22 @@ def _repo_row(client: GitHubClient, owner: str, repo: dict, alerts_by_repo: dict
     alerts_source = "github"
     # security_alerts has no backfill/sync-cursor -- only webhook events populate it, so a repo
     # with zero rows here is ambiguous ("genuinely no alerts ever" vs. "not yet ingested"), same
-    # completeness gap as personal_secret_scanning (CodeRabbit finding on PR #356). Checked
-    # per-repo, not once for the whole tenant: one repo can have real ingested rows while another
-    # (e.g. added to the org after this tenant connected) has none yet.
+    # completeness gap as personal_secret_scanning (CodeRabbit finding on PR #356). Gated
+    # per-repo AND per-kind, not once for the whole tenant or the whole repo: one repo can have
+    # real ingested rows while another has none yet, and within one repo a dependabot_alert
+    # webhook can have arrived while no code_scanning_alert webhook ever has (or vice versa) --
+    # trusting the aggregate for one kind says nothing about completeness for the other
+    # (CodeRabbit finding on PR #356, round 2).
     repo_alert_rows = alerts_by_repo.get(f"{owner}/{name}", []) if alerts_by_repo is not None else []
-    if repo_alert_rows:
+    dependabot_alert_rows = [r for r in repo_alert_rows if r.kind == "dependabot"]
+    code_scanning_alert_rows = [r for r in repo_alert_rows if r.kind == "code_scanning"]
+
+    if dependabot_alert_rows:
         alerts_source = "aggregate"
-        aggregate = _dependabot_and_code_scanning_from_aggregate(repo_alert_rows)
+        aggregate = _dependabot_from_aggregate(dependabot_alert_rows)
         dependabot_enabled = aggregate["dependabot_enabled"]
         critical_count = aggregate["critical_count"]
         high_count = aggregate["high_count"]
-        code_scanning_clear = aggregate["code_scanning_clear"]
     else:
         dependabot_enabled = False
         critical_count = 0
@@ -188,6 +202,10 @@ def _repo_row(client: GitHubClient, owner: str, repo: dict, alerts_by_repo: dict
         except httpx.RequestError:
             unknown.append("dependabot")
 
+    if code_scanning_alert_rows:
+        alerts_source = "aggregate"
+        code_scanning_clear = _code_scanning_clear_from_aggregate(code_scanning_alert_rows)
+    else:
         code_scanning_clear = True
         try:
             cs_alerts = client.request("GET", f"/repos/{owner}/{name}/code-scanning/alerts", params={"state": "open"})

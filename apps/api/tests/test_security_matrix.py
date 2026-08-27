@@ -376,7 +376,43 @@ def test_security_matrix_uses_aggregate_only_for_repos_with_ingested_rows(connec
     rows = {r["repo"]: r for r in resp.json()["repos"]}
     assert rows["api"]["alerts_source"] == "aggregate"
     assert rows["api"]["dependabot_critical_count"] == 1
+    assert rows["api"]["code_scanning"] is True  # no ingested code_scanning rows -- live path
     assert rows["new-repo"]["alerts_source"] == "github"
+
+
+def test_security_matrix_gates_dependabot_and_code_scanning_independently(connected_client, db, acme_org_with_installation):
+    """Regression test for CodeRabbit's round-2 finding on PR #356: a repo can have ingested
+    dependabot_alert webhooks but never a code_scanning_alert webhook (or vice versa).
+    Trusting the aggregate for one kind must not silently mark the *other* kind clean -- here
+    the repo has only a dependabot row ingested, and live GitHub has a real open code-scanning
+    alert that was never ingested. The old (buggy) per-repo-only gate would have reported
+    code_scanning=True (clear) purely because repo_alert_rows was non-empty; the fix must
+    still hit live GitHub for code_scanning and report the real open alert."""
+    _insert_security_alert(
+        db, acme_org_with_installation.tenant_id, repo="acme/api", kind="dependabot", number=1,
+        state="open", severity="high", details={"dependency": {}},
+    )
+
+    def _request_side_effect(method, path, params=None):
+        if path.endswith("/branches/main"):
+            return {"protected": True, "protection": {"allow_force_pushes": {"enabled": False}}}
+        if path.endswith("/dependabot/alerts"):
+            raise AssertionError("dependabot dimension should come from the aggregate, not a live call")
+        if path.endswith("/code-scanning/alerts"):
+            return [{"number": 9}]  # a real open alert, never ingested
+        raise AssertionError(f"unexpected call: {path}")
+
+    with patch("src.routers.security.GitHubClient") as mock_client:
+        mock_client.return_value.request_paginated.return_value = [
+            {"name": "api", "default_branch": "main", "security_and_analysis": {"secret_scanning": {"status": "enabled"}}},
+        ]
+        mock_client.return_value.request.side_effect = _request_side_effect
+        resp = connected_client.get("/me/analytics/security-matrix/acme", headers={"X-GitHub-Token": "ghp_test"})
+
+    row = resp.json()["repos"][0]
+    assert row["alerts_source"] == "aggregate"  # dependabot was aggregate-sourced
+    assert row["dependabot_high_count"] == 1
+    assert row["code_scanning"] is False  # must reflect the real live open alert, not a false "clear"
 
 
 def test_security_matrix_connected_org_with_no_repos_is_empty(connected_client, db, acme_org_with_installation):
