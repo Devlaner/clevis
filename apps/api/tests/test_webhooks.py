@@ -250,7 +250,7 @@ def test_ingested_event_without_installation_still_queues_with_null_tenant(db, w
 
 @pytest.mark.parametrize("event", ["dependabot_alert", "code_scanning_alert", "secret_scanning_alert"])
 def test_security_alert_event_writes_webhook_delivery_row_and_queues_it(event, db, webhook_client, redis_client):
-    # No consumer normalizes these into per-repo alert tables yet (a later PR) -- this
+    # These are normalized by event_consumer.py into security_alerts (post-S6 PR 2) -- this
     # only proves the receiver durably lands them via the same generic path push/issues
     # already use, same as test_push_event_writes_webhook_delivery_row_and_queues_it.
     org = org_repo.get_or_create(db, github_login="acme")

@@ -313,7 +313,14 @@ def personal_secret_scanning(
     tenant_id = _security_connected_tenant(db, user.id, owner)
     if tenant_id is not None:
         alerts = _secret_scanning_alerts_from_aggregate(db, tenant_id, owner, repo)
-        return SecretScanningResponse(repository=f"{owner}/{repo}", alerts=alerts, source="aggregate")
+        # security_alerts has no backfill/sync-cursor -- only webhook events populate it, so a
+        # zero-row result is ambiguous: it could mean "genuinely no alerts" or "this repo's
+        # webhook events just haven't arrived/been ingested yet". An empty aggregate result can't
+        # be trusted as authoritative the way collab.py's cursor-gated reads can (CodeRabbit
+        # finding on PR #356) -- fall back to the live call rather than silently under-reporting
+        # real open secret-scanning alerts as "none".
+        if alerts:
+            return SecretScanningResponse(repository=f"{owner}/{repo}", alerts=alerts, source="aggregate")
 
     client = GitHubClient(token)
     try:

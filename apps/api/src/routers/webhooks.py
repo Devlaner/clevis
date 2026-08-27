@@ -41,8 +41,8 @@ router = APIRouter()
 #     PR; member/organization are normalized into org_members/repo_collaborators (see
 #     event_consumer.py), membership/team are acked-but-skipped for now (team-based
 #     repo access is deferred, see that module's docstring). Requires the Clevis
-#     GitHub App's own webhook subscriptions + permissions (Members: read/write,
-#     Organization administration or similar per GitHub's docs) -- see
+#     GitHub App's own webhook subscriptions + permissions (Members: read -- no write
+#     or Administration access needed for any of these four events) -- see
 #     docs/self-hosting.md.
 # Either way, an ingested event just accumulates in webhook_deliveries with
 # status="queued" until its consumer exists -- that's the expected handoff state, not

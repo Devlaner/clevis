@@ -181,6 +181,17 @@ def test_get_all_pages_raises_roster_incomplete_on_a_pagination_loop():
         membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
 
 
+def test_get_all_pages_raises_roster_incomplete_on_a_malformed_entry():
+    # An entry with no usable login would otherwise be silently dropped by fetch_org_roster's
+    # `if "login" in m` filters -- reconcile_org_members treats the returned list as
+    # authoritative and DELETEs anyone not in it, so a dropped-not-fetched member would look
+    # identical to a real departure.
+    client = _FakeClient({"/orgs/acme/members": [_FakeResponse([_member("a"), {"avatar_url": "https://example.com/b.png"}])]})
+
+    with pytest.raises(membership_reconcile.RosterIncomplete):
+        membership_reconcile._get_all_pages(client, "https://api.github.com", {}, "/orgs/acme/members", {})
+
+
 def test_get_all_pages_raises_roster_incomplete_on_invalid_json():
     bad_json = _FakeResponse([])
     bad_json.json = MagicMock(side_effect=ValueError("Expecting value: line 1 column 1 (char 0)"))

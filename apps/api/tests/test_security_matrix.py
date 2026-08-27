@@ -450,3 +450,20 @@ def test_secret_scanning_uses_aggregate_when_installation_connected(connected_cl
     # CodeRabbit finding on PR #352: url must be None (not a fake ""), since
     # security_alerts doesn't store GitHub's html_url.
     assert alerts[1]["url"] is None
+
+
+def test_secret_scanning_falls_back_to_live_when_aggregate_has_no_rows(connected_client, db, acme_org_with_installation):
+    # security_alerts has no backfill/sync-cursor -- only webhook events populate it, so an
+    # empty aggregate result is ambiguous (genuinely no alerts vs. not-yet-ingested) and must
+    # not be trusted as authoritative (CodeRabbit finding on PR #356).
+    with patch("src.routers.security.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = [
+            {"number": 7, "state": "open", "secret_type": "aws_access_key_id", "created_at": "2026-08-01T00:00:00Z"},
+        ]
+        resp = connected_client.get("/me/repos/acme/demo/secret-scanning", headers={"X-GitHub-Token": "ghp_test"})
+        mock_client.return_value.request.assert_called_once()
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "github"
+    assert [a["number"] for a in body["alerts"]] == [7]

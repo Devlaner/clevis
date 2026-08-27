@@ -33,6 +33,14 @@ def upsert_security_alert(
     mirrors repo_events_store.insert_event_and_upsert_daily_count's `inserted` return,
     which callers use for "how many new events" reporting.
 
+    The ON CONFLICT branch only applies when the incoming `updated_at` is at least as new
+    as the stored row's -- GitHub doesn't guarantee webhook delivery order, so without this
+    guard a late/redelivered older payload could overwrite a newer state (e.g. a stale
+    "open" landing after a real "dismissed"). Same ordering-guard reasoning as
+    org_membership_store.py's upsert_org_member/remove_repo_collaborator. A rejected-as-
+    stale update still returns False (not an insert), consistent with "this call didn't
+    add a new alert".
+
     Caller is responsible for `SET app.tenant_id = <n>` on this cursor's connection
     before calling this (mirrors repo_events_store.insert_event_and_upsert_daily_count),
     to satisfy this table's RLS WITH CHECK.
@@ -49,6 +57,7 @@ def upsert_security_alert(
             severity = EXCLUDED.severity,
             details = EXCLUDED.details,
             updated_at = EXCLUDED.updated_at
+        WHERE EXCLUDED.updated_at >= security_alerts.updated_at
         RETURNING (xmax = 0) AS inserted
         """,
         {
@@ -63,4 +72,5 @@ def upsert_security_alert(
             "updated_at": updated_at,
         },
     )
-    return cur.fetchone()[0]
+    row = cur.fetchone()
+    return row[0] if row is not None else False

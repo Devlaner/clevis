@@ -480,6 +480,35 @@ def test_redelivered_security_alert_updates_state_instead_of_duplicating(pg_conn
     assert row[0] == "dismissed"
 
 
+def test_out_of_order_security_alert_delivery_does_not_overwrite_newer_state(pg_conn, tenant_id):
+    conn, state = pg_conn
+    fresh_payload = {
+        "action": "dismissed",
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": "octocat"},
+        "alert": {
+            "number": 42,
+            "state": "dismissed",
+            "security_advisory": {"severity": "critical"},
+            "dependency": {},
+            "created_at": "2026-08-20T09:00:00Z",
+            "updated_at": "2026-08-21T09:00:00Z",
+        },
+    }
+    row_id = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-alert-fresh", event_type="dependabot_alert", payload=fresh_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "1-0", _entry_fields(row_id, "dependabot_alert", tenant_id))
+
+    # GitHub doesn't guarantee webhook delivery order -- this "open" state has an OLDER
+    # updated_at than the "dismissed" row already stored, simulating a late/redelivered
+    # stale payload arriving after a newer one already landed.
+    stale_payload = {**fresh_payload, "action": "created", "alert": {**fresh_payload["alert"], "state": "open", "updated_at": "2026-08-20T09:00:00Z"}}
+    row_id_2 = _make_delivery(conn, state, tenant_id=tenant_id, delivery_id="d-alert-stale", event_type="dependabot_alert", payload=stale_payload)
+    event_consumer._process_entry(conn, _FakeRedis(), "2-0", _entry_fields(row_id_2, "dependabot_alert", tenant_id))
+
+    row = _security_alert(conn, tenant_id, "acme/widgets", "dependabot", 42)
+    assert row[0] == "dismissed"  # the stale "open" delivery must not have overwritten this
+
+
 def test_security_alert_with_missing_alert_number_is_dropped_not_crashed(pg_conn, tenant_id):
     conn, state = pg_conn
     payload = {"repository": {"full_name": "acme/widgets"}, "sender": {"login": "octocat"}, "alert": {"state": "open"}}

@@ -18,7 +18,7 @@ class RepoSecurityRow(BaseModel):
     # instead of a live per-repo GitHub call -- branch_protection/force_push/secret_scanning
     # have no ingested event covering them and stay live either way, so this only
     # describes those two dimensions (dependabot_enabled is an approximation in the
-    # "aggregate" case too -- see _repo_row_from_aggregate's docstring).
+    # "aggregate" case too -- see _dependabot_and_code_scanning_from_aggregate's docstring).
     alerts_source: Literal["github", "aggregate"] = "github"
     # Dimension names ("branch_protection", "dependabot", "code_scanning") the token
     # couldn't evaluate (403/429/network error) rather than genuinely observed as

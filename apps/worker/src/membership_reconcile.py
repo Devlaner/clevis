@@ -62,6 +62,13 @@ def _get_all_pages(client: httpx.Client, base: str, headers: dict, path: str, pa
             raise RosterIncomplete(f"non-JSON page body from {path!r}: {error}") from error
         if not isinstance(page, list):
             raise RosterIncomplete(f"expected a list page from {path!r}, got {type(page).__name__}")
+        if any(not isinstance(item, dict) or not isinstance(item.get("login"), str) or not item["login"] for item in page):
+            # A member entry without a usable login would be silently dropped by fetch_org_roster's
+            # own `if "login" in m` filters, and reconcile_org_members treats the resulting list as
+            # authoritative -- a dropped-not-fetched entry looks identical to a real departure and
+            # would DELETE that member's row. Same "fail closed, not silently partial" posture as
+            # the non-list/non-JSON page checks above.
+            raise RosterIncomplete(f"invalid roster entry from {path!r}")
         results.extend(page)
         next_link = resp.links.get("next")
         if not next_link:
