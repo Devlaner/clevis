@@ -302,6 +302,44 @@ def test_handler_requeues_on_5xx_from_github():
     assert "status='queued'" in sql
 
 
+def test_handler_requeues_on_an_exhausted_429_from_github():
+    # _get_with_retry inside fetch_org_roster already retried a 429 up to 3 times internally;
+    # reaching the handler with one still means "still rate-limited", not "bad request" -- it
+    # must go through the job-level retry, not be marked permanently failed.
+    conn = _FakeConn()
+    with patch("worker.membership_reconcile.fetch_org_roster") as mock_fetch, patch("worker.httpx.Client"):
+        mock_response = MagicMock(status_code=429, headers={})
+        mock_fetch.side_effect = httpx.HTTPStatusError("error", request=MagicMock(), response=mock_response)
+        worker._handle_reconcile_org_membership(conn, 6, _payload(), 0)
+
+    sql, _params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+
+
+def test_handler_requeues_on_an_exhausted_secondary_rate_limit_403():
+    conn = _FakeConn()
+    with patch("worker.membership_reconcile.fetch_org_roster") as mock_fetch, patch("worker.httpx.Client"):
+        mock_response = MagicMock(status_code=403, headers={"Retry-After": "30"})
+        mock_fetch.side_effect = httpx.HTTPStatusError("error", request=MagicMock(), response=mock_response)
+        worker._handle_reconcile_org_membership(conn, 7, _payload(), 0)
+
+    sql, _params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+
+
+def test_handler_marks_failed_on_a_genuine_403_not_a_rate_limit():
+    # A plain permission-denied 403 (no Retry-After/X-RateLimit-Remaining headers) is not a
+    # rate limit -- must still be a terminal failure, not endlessly requeued.
+    conn = _FakeConn()
+    with patch("worker.membership_reconcile.fetch_org_roster") as mock_fetch, patch("worker.httpx.Client"):
+        mock_response = MagicMock(status_code=403, headers={})
+        mock_fetch.side_effect = httpx.HTTPStatusError("error", request=MagicMock(), response=mock_response)
+        worker._handle_reconcile_org_membership(conn, 8, _payload(), 0)
+
+    sql, _params = conn._cursor.calls[0]
+    assert "status='failed'" in sql
+
+
 def test_handler_requeues_on_network_error():
     conn = _FakeConn()
     with patch("worker.membership_reconcile.fetch_org_roster", side_effect=httpx.RequestError("connection reset")), patch(

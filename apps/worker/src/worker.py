@@ -348,7 +348,12 @@ def _handle_reconcile_org_membership(conn: psycopg.Connection, job_id: int, payl
             roster = membership_reconcile.fetch_org_roster(client, base, headers, payload.org_login)
     except httpx.HTTPStatusError as error:
         resp = error.response
-        if resp.status_code >= 500:
+        # _get_with_retry already retried a 429/secondary-403 rate limit up to 3 times inside
+        # fetch_org_roster's own request loop -- reaching here with one of those statuses means
+        # the limit was still in effect after that backoff, not that the request is invalid.
+        # Requeue it for the job-level retry (a later attempt, well after this run) instead of
+        # treating it the same as a genuine 4xx like 404/403-permission-denied.
+        if resp.status_code == 429 or membership_reconcile._is_secondary_rate_limit(resp) or resp.status_code >= 500:
             log.warning("job %d got a %d from GitHub (attempt %d)", job_id, resp.status_code, retry_count + 1)
             _requeue_for_retry(conn, job_id, retry_count, sanitize_error(_github_error_message(resp)))
         else:
