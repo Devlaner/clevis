@@ -107,12 +107,10 @@ def _dependabot_and_code_scanning_from_aggregate(alert_rows: list) -> dict:
     as disabled (CodeRabbit finding on PR #352). critical_count/high_count/code_scanning_clear
     only count 'open' rows, since only a currently-open alert is a live finding.
 
-    This is still an approximation in one direction: security_alerts only has rows for
-    alerts that actually occurred, so a repo with Dependabot enabled but zero alerts ever
-    (dismissed or otherwise) looks identical to one with it disabled. This under-reports
-    the "enabled" badge for a genuinely clean repo but never affects the score (an
-    all-zero count scores as compliant either way, matching the live path's own
-    404-disabled handling)."""
+    Caller (_repo_row) only reaches this with a non-empty alert_rows -- a repo with zero ingested
+    rows falls back to the live GitHub path instead (CodeRabbit finding on PR #356), since an
+    empty security_alerts result is ambiguous (genuinely no alerts ever vs. not-yet-ingested) and
+    security_alerts has no completeness cursor to tell the two apart."""
     dependabot_rows = [r for r in alert_rows if r.kind == "dependabot"]
     open_dependabot_rows = [r for r in dependabot_rows if r.state == "open"]
     return {
@@ -152,9 +150,15 @@ def _repo_row(client: GitHubClient, owner: str, repo: dict, alerts_by_repo: dict
     ).get("status") == "enabled"
 
     alerts_source = "github"
-    if alerts_by_repo is not None:
+    # security_alerts has no backfill/sync-cursor -- only webhook events populate it, so a repo
+    # with zero rows here is ambiguous ("genuinely no alerts ever" vs. "not yet ingested"), same
+    # completeness gap as personal_secret_scanning (CodeRabbit finding on PR #356). Checked
+    # per-repo, not once for the whole tenant: one repo can have real ingested rows while another
+    # (e.g. added to the org after this tenant connected) has none yet.
+    repo_alert_rows = alerts_by_repo.get(f"{owner}/{name}", []) if alerts_by_repo is not None else []
+    if repo_alert_rows:
         alerts_source = "aggregate"
-        aggregate = _dependabot_and_code_scanning_from_aggregate(alerts_by_repo.get(f"{owner}/{name}", []))
+        aggregate = _dependabot_and_code_scanning_from_aggregate(repo_alert_rows)
         dependabot_enabled = aggregate["dependabot_enabled"]
         critical_count = aggregate["critical_count"]
         high_count = aggregate["high_count"]

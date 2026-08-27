@@ -320,22 +320,63 @@ def test_security_matrix_aggregate_dependabot_enabled_with_only_dismissed_alerts
     assert row["score"] == 100
 
 
-def test_security_matrix_aggregate_repo_with_no_alerts_is_clean(connected_client, db, acme_org_with_installation):
-    """No security_alerts rows for this repo at all -- reads as dependabot_enabled=False
-    (the known aggregate-path approximation, see _dependabot_and_code_scanning_from_aggregate's
-    docstring) but still scores as compliant, same as the live path's 404-disabled case."""
+def test_security_matrix_falls_back_to_live_for_a_repo_with_no_ingested_alert_rows(connected_client, db, acme_org_with_installation):
+    """No security_alerts rows for this repo at all -- ambiguous (genuinely clean vs. not-yet-
+    ingested, security_alerts has no completeness cursor) so this repo must fall back to the
+    live GitHub path rather than trusting an empty aggregate result as authoritative
+    (CodeRabbit finding on PR #356)."""
+    def _request_side_effect(method, path, params=None):
+        if path.endswith("/branches/main"):
+            return {"protected": True, "protection": {"allow_force_pushes": {"enabled": False}}}
+        if path.endswith("/dependabot/alerts"):
+            return []
+        if path.endswith("/code-scanning/alerts"):
+            return []
+        raise AssertionError(f"unexpected call: {path}")
+
     with patch("src.routers.security.GitHubClient") as mock_client:
         mock_client.return_value.request_paginated.return_value = [
             {"name": "clean-repo", "default_branch": "main", "security_and_analysis": {"secret_scanning": {"status": "enabled"}}},
         ]
-        mock_client.return_value.request.return_value = {"protected": True, "protection": {"allow_force_pushes": {"enabled": False}}}
+        mock_client.return_value.request.side_effect = _request_side_effect
         resp = connected_client.get("/me/analytics/security-matrix/acme", headers={"X-GitHub-Token": "ghp_test"})
 
     row = resp.json()["repos"][0]
-    assert row["alerts_source"] == "aggregate"
-    assert row["dependabot_enabled"] is False
+    assert row["alerts_source"] == "github"
+    assert row["dependabot_enabled"] is True  # 200 with an empty list, not a 404 -- genuinely enabled
     assert row["code_scanning"] is True
-    assert row["score"] == 100
+
+
+def test_security_matrix_uses_aggregate_only_for_repos_with_ingested_rows(connected_client, db, acme_org_with_installation):
+    """A connected tenant can have one repo with real ingested alert rows and another (e.g.
+    added to the org after this tenant connected) with none yet -- each repo's alerts_source
+    is decided independently, not once for the whole tenant."""
+    _insert_security_alert(
+        db, acme_org_with_installation.tenant_id, repo="acme/api", kind="dependabot", number=1,
+        state="open", severity="critical", details={"dependency": {}},
+    )
+
+    def _request_side_effect(method, path, params=None):
+        if path.endswith("/branches/main"):
+            return {"protected": True, "protection": {"allow_force_pushes": {"enabled": False}}}
+        if path.endswith("/dependabot/alerts"):
+            return []
+        if path.endswith("/code-scanning/alerts"):
+            return []
+        raise AssertionError(f"unexpected call: {path}")
+
+    with patch("src.routers.security.GitHubClient") as mock_client:
+        mock_client.return_value.request_paginated.return_value = [
+            {"name": "api", "default_branch": "main", "security_and_analysis": {"secret_scanning": {"status": "enabled"}}},
+            {"name": "new-repo", "default_branch": "main", "security_and_analysis": {"secret_scanning": {"status": "enabled"}}},
+        ]
+        mock_client.return_value.request.side_effect = _request_side_effect
+        resp = connected_client.get("/me/analytics/security-matrix/acme", headers={"X-GitHub-Token": "ghp_test"})
+
+    rows = {r["repo"]: r for r in resp.json()["repos"]}
+    assert rows["api"]["alerts_source"] == "aggregate"
+    assert rows["api"]["dependabot_critical_count"] == 1
+    assert rows["new-repo"]["alerts_source"] == "github"
 
 
 def test_security_matrix_connected_org_with_no_repos_is_empty(connected_client, db, acme_org_with_installation):
