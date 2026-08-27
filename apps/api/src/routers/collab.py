@@ -19,11 +19,14 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from typing import Literal
 
 from src.core.db import get_db
+from src.core.db import OrgMember as OrgMemberRow
 from src.core.rbac import OrgContext, require_org_role
+from src.repositories import installation_repo
 from src.schemas.collab import (
     CollaboratorPermission,
     InactiveMember,
@@ -63,6 +66,66 @@ def _resolve_token(db: Session, ctx: OrgContext, org_login: str, client_token: s
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+def _installation_connected(db: Session, ctx: OrgContext) -> bool:
+    """True if this org has a live GitHub App installation -- gates whether list_members and
+    inactive_members can read from the ingested org_members/repo_events tables (kept fresh by
+    the reconciliation poll and the webhook/backfill pipeline, respectively) instead of calling
+    GitHub live. Mirrors security.py's _security_connected_tenant / analytics.py's
+    _cockpit_connected_tenant installation_id-presence gate -- but require_org_role's own
+    dependency (unlike those two personal-scoped routers' require_auth) already resolved
+    membership and set the RLS tenant-session-context for this request, so this only needs the
+    installation check itself.
+
+    Deliberately NOT used to gate list_outside_collaborators or permission_audit's per-repo
+    collaborator enumeration: repo_collaborators only has rows for grants the `member` webhook
+    event has observed since this org connected (migration 0040's own docstring) -- there was
+    never a backfill job for pre-existing direct grants, unlike repo_events (S5 install-time
+    backfill + gap-heal) or org_members (this reconciliation poll's own full-roster fetch). Re-
+    pointing those two endpoints today would silently under-report real outside collaborators/
+    permissions for any org connected before Clevis started listening. Left fully live until a
+    repo_collaborators backfill exists -- a separate design decision, not this PR's job."""
+    installation = installation_repo.get_for_org(db, org_id=ctx.org.id, account_login=ctx.org.github_login)
+    return installation is not None and installation.installation_id is not None
+
+
+def _org_members_synced(db: Session, ctx: OrgContext) -> bool:
+    """True only once org_membership_sync_cursors has a row for this tenant -- i.e. at least
+    one reconciliation poll has actually completed, not merely that an installation exists.
+    Installation presence alone isn't enough: right after connecting, org_members can still be
+    empty (only the webhook path may have touched it) until the poll's first sweep tick runs
+    (up to membership_reconcile_poll_seconds, default 15 minutes) -- reading org_members as
+    authoritative in that window would show 0 members for an org that actually has some, which
+    is actively misleading rather than merely stale (CodeRabbit finding on PR #355). A cursor
+    row is only ever written in the same transaction as a successful reconcile_org_members call
+    (worker.py's _handle_reconcile_org_membership), so its presence reliably means the table is
+    now trustworthy."""
+    if not _installation_connected(db, ctx):
+        return False
+    row = db.execute(
+        text("SELECT 1 FROM org_membership_sync_cursors WHERE tenant_id = :tenant_id"), {"tenant_id": ctx.org.tenant_id}
+    ).first()
+    return row is not None
+
+
+def _activity_synced(db: Session, ctx: OrgContext) -> bool:
+    """Same reasoning as _org_members_synced, but gates inactive_members' repo_events read on
+    activity_sync_cursors instead -- the S5 backfill/gap-heal cursor, same "row exists only
+    after a successful sync" invariant."""
+    if not _installation_connected(db, ctx):
+        return False
+    row = db.execute(
+        text("SELECT 1 FROM activity_sync_cursors WHERE tenant_id = :tenant_id"), {"tenant_id": ctx.org.tenant_id}
+    ).first()
+    return row is not None
+
+
+def _ingested_org_members(db: Session, tenant_id: int, role: Literal["all", "member", "admin"]) -> list[OrgMemberRow]:
+    query = db.query(OrgMemberRow).filter(OrgMemberRow.tenant_id == tenant_id)
+    if role != "all":
+        query = query.filter(OrgMemberRow.role == role)
+    return query.order_by(OrgMemberRow.login).all()
+
+
 @router.get("/github/orgs/{org_login}/members", response_model=OrgMembersResponse)
 def list_members(
     org_login: str,
@@ -71,6 +134,34 @@ def list_members(
     db: Session = Depends(get_db),
     x_github_token: str | None = Header(default=None),
 ):
+    if _org_members_synced(db, ctx):
+        rows = _ingested_org_members(db, ctx.org.tenant_id, role)
+        members = [
+            OrgMember(
+                login=r.login,
+                avatar_url=r.avatar_url,
+                role=r.role,
+                # Not captured by any ingestion path (org_members has no site_admin column) --
+                # this flag is GitHub-instance-wide, not org-scoped, and rarely true; the live
+                # path below still reports it accurately for an unconnected org.
+                site_admin=False,
+                two_factor_enabled=r.two_factor_enabled,
+            )
+            for r in rows
+        ]
+        return OrgMembersResponse(
+            org=org_login,
+            members=members,
+            # True only if EVERY member has an actual (non-None) 2FA reading -- the UI's
+            # "Members without 2FA: N" footer (members/page.tsx) is gated on this flag and
+            # counts strictly `two_factor_enabled is False`, so a partial reading (some members
+            # polled, some not -- possible here since COALESCE preserves a per-member value
+            # across reconciliation runs, unlike the live path's single all-or-nothing overlay
+            # call) would silently undercount rather than honestly report "not fully known"
+            # (CodeRabbit finding on PR #355).
+            two_factor_overlay_available=bool(members) and all(m.two_factor_enabled is not None for m in members),
+        )
+
     token = _resolve_token(db, ctx, org_login, x_github_token)
     client = GitHubClient(token)
     try:
@@ -326,6 +417,58 @@ def _last_commit_for_author(client: GitHubClient, org_login: str, repo_name: str
     return date, True
 
 
+def _inactive_members_from_ingested(db: Session, ctx: OrgContext, org_login: str, days: int) -> InactiveMembersResponse:
+    """Re-points both halves of this endpoint onto ingested tables for a connected org:
+    org_members for the member/role list (complete -- see _installation_connected's docstring)
+    and repo_events for last-push-per-member (S5's install-time backfill + gap-heal keep it
+    fresh, same as the Activity page). Strictly more accurate than the live path below, which
+    only samples _MAX_REPOS_SAMPLED_FOR_ACTIVITY repos per member via N live GitHub calls each --
+    this checks every repo with an ingested push event for the tenant in one query, and every
+    member gets a real verified answer (no per-repo GitHub call to fail)."""
+    members = _ingested_org_members(db, ctx.org.tenant_id, "all")
+    logins = [m.login for m in members]
+    now = datetime.now(timezone.utc)
+
+    last_push_by_login: dict[str, tuple[str, datetime]] = {}
+    if logins:
+        rows = db.execute(
+            text(
+                "SELECT DISTINCT ON (actor) actor, repo, occurred_at FROM repo_events "
+                "WHERE tenant_id = :tenant_id AND event_type = 'push' AND actor = ANY(:logins) "
+                "ORDER BY actor, occurred_at DESC"
+            ),
+            {"tenant_id": ctx.org.tenant_id, "logins": logins},
+        ).fetchall()
+        last_push_by_login = {row.actor: (row.repo, row.occurred_at) for row in rows}
+
+    inactive: list[InactiveMember] = []
+    for member in members:
+        last = last_push_by_login.get(member.login)
+        repo_name, days_ago = None, None
+        if last is not None:
+            repo_name, occurred_at = last
+            days_ago = (now - occurred_at).days
+        if days_ago is None or days_ago >= days:
+            inactive.append(
+                InactiveMember(
+                    login=member.login,
+                    avatar_url=member.avatar_url,
+                    role=member.role,
+                    last_commit_repo=repo_name,
+                    last_commit_days_ago=days_ago,
+                )
+            )
+
+    return InactiveMembersResponse(
+        org=org_login,
+        # Not a bounded sample here (unlike the live path) -- every repo with an ingested push
+        # event for this tenant was considered; this lists which ones actually contributed a
+        # member's most recent activity.
+        sampled_repos=sorted({repo for repo, _ in last_push_by_login.values()}),
+        members=inactive,
+    )
+
+
 @router.get("/github/orgs/{org_login}/inactive-members", response_model=InactiveMembersResponse)
 def inactive_members(
     org_login: str,
@@ -334,6 +477,12 @@ def inactive_members(
     db: Session = Depends(get_db),
     x_github_token: str | None = Header(default=None),
 ):
+    # Needs both cursors: the member/role list comes from org_members (_org_members_synced),
+    # last-activity comes from repo_events (_activity_synced) -- either one not yet having
+    # completed its first sync means this endpoint can't yet trust the ingested tables.
+    if _org_members_synced(db, ctx) and _activity_synced(db, ctx):
+        return _inactive_members_from_ingested(db, ctx, org_login, days)
+
     token = _resolve_token(db, ctx, org_login, x_github_token)
     client = GitHubClient(token)
     try:
