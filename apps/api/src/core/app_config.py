@@ -18,7 +18,14 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-_ACCEPTED_KEYS = {"worker_poll_seconds", "registration_enabled", "gap_heal_poll_seconds", "gap_heal_stale_hours"}
+_ACCEPTED_KEYS = {
+    "worker_poll_seconds",
+    "registration_enabled",
+    "gap_heal_poll_seconds",
+    "gap_heal_stale_hours",
+    "membership_reconcile_poll_seconds",
+    "membership_reconcile_stale_hours",
+}
 _TTL = 60.0
 _cache: dict[str, tuple[str, float]] = {}
 

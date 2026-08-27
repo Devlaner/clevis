@@ -239,9 +239,9 @@ class OrgMember(Base):
     soft-marked. `role` is captured from the member_added payload's membership.role at
     add-time (accurate then), but no webhook event covers a role changing *afterward* at
     all (verified against GitHub's docs -- no member_updated/role-change action exists) --
-    so this column can silently drift stale for an existing member whose role later
-    changes, until a future reconciliation poll (Collaborators PR 2, not built yet)
-    corrects it. See migration 0040's docstring for the full rationale."""
+    so this column can drift stale for an existing member whose role later changes, until
+    the reconciliation poll (apps/worker/src/membership_reconcile.py, Collaborators PR 2 of
+    3) corrects it on its next run. See migration 0040's docstring for the full rationale."""
 
     __tablename__ = "org_members"
     __table_args__ = (
@@ -255,6 +255,11 @@ class OrgMember(Base):
     avatar_url: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False, server_default="member")
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # NULL means "never polled" -- migration 0041 (Collaborators PR 2 of 3). No webhook event
+    # covers 2FA status at all, so this is only ever set by the reconciliation poll
+    # (apps/worker/src/membership_reconcile.py); the webhook path (event_consumer.py) never
+    # touches it. A False default would misrepresent an un-polled row as a confirmed "2FA off".
+    two_factor_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class RepoCollaborator(Base):
@@ -302,6 +307,26 @@ class ActivitySyncCursor(Base):
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
     account_login: Mapped[str] = mapped_column(String, nullable=False)
     account_type: Mapped[str] = mapped_column(String, nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OrgMembershipSyncCursor(Base):
+    """Per-tenant "how far synced" cursor for the org membership reconciliation poll
+    (Collaborators PR 2 of 3), migration 0041. Mirrors ActivitySyncCursor's shape exactly
+    (one row per org-kind tenant, tenant_id as the primary key, last_synced_at nullable
+    until the first successful run) -- see that class's docstring and migration 0041's for
+    the full rationale. org_login is cached here because, unlike the activity cursor's
+    account_login (available on every install-time-backfill payload since PR #342), the
+    membership-reconcile sweep has no equivalent existing payload to read it from; it's
+    resolved once per sweep tick from the orgs table."""
+
+    __tablename__ = "org_membership_sync_cursors"
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    org_login: Mapped[str] = mapped_column(String, nullable=False)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
