@@ -353,13 +353,18 @@ def _safe_pr_merge_rate_4w(owner: str, token: str) -> list[PrWeekBucket]:
         return []
 
 
-def _week_total(week: dict) -> int | float:
-    """Raises AttributeError (non-dict week) or TypeError (non-numeric "total") for the caller
-    to treat as a per-repo failure -- a malformed nested record from GitHub must not silently
-    coerce into 0, which would look identical to a real zero-commit week."""
+def _week_total(week: dict) -> int:
+    """Raises AttributeError (non-dict week) or TypeError (not a real non-negative commit count)
+    for the caller to treat as a per-repo failure -- a malformed nested record from GitHub must
+    not silently coerce into 0, which would look identical to a real zero-commit week. A commit
+    count is always a non-negative plain int on GitHub's side; explicitly excludes bool (`bool`
+    is a subclass of `int` in Python, so `isinstance(True, int)` is True) and rejects fractional/
+    negative values, which CockpitResponse's `commit_activity_4w: list[int]` can't represent
+    faithfully (a fraction would silently truncate on Pydantic coercion; a negative would pass
+    validation but produce a nonsensical metric)."""
     total = week.get("total", 0)
-    if not isinstance(total, (int, float)):
-        raise TypeError(f"non-numeric week total: {total!r}")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise TypeError(f"invalid week total: {total!r}")
     return total
 
 
@@ -414,12 +419,13 @@ def _safe_commit_activity_4w_and_heatmap_52w(
     return totals_4w, totals_52w, ok
 
 
-def _cache_entry_bytes(entry: dict) -> int | float:
-    """Same contract as _week_total: raises for the caller to treat as a per-repo failure
-    instead of silently coercing a malformed entry into 0 bytes."""
+def _cache_entry_bytes(entry: dict) -> int:
+    """Same contract and non-negative-plain-int rationale as _week_total: raises for the caller
+    to treat as a per-repo failure instead of silently coercing a malformed entry into 0 bytes,
+    accepting a bool, or accepting a negative/fractional size."""
     size = entry.get("size_in_bytes", 0)
-    if not isinstance(size, (int, float)):
-        raise TypeError(f"non-numeric cache entry size: {size!r}")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise TypeError(f"invalid cache entry size: {size!r}")
     return size
 
 
