@@ -428,6 +428,27 @@ def _set_cursor(db, tenant_id, *, account_login="acme", account_type="Organizati
     db.commit()
 
 
+def test_activity_stale_hours_falls_back_to_default_on_unparsable_config():
+    from src.routers.analytics import _activity_stale_hours
+
+    with patch("src.routers.analytics.get_config", return_value="not-a-number"):
+        assert _activity_stale_hours() == 6
+
+
+def test_recent_events_staleness_treats_naive_last_synced_at_as_utc():
+    """activity_sync_cursors.last_synced_at is TIMESTAMP WITH TIME ZONE, so psycopg always
+    returns an aware datetime in practice -- but the naive-datetime branch is a defensive
+    guard, exercised directly here rather than skipped as unreachable."""
+    from unittest.mock import MagicMock
+
+    from src.routers.analytics import _recent_events_staleness
+
+    naive_recent = datetime.now() - timedelta(minutes=5)  # no tzinfo
+    mock_db = MagicMock()
+    mock_db.execute.return_value.fetchone.return_value = (naive_recent,)
+    assert _recent_events_staleness(mock_db, tenant_id=1) is False
+
+
 def test_recent_events_staleness_true_when_never_synced(db):
     from src.routers.analytics import _recent_events_staleness
 
@@ -448,6 +469,29 @@ def test_recent_events_staleness_true_when_synced_long_ago(db, acme_org_with_ins
     tenant_id = acme_org_with_installation.tenant_id
     _set_cursor(db, tenant_id, last_synced_at=datetime.now(timezone.utc) - timedelta(hours=48))
     assert _recent_events_staleness(db, tenant_id) is True
+
+
+def test_safe_recent_events_live_path_returns_empty_and_not_ok_on_error(db):
+    from src.routers.analytics import _safe_recent_events
+
+    with patch("src.routers.analytics._cached_events", side_effect=httpx.RequestError("boom")):
+        events, ok = _safe_recent_events(db, "acme", "ghp_test", tenant_id=None)
+    assert events == []
+    assert ok is False
+
+
+def test_safe_recent_events_aggregate_path_returns_empty_and_not_ok_on_error(db):
+    from fastapi import HTTPException
+
+    from src.routers.analytics import _safe_recent_events
+
+    with patch(
+        "src.routers.analytics._fetch_events_from_repo_events",
+        side_effect=HTTPException(status_code=500, detail="boom"),
+    ):
+        events, ok = _safe_recent_events(db, "acme", "ghp_test", tenant_id=1)
+    assert events == []
+    assert ok is False
 
 
 def test_cockpit_connected_org_surfaces_recent_events_staleness(http, db, mock_user, acme_org_with_installation):
@@ -592,6 +636,32 @@ def test_safe_total_cache_bytes_sums_across_repos():
         total, ok = _safe_total_cache_bytes("acme", "ghp_test", ["repo-a", "repo-b"])
     assert total == 175
     assert ok is True
+
+
+def test_safe_commit_activity_4w_and_heatmap_52w_non_list_response_flags_not_ok():
+    """A malformed (non-list) response body -- e.g. GitHub's error-shaped JSON slipping past
+    status-code checks -- must be treated the same as a failed fetch, not silently summed as
+    zero contribution while still claiming ok."""
+    from src.routers.analytics import _safe_commit_activity_4w_and_heatmap_52w
+
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = {"message": "Not Found"}
+        activity, heatmap, ok = _safe_commit_activity_4w_and_heatmap_52w("acme", "ghp_test", ["repo-a"])
+
+    assert activity == [0, 0, 0, 0]
+    assert heatmap == [0] * 52
+    assert ok is False
+
+
+def test_safe_total_cache_bytes_non_dict_response_flags_not_ok():
+    from src.routers.analytics import _safe_total_cache_bytes
+
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = ["not", "a", "dict"]
+        total, ok = _safe_total_cache_bytes("acme", "ghp_test", ["repo-a"])
+
+    assert total == 0
+    assert ok is False
 
 
 def test_safe_total_cache_bytes_one_bad_repo_sums_the_rest_but_flags_not_ok():

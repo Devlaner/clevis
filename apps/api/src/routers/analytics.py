@@ -365,58 +365,56 @@ def _safe_commit_activity_4w_and_heatmap_52w(
     # commits just don't contribute) rather than zeroing the whole org's aggregate, and the
     # returned `ok` flag tells the caller at least one repo's stats couldn't be fetched, so
     # the resulting totals are a real partial sum, not a silent lie dressed up as "0 commits."
+    # No outer try/except: every future's result() is resolved inside the loop below, so a
+    # per-repo httpx failure is always caught there -- an outer catch here would be dead code.
     client = GitHubClient(token)
     totals_4w = [0, 0, 0, 0]
     totals_52w = [0] * 52
     ok = True
-    try:
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = [
-                pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/stats/commit_activity")
-                for repo in repo_names[:_MAX_REPOS_FOR_AGGREGATES]
-            ]
-            for future in futures:
-                try:
-                    weeks = future.result()
-                except (httpx.HTTPStatusError, httpx.RequestError):
-                    ok = False
-                    continue
-                if not isinstance(weeks, list):
-                    ok = False
-                    continue
-                if len(weeks) >= 4:
-                    for i, week in enumerate(weeks[-4:]):
-                        totals_4w[i] += week.get("total", 0)
-                if len(weeks) >= 52:
-                    for i, week in enumerate(weeks[-52:]):
-                        totals_52w[i] += week.get("total", 0)
-    except (httpx.HTTPStatusError, httpx.RequestError):
-        return [0, 0, 0, 0], [0] * 52, False
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [
+            pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/stats/commit_activity")
+            for repo in repo_names[:_MAX_REPOS_FOR_AGGREGATES]
+        ]
+        for future in futures:
+            try:
+                weeks = future.result()
+            except (httpx.HTTPStatusError, httpx.RequestError):
+                ok = False
+                continue
+            if not isinstance(weeks, list):
+                ok = False
+                continue
+            if len(weeks) >= 4:
+                for i, week in enumerate(weeks[-4:]):
+                    totals_4w[i] += week.get("total", 0)
+            if len(weeks) >= 52:
+                for i, week in enumerate(weeks[-52:]):
+                    totals_52w[i] += week.get("total", 0)
     return totals_4w, totals_52w, ok
 
 
 def _safe_total_cache_bytes(owner: str, token: str, repo_names: list[str]) -> tuple[int, bool]:
+    # See _safe_commit_activity_4w_and_heatmap_52w's comment -- no outer try/except needed here
+    # either, for the same reason.
     client = GitHubClient(token)
     total = 0
     ok = True
-    try:
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            futures = [
-                pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/actions/caches")
-                for repo in repo_names[:_MAX_REPOS_FOR_AGGREGATES]
-            ]
-            for future in futures:
-                try:
-                    data = future.result()
-                except (httpx.HTTPStatusError, httpx.RequestError):
-                    ok = False
-                    continue
-                if isinstance(data, dict):
-                    total += sum(c.get("size_in_bytes", 0) for c in data.get("actions_caches", []))
-                else:
-                    ok = False
-    except (httpx.HTTPStatusError, httpx.RequestError):
-        return 0, False
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [
+            pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/actions/caches")
+            for repo in repo_names[:_MAX_REPOS_FOR_AGGREGATES]
+        ]
+        for future in futures:
+            try:
+                data = future.result()
+            except (httpx.HTTPStatusError, httpx.RequestError):
+                ok = False
+                continue
+            if isinstance(data, dict):
+                total += sum(c.get("size_in_bytes", 0) for c in data.get("actions_caches", []))
+            else:
+                ok = False
     return total, ok
 
 
