@@ -83,6 +83,15 @@ class CockpitResponse(BaseModel):
     pr_cycle_time_8w: list[PrCycleTimeWeek] = []
     release_cadence_4w: list[int] = []
     commit_activity_source: Literal["github", "aggregate"] = "github"
+    recent_events_source: Literal["github", "aggregate"] = "github"
+    # True if a stored aggregate is stale relative to gap_heal_stale_hours -- only ever set when
+    # recent_events_source == "aggregate"; the live "github" path has no ingestion cursor to be
+    # stale against (whatever GitHub returns synchronously is definitionally current).
+    recent_events_stale: bool = False
+    # True if any best-effort live GitHub call underlying this response failed and fell back to a
+    # zero/empty/partial value (see the _safe_* helpers below) -- lets the UI distinguish "this org
+    # genuinely has none" from "we couldn't fully fetch this," which previously rendered identically.
+    degraded: bool = False
 
 
 class PRSummary(BaseModel):

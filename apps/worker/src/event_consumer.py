@@ -79,11 +79,10 @@ _BLOCK_MS = 5_000
 _BATCH_SIZE = 10
 
 # Separate heartbeat file from worker.py's HEARTBEAT_FILE -- both threads touch their
-# own file every loop iteration; the docker-compose healthcheck only reads worker.py's
-# HEARTBEAT_FILE today (v1: a hung consumer thread doesn't fail the container
-# healthcheck on its own, same gap as any other purely-Python-level hang would have
-# without a dedicated liveness probe for this specific thread -- flagged, not solved
-# here, since the jobs-table loop staying healthy is still useful signal on its own).
+# own file every loop iteration, and docker-compose.yml's worker healthcheck now checks
+# freshness of both files (Overview data-accuracy fix), so a hung consumer thread fails
+# the container healthcheck on its own instead of hiding behind the jobs-poll-loop
+# thread staying healthy.
 _HEARTBEAT_FILE = Path("/tmp/worker_event_consumer_heartbeat")
 
 _client: redis.Redis | None = None

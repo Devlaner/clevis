@@ -113,10 +113,15 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      # worker.py touches HEARTBEAT_FILE once per poll loop iteration -- a hung-but-alive
-      # process (e.g. blocked on a network call) stops updating it, so this catches hangs
-      # that `restart: unless-stopped` alone wouldn't (that only fires on a hard crash).
-      test: ["CMD", "python", "-c", "import time,sys; sys.exit(0 if time.time() - __import__('os').path.getmtime('/tmp/worker_heartbeat') < 60 else 1)"]
+      # worker.py's jobs-poll-loop thread and event_consumer.py's Redis-Streams-consumer
+      # thread each touch their own heartbeat file once per loop iteration -- a hung-but-
+      # alive thread (e.g. blocked on a network call) stops updating its file, so this
+      # catches hangs that `restart: unless-stopped` alone wouldn't (that only fires on a
+      # hard crash). Previously only worker_heartbeat was checked here, so a hung event
+      # consumer (which silently stalls repo_events/repo_event_daily_counts ingestion --
+      # see the Overview data-accuracy fix this accompanies) could report healthy
+      # indefinitely; both threads' files must now be fresh.
+      test: ["CMD", "python", "-c", "import time,sys,os; now=time.time(); sys.exit(0 if all(now - os.path.getmtime(f) < 60 for f in ('/tmp/worker_heartbeat', '/tmp/worker_event_consumer_heartbeat')) else 1)"]
       interval: 15s
       timeout: 5s
       retries: 5

@@ -48,6 +48,9 @@ const EMPTY_COCKPIT = {
   pr_cycle_time_8w: [],
   release_cadence_4w: [],
   commit_activity_source: "github" as const,
+  recent_events_source: "github" as const,
+  recent_events_stale: false,
+  degraded: false,
 };
 
 const EMPTY_MY_VIEW = {
@@ -148,6 +151,64 @@ describe("OverviewPage cockpit", () => {
       expect(queryClient.getQueryState(["analytics.cockpit", "acme"])?.status).toBe("success");
     });
     expect(screen.queryByText("(estimated)")).not.toBeInTheDocument();
+  });
+
+  it("shows a data-may-be-incomplete banner when the cockpit response is degraded", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT, degraded: true });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/Some data below may be incomplete/i)).toBeInTheDocument();
+    });
+  });
+
+  it("does not show the degraded banner when the cockpit response is not degraded", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue(EMPTY_COCKPIT);
+
+    const { queryClient } = renderPage();
+
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["analytics.cockpit", "acme"])?.status).toBe("success");
+    });
+    expect(screen.queryByText(/Some data below may be incomplete/i)).not.toBeInTheDocument();
+  });
+
+  it("labels recent activity as stale when the cockpit says the ingestion cursor is stale", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({
+      ...EMPTY_COCKPIT,
+      recent_events_source: "aggregate" as const,
+      recent_events_stale: true,
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("(stale)")).toBeInTheDocument();
+    });
+  });
+
+  it("does not label recent activity as stale when the cockpit says it's current", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({
+      ...EMPTY_COCKPIT,
+      recent_events_source: "aggregate" as const,
+      recent_events_stale: false,
+    });
+
+    const { queryClient } = renderPage();
+
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["analytics.cockpit", "acme"])?.status).toBe("success");
+    });
+    expect(screen.queryByText("(stale)")).not.toBeInTheDocument();
   });
 
   it("renders empty states for charts and activity when the org has no data yet", async () => {
