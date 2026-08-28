@@ -1,9 +1,14 @@
+import logging
+
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from src.core.config import settings
 from src.core.db import Base
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.fixture(scope="session")
@@ -18,14 +23,26 @@ def _engine():
     # next `pytest -q` run. Truncating every ORM table once at the very end of the whole session
     # (not per-test -- that would defeat the fast savepoint-rollback approach above) guarantees
     # the next run starts clean regardless of what non-test traffic touched this DB in between.
-    with eng.begin() as conn:
-        # Base.metadata.tables (unordered), not .sorted_tables -- a topological sort isn't
-        # needed since TRUNCATE ... CASCADE handles FK ordering itself, and orgs/tenants have
-        # a genuine FK cycle between them that makes .sorted_tables raise a SAWarning.
-        table_names = [table.name for table in Base.metadata.tables.values()]
-        if table_names:
-            quoted = ", ".join(f'"{name}"' for name in table_names)
-            conn.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+    #
+    # Best-effort, not fatal: CI additionally runs this suite against the constrained
+    # `clevis_api`/`clevis_worker` roles (to verify RLS enforcement) which are granted
+    # SELECT/INSERT/UPDATE/DELETE but not TRUNCATE (migration 0032 and friends never grant it,
+    # deliberately -- this cleanup is a local-dev convenience, not something production roles
+    # need). CI's Postgres containers are ephemeral per run anyway, so there's nothing to clean
+    # up there; only swallow the expected privilege error, not real bugs.
+    try:
+        with eng.begin() as conn:
+            # Base.metadata.tables (unordered), not .sorted_tables -- a topological sort isn't
+            # needed since TRUNCATE ... CASCADE handles FK ordering itself, and orgs/tenants have
+            # a genuine FK cycle between them that makes .sorted_tables raise a SAWarning.
+            table_names = [table.name for table in Base.metadata.tables.values()]
+            if table_names:
+                quoted = ", ".join(f'"{name}"' for name in table_names)
+                conn.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
+    except DBAPIError as exc:
+        if "InsufficientPrivilege" not in type(exc.orig).__name__:
+            raise
+        logger.warning("skipping post-session DB truncate: connected role lacks TRUNCATE privilege")
 
 
 @pytest.fixture
