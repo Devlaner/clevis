@@ -299,6 +299,7 @@ function ConnectedOrgsSection() {
       queryClient.invalidateQueries({ queryKey: ["installations"] })
       setConfirmingKey(null)
     },
+    onError: () => setConfirmingKey(null),
   })
 
   const rowKey = (row: ConnectedInstallation) => `${row.scope}:${row.id}`
@@ -312,6 +313,12 @@ function ConnectedOrgsSection() {
         <span className="section-label">Connected GitHub accounts</span>
         {rows.length > 0 && <span className="stat-chip">{rows.length} connected</span>}
       </div>
+
+      {disconnect.isError && (
+        <p role="alert" className="px-4 pt-3 text-xs text-destructive">
+          {disconnect.error instanceof Error ? disconnect.error.message : "Disconnect failed."}
+        </p>
+      )}
 
       {isLoading ? (
         <div className="px-4 py-6 flex items-center gap-2 text-sm text-muted-foreground">

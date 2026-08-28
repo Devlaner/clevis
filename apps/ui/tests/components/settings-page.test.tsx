@@ -374,4 +374,27 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("shows an error message and lets the user try again when disconnect fails", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "shabnam", account_type: "User", installation_id: 7, created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+    installationsRemoveMock.mockRejectedValue(new Error("GitHub API unreachable"));
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /disconnect/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("GitHub API unreachable");
+    });
+    // The row is still there (not silently removed) and can be retried immediately --
+    // confirmingKey was cleared on error, not left stuck on "Confirm disconnect".
+    expect(screen.getByText("shabnam")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+  });
+
 });
