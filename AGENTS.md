@@ -134,7 +134,7 @@ pytest -q                                    # all tests from repo root
 pytest -q apps/api/tests/test_health.py     # single file
 ```
 
-Tests hit a real Postgres database — no mocks. `pytest.ini` adds `apps/api` and `apps/worker/src` to `pythonpath`. Each test function runs inside a transaction with a savepoint; the savepoint is rolled back after the test, giving a clean DB state without truncating tables per-test. Once, at the very end of the whole pytest session, `apps/api/tests/conftest.py`'s `_engine` fixture teardown does truncate every ORM table — this exists to recover from non-test traffic (a manually-run `uvicorn`/E2E session against the same local DB) committing real rows that would otherwise make the next `pytest -q` run's `/auth/setup`-dependent tests fail with 409s.
+Tests hit a real Postgres database — no mocks. `pytest.ini` adds `apps/api` and `apps/worker/src` to `pythonpath`. Each test function runs inside a transaction with a savepoint; the savepoint is rolled back after the test, giving a clean DB state without truncating tables per-test. Once, at the very end of the whole pytest session, `apps/api/tests/conftest.py`'s `_engine` fixture teardown does truncate every ORM table on whatever database `DATABASE_URL` points at for that test run — this exists to recover from non-test traffic (a manually-run `uvicorn`/E2E session against the same local DB) committing real rows that would otherwise make the next `pytest -q` run's `/auth/setup`-dependent tests fail with 409s. This is the one narrow, test-only exception to the "no dropping or truncating tables" guardrail below: it never runs outside a pytest session, and `DATABASE_URL` in this repo's dev/test setup always names a disposable local/CI Postgres container, never a shared or production database — never point a test run's `DATABASE_URL` at one. (CI's constrained-role test job lacks TRUNCATE privilege by design and the fixture skips itself there rather than failing.)
 
 ### UI
 ```bash
@@ -190,7 +190,7 @@ This repo has sharp edges worth double-checking rather than assuming:
 
 ### 3. Other irreversible actions require explicit confirmation
 
-No dropping or truncating tables. No bypassing `require_org_role("admin")` on privileged org actions (e.g. cache clear). No committing `.env` or real tokens/secrets. Avoid `git push --force` to shared branches unless a maintainer explicitly asks for a history rewrite on a feature branch.
+No dropping or truncating tables against a real environment (the one narrow exception: the disposable test-DB truncate described in the Commands → Python tests section above, which only ever runs inside a pytest session against a local/CI throwaway database). No bypassing `require_org_role("admin")` on privileged org actions (e.g. cache clear). No committing `.env` or real tokens/secrets. Avoid `git push --force` to shared branches unless a maintainer explicitly asks for a history rewrite on a feature branch.
 
 ### 4. Don't scope-creep
 
