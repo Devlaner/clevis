@@ -1,4 +1,5 @@
 import logging
+from urllib.parse import urlsplit
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -9,6 +10,14 @@ from src.core.config import settings
 from src.core.db import Base
 
 logger = logging.getLogger(__name__)
+
+# Hosts a throwaway local/CI Postgres is actually reachable at in this repo's own dev/CI setup
+# (docker-compose's `db` service, or GitHub Actions' service-container port-forward to
+# localhost) -- never a managed/hosted Postgres a real deployment would use. This is the
+# fail-closed guard CodeRabbit asked for on the truncate below: an allowlist, not a denylist,
+# so an unrecognized host (e.g. a real deployment's DB) is refused by default rather than
+# trusted by default.
+_DISPOSABLE_DB_HOSTS = {"localhost", "127.0.0.1", "db"}
 
 
 @pytest.fixture(scope="session")
@@ -23,7 +32,11 @@ def _engine():
     # next `pytest -q` run. Truncating every ORM table once at the very end of the whole session
     # (not per-test -- that would defeat the fast savepoint-rollback approach above) guarantees
     # the next run starts clean regardless of what non-test traffic touched this DB in between.
-    #
+    host = urlsplit(settings.database_url.get_secret_value()).hostname
+    if host not in _DISPOSABLE_DB_HOSTS:
+        logger.warning("skipping post-session DB truncate: %r is not a recognized disposable-DB host", host)
+        return
+
     # Best-effort, not fatal: CI additionally runs this suite against the constrained
     # `clevis_api`/`clevis_worker` roles (to verify RLS enforcement) which are granted
     # SELECT/INSERT/UPDATE/DELETE but not TRUNCATE (migration 0032 and friends never grant it,
