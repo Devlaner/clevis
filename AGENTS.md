@@ -134,7 +134,7 @@ pytest -q                                    # all tests from repo root
 pytest -q apps/api/tests/test_health.py     # single file
 ```
 
-Tests hit a real Postgres database — no mocks. `pytest.ini` adds `apps/api` and `apps/worker/src` to `pythonpath`. Each test function runs inside a transaction with a savepoint; the savepoint is rolled back after the test, giving a clean DB state without truncating tables.
+Tests hit a real Postgres database — no mocks. `pytest.ini` adds `apps/api` and `apps/worker/src` to `pythonpath`. Each test function runs inside a transaction with a savepoint; the savepoint is rolled back after the test, giving a clean DB state without truncating tables per-test. Once, at the very end of the whole pytest session, `apps/api/tests/conftest.py`'s `_engine` fixture teardown does truncate every ORM table — this exists to recover from non-test traffic (a manually-run `uvicorn`/E2E session against the same local DB) committing real rows that would otherwise make the next `pytest -q` run's `/auth/setup`-dependent tests fail with 409s.
 
 ### UI
 ```bash

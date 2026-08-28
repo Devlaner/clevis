@@ -11,6 +11,21 @@ def _engine():
     eng = create_engine(settings.database_url.get_secret_value())
     Base.metadata.create_all(eng)  # no-op if alembic already ran
     yield eng
+    # Per-test isolation above never leaves committed rows -- but this DB is also the one a
+    # developer points a manually-run `uvicorn`/E2E session at (see "Running locally" in
+    # AGENTS.md), and *that* traffic commits for real. A leftover workspace-admin user from a
+    # prior manual session makes /auth/setup-dependent tests fail with 409 instead of 201 on the
+    # next `pytest -q` run. Truncating every ORM table once at the very end of the whole session
+    # (not per-test -- that would defeat the fast savepoint-rollback approach above) guarantees
+    # the next run starts clean regardless of what non-test traffic touched this DB in between.
+    with eng.begin() as conn:
+        # Base.metadata.tables (unordered), not .sorted_tables -- a topological sort isn't
+        # needed since TRUNCATE ... CASCADE handles FK ordering itself, and orgs/tenants have
+        # a genuine FK cycle between them that makes .sorted_tables raise a SAWarning.
+        table_names = [table.name for table in Base.metadata.tables.values()]
+        if table_names:
+            quoted = ", ".join(f'"{name}"' for name in table_names)
+            conn.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
 
 
 @pytest.fixture
