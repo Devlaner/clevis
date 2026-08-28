@@ -50,12 +50,14 @@ def http(app):
 
 _DEFAULT_SAFE_MOCKS = {
     "src.routers.analytics._safe_list_repos": {"return_value": [{"name": "api"}, {"name": "worker"}]},
-    "src.routers.analytics._safe_member_count": {"return_value": 12},
-    "src.routers.analytics._safe_recent_events": {"return_value": []},
-    "src.routers.analytics._safe_open_pr_count": {"return_value": 7},
+    "src.routers.analytics._safe_member_count": {"return_value": (12, True)},
+    "src.routers.analytics._safe_recent_events": {"return_value": ([], True)},
+    "src.routers.analytics._safe_open_pr_count": {"return_value": (7, True)},
     "src.routers.analytics._safe_pr_merge_rate_4w": {"return_value": []},
-    "src.routers.analytics._safe_commit_activity_4w_and_heatmap_52w": {"return_value": ([1, 2, 3, 4], [0] * 52)},
-    "src.routers.analytics._safe_total_cache_bytes": {"return_value": 123456},
+    "src.routers.analytics._safe_commit_activity_4w_and_heatmap_52w": {
+        "return_value": ([1, 2, 3, 4], [0] * 52, True)
+    },
+    "src.routers.analytics._safe_total_cache_bytes": {"return_value": (123456, True)},
     "src.routers.analytics._safe_milestones": {"return_value": ([], [])},
     "src.routers.analytics._safe_pr_cycle_time_8w": {"return_value": []},
     "src.routers.analytics._safe_release_cadence_4w": {"return_value": [0, 0, 0, 0]},
@@ -120,6 +122,7 @@ def test_cockpit_success_all_sources(http, db, mock_user):
     assert body["latest_score"] == 85
     assert body["score_trend"] == [70, 85]
     assert body["cache_job_success_rate"] == 0.75
+    assert body["degraded"] is False
 
 
 def test_cockpit_no_scans_yet(http, db, mock_user):
@@ -151,7 +154,7 @@ def test_cockpit_no_cache_jobs_yet(http, db, mock_user):
 
 
 def test_cockpit_degrades_when_pr_search_fails(http, db, mock_user):
-    patchers = _patch_all({"src.routers.analytics._safe_open_pr_count": {"return_value": 0}})
+    patchers = _patch_all({"src.routers.analytics._safe_open_pr_count": {"return_value": (0, False)}})
     _start_all(patchers)
     try:
         with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
@@ -163,10 +166,11 @@ def test_cockpit_degrades_when_pr_search_fails(http, db, mock_user):
     body = resp.json()
     assert body["open_pr_count"] == 0
     assert body["member_count"] == 12  # other fields unaffected
+    assert body["degraded"] is True  # a failed call must not look identical to a real 0
 
 
 def test_cockpit_degrades_when_events_fetch_fails(http, db, mock_user):
-    patchers = _patch_all({"src.routers.analytics._safe_recent_events": {"return_value": []}})
+    patchers = _patch_all({"src.routers.analytics._safe_recent_events": {"return_value": ([], False)}})
     _start_all(patchers)
     try:
         with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
@@ -175,7 +179,24 @@ def test_cockpit_degrades_when_events_fetch_fails(http, db, mock_user):
         _stop_all(patchers)
 
     assert resp.status_code == 200
-    assert resp.json()["recent_events"] == []
+    body = resp.json()
+    assert body["recent_events"] == []
+    assert body["degraded"] is True
+
+
+def test_cockpit_not_degraded_when_every_safe_call_succeeds_but_returns_empty(http, db, mock_user):
+    """A genuinely empty org (no PRs, no events) must NOT be flagged degraded -- only an actual
+    failed call should set it."""
+    patchers = _patch_all()
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    assert resp.json()["degraded"] is False
 
 
 def test_cockpit_fails_when_repo_list_fails(http, db, mock_user):
@@ -384,32 +405,101 @@ def test_cockpit_does_not_read_aggregate_for_org_the_caller_is_not_a_member_of(h
 
 
 # ---------------------------------------------------------------------------
+# recent_events staleness (data-accuracy fix): a connected org's Recent Activity card must
+# say so when the ingestion cursor hasn't advanced recently, instead of silently showing old
+# data as if it were current.
+# ---------------------------------------------------------------------------
+
+
+def _set_cursor(db, tenant_id, *, account_login="acme", account_type="Organization", last_synced_at):
+    db.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+    db.execute(
+        text(
+            "INSERT INTO activity_sync_cursors (tenant_id, account_login, account_type, last_synced_at) "
+            "VALUES (:tenant_id, :account_login, :account_type, :last_synced_at)"
+        ),
+        {
+            "tenant_id": tenant_id,
+            "account_login": account_login,
+            "account_type": account_type,
+            "last_synced_at": last_synced_at,
+        },
+    )
+    db.commit()
+
+
+def test_recent_events_staleness_true_when_never_synced(db):
+    from src.routers.analytics import _recent_events_staleness
+
+    assert _recent_events_staleness(db, tenant_id=99999) is True
+
+
+def test_recent_events_staleness_false_when_recently_synced(db, acme_org_with_installation):
+    from src.routers.analytics import _recent_events_staleness
+
+    tenant_id = acme_org_with_installation.tenant_id
+    _set_cursor(db, tenant_id, last_synced_at=datetime.now(timezone.utc) - timedelta(minutes=5))
+    assert _recent_events_staleness(db, tenant_id) is False
+
+
+def test_recent_events_staleness_true_when_synced_long_ago(db, acme_org_with_installation):
+    from src.routers.analytics import _recent_events_staleness
+
+    tenant_id = acme_org_with_installation.tenant_id
+    _set_cursor(db, tenant_id, last_synced_at=datetime.now(timezone.utc) - timedelta(hours=48))
+    assert _recent_events_staleness(db, tenant_id) is True
+
+
+def test_cockpit_connected_org_surfaces_recent_events_staleness(http, db, mock_user, acme_org_with_installation):
+    patchers = [patch(target, **kwargs) for target, kwargs in _CONNECTED_SAFE_MOCKS.items()]
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["recent_events_source"] == "aggregate"
+    assert body["recent_events_stale"] is True  # no cursor row was ever written in this test
+
+
+# ---------------------------------------------------------------------------
 # Unit tests for individual _safe_* helpers' own try/except behavior
 # ---------------------------------------------------------------------------
 
 
-def test_safe_member_count_returns_zero_on_http_error():
+def test_safe_member_count_returns_zero_and_not_ok_on_http_error():
     from src.routers.analytics import _safe_member_count
 
     with patch("src.routers.analytics.GitHubClient") as mock_client:
         mock_client.return_value.request_paginated.side_effect = _HTTP_ERROR
-        assert _safe_member_count("acme", "ghp_test") == 0
+        assert _safe_member_count("acme", "ghp_test") == (0, False)
 
 
-def test_safe_member_count_returns_zero_on_request_error():
+def test_safe_member_count_returns_zero_and_not_ok_on_request_error():
     from src.routers.analytics import _safe_member_count
 
     with patch("src.routers.analytics.GitHubClient") as mock_client:
         mock_client.return_value.request_paginated.side_effect = httpx.RequestError("boom")
-        assert _safe_member_count("acme", "ghp_test") == 0
+        assert _safe_member_count("acme", "ghp_test") == (0, False)
 
 
-def test_safe_open_pr_count_returns_zero_on_http_error():
+def test_safe_member_count_returns_ok_true_on_success():
+    from src.routers.analytics import _safe_member_count
+
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request_paginated.return_value = [{}] * 3
+        assert _safe_member_count("acme", "ghp_test") == (3, True)
+
+
+def test_safe_open_pr_count_returns_zero_and_not_ok_on_http_error():
     from src.routers.analytics import _safe_open_pr_count
 
     with patch("src.routers.analytics.GitHubClient") as mock_client:
         mock_client.return_value.request.side_effect = _HTTP_ERROR
-        assert _safe_open_pr_count("acme", "ghp_test") == 0
+        assert _safe_open_pr_count("acme", "ghp_test") == (0, False)
 
 
 def test_safe_pr_merge_rate_4w_returns_empty_list_on_error():
@@ -432,14 +522,15 @@ def test_safe_pr_merge_rate_4w_returns_four_chronological_buckets():
     assert all(b.opened == 3 and b.merged == 3 for b in buckets)
 
 
-def test_safe_commit_activity_4w_and_heatmap_52w_returns_zeros_on_error():
+def test_safe_commit_activity_4w_and_heatmap_52w_returns_zeros_and_not_ok_when_every_repo_fails():
     from src.routers.analytics import _safe_commit_activity_4w_and_heatmap_52w
 
     with patch("src.routers.analytics.GitHubClient") as mock_client:
         mock_client.return_value.request.side_effect = httpx.RequestError("boom")
-        activity, heatmap = _safe_commit_activity_4w_and_heatmap_52w("acme", "ghp_test", ["repo-a"])
+        activity, heatmap, ok = _safe_commit_activity_4w_and_heatmap_52w("acme", "ghp_test", ["repo-a"])
     assert activity == [0, 0, 0, 0]
     assert heatmap == [0] * 52
+    assert ok is False
 
 
 def test_safe_commit_activity_4w_and_heatmap_52w_sums_across_repos_from_one_fetch():
@@ -449,21 +540,45 @@ def test_safe_commit_activity_4w_and_heatmap_52w_sums_across_repos_from_one_fetc
     weeks_b = [{"total": 1} for _ in range(52)]
     with patch("src.routers.analytics.GitHubClient") as mock_client:
         mock_client.return_value.request.side_effect = [weeks_a, weeks_b]
-        activity, heatmap = _safe_commit_activity_4w_and_heatmap_52w("acme", "ghp_test", ["repo-a", "repo-b"])
+        activity, heatmap, ok = _safe_commit_activity_4w_and_heatmap_52w("acme", "ghp_test", ["repo-a", "repo-b"])
 
     # Only one request per repo -- not one for the 4w slice and a second for the 52w one.
     assert mock_client.return_value.request.call_count == 2
     assert activity == [49, 50, 51, 52]
     assert len(heatmap) == 52
     assert heatmap[0] == weeks_a[0]["total"] + weeks_b[0]["total"]
+    assert ok is True
 
 
-def test_safe_total_cache_bytes_returns_zero_on_error():
+def test_safe_commit_activity_4w_and_heatmap_52w_one_bad_repo_sums_the_rest_but_flags_not_ok():
+    """A single flaky repo must not zero the whole org's aggregate -- it's excluded from the
+    sum and `ok` is False, so the caller can tell this apart from a real all-zero org."""
+    from src.routers.analytics import _safe_commit_activity_4w_and_heatmap_52w
+
+    weeks_good = [{"total": 2} for _ in range(52)]
+
+    def _side_effect(method, path):
+        if "repo-bad" in path:
+            raise httpx.RequestError("boom")
+        return weeks_good
+
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _side_effect
+        activity, heatmap, ok = _safe_commit_activity_4w_and_heatmap_52w(
+            "acme", "ghp_test", ["repo-bad", "repo-good"]
+        )
+
+    assert activity == [2, 2, 2, 2]  # repo-good's contribution survives
+    assert heatmap[0] == 2
+    assert ok is False  # but the caller still knows this is a partial sum
+
+
+def test_safe_total_cache_bytes_returns_zero_and_not_ok_on_error():
     from src.routers.analytics import _safe_total_cache_bytes
 
     with patch("src.routers.analytics.GitHubClient") as mock_client:
         mock_client.return_value.request.side_effect = httpx.RequestError("boom")
-        assert _safe_total_cache_bytes("acme", "ghp_test", ["repo-a"]) == 0
+        assert _safe_total_cache_bytes("acme", "ghp_test", ["repo-a"]) == (0, False)
 
 
 def test_safe_total_cache_bytes_sums_across_repos():
@@ -474,8 +589,25 @@ def test_safe_total_cache_bytes_sums_across_repos():
             {"actions_caches": [{"size_in_bytes": 100}, {"size_in_bytes": 50}]},
             {"actions_caches": [{"size_in_bytes": 25}]},
         ]
-        total = _safe_total_cache_bytes("acme", "ghp_test", ["repo-a", "repo-b"])
+        total, ok = _safe_total_cache_bytes("acme", "ghp_test", ["repo-a", "repo-b"])
     assert total == 175
+    assert ok is True
+
+
+def test_safe_total_cache_bytes_one_bad_repo_sums_the_rest_but_flags_not_ok():
+    from src.routers.analytics import _safe_total_cache_bytes
+
+    def _side_effect(method, path):
+        if "repo-bad" in path:
+            raise httpx.RequestError("boom")
+        return {"actions_caches": [{"size_in_bytes": 50}]}
+
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _side_effect
+        total, ok = _safe_total_cache_bytes("acme", "ghp_test", ["repo-bad", "repo-good"])
+
+    assert total == 50
+    assert ok is False
 
 
 def test_cache_job_success_rate_mixed(db):

@@ -390,6 +390,9 @@ export interface CockpitResponse {
   pr_cycle_time_8w: PrCycleTimeWeek[]
   release_cadence_4w: number[]
   commit_activity_source: "github" | "aggregate"
+  recent_events_source: "github" | "aggregate"
+  recent_events_stale: boolean
+  degraded: boolean
 }
 
 export interface MyViewPRSummary {

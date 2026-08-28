@@ -165,6 +165,13 @@ export default function OverviewPage() {
         </div>
       )}
 
+      {org && !orgQueryIsError && cockpit?.degraded && (
+        <div className="card mb-6 px-4 py-3 flex items-center gap-2 text-sm text-warning">
+          <Warning size={16} weight="fill" />
+          <span>Some data below may be incomplete — a GitHub call failed while loading this page.</span>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-px mb-6 border border-border bg-border">
         <LiveStatCard
           label="Repositories"
@@ -249,8 +256,16 @@ export default function OverviewPage() {
         </div>
 
         <div className="card">
-          <div className="px-4 py-3 border-b border-border">
+          <div className="px-4 py-3 border-b border-border flex items-center gap-2">
             <span className="section-label">Recent Activity</span>
+            {cockpit?.recent_events_stale && (
+              <span
+                className="text-[0.6875rem] text-warning"
+                title="Activity ingestion hasn't synced recently — this list may be out of date."
+              >
+                (stale)
+              </span>
+            )}
           </div>
           <EventActivityList
             events={cockpit?.recent_events ?? []}

@@ -6,9 +6,10 @@ from datetime import date, datetime, timedelta, timezone
 import anyio
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
+from src.core.app_config import get_config
 from src.core.auth import UserOut, require_auth
 from src.core.db import RepoEventDailyCount, get_db
 from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role, set_tenant_session_context
@@ -179,12 +180,15 @@ def _safe_list_repos(owner: str, token: str) -> list[dict]:
     return client.request_paginated(f"/orgs/{owner}/repos", params={"type": "all", "sort": "pushed"})
 
 
-def _safe_member_count(owner: str, token: str) -> int:
+def _safe_member_count(owner: str, token: str) -> tuple[int, bool]:
+    """Returns (count, ok) -- ok=False means the call failed and count is a fallback 0, not a real
+    zero. Callers must fold `not ok` into CockpitResponse.degraded rather than trusting the bare
+    count, which previously looked identical to "this org genuinely has zero members." """
     try:
         client = GitHubClient(token)
-        return len(client.request_paginated(f"/orgs/{owner}/members"))
+        return len(client.request_paginated(f"/orgs/{owner}/members")), True
     except (httpx.HTTPStatusError, httpx.RequestError):
-        return 0
+        return 0, False
 
 
 def _cockpit_connected_tenant(db: Session, user_id: int, owner: str) -> int | None:
@@ -217,30 +221,66 @@ def _cockpit_connected_tenant(db: Session, user_id: int, owner: str) -> int | No
     return org.tenant_id
 
 
-def _safe_recent_events(db: Session, owner: str, token: str, tenant_id: int | None) -> list[OrgEventSummary]:
+def _safe_recent_events(
+    db: Session, owner: str, token: str, tenant_id: int | None
+) -> tuple[list[OrgEventSummary], bool]:
+    """Returns (events, ok) -- ok=False means the underlying fetch failed and events is a fallback
+    [], not a real "no activity" answer."""
     try:
         if tenant_id is not None:
             events = _fetch_events_from_repo_events(db, owner, tenant_id, per_page=10).events
         else:
             events = _cached_events(owner, token, per_page=10).events
-        return [OrgEventSummary(**e.model_dump()) for e in events[:5]]
+        return [OrgEventSummary(**e.model_dump()) for e in events[:5]], True
     except (httpx.HTTPStatusError, httpx.RequestError, HTTPException):
-        return []
+        return [], False
+
+
+_ACTIVITY_STALE_HOURS_DEFAULT = 6
+
+
+def _activity_stale_hours() -> int:
+    # Mirrors gap_heal_sweep.py's own _read_stale_hours -- same config key, same clamp -- so
+    # "stale" means the same thing here as it does to the sweep that's supposed to fix it.
+    raw = get_config("gap_heal_stale_hours", str(_ACTIVITY_STALE_HOURS_DEFAULT))
+    try:
+        return max(1, min(168, int(raw)))
+    except ValueError:
+        return _ACTIVITY_STALE_HOURS_DEFAULT
+
+
+def _recent_events_staleness(db: Session, tenant_id: int) -> bool:
+    """True if this tenant's activity ingestion cursor is older than gap_heal_stale_hours (or has
+    never synced at all) -- surfaced to the UI so a stalled pipeline shows old data labeled as old,
+    instead of silently looking current. Tenant session context is already set by
+    _cockpit_connected_tenant before this runs, so this read is correctly RLS-scoped."""
+    row = db.execute(
+        text("SELECT last_synced_at FROM activity_sync_cursors WHERE tenant_id = :tenant_id"),
+        {"tenant_id": tenant_id},
+    ).fetchone()
+    if row is None or row[0] is None:
+        return True
+    last_synced_at = row[0]
+    if last_synced_at.tzinfo is None:
+        last_synced_at = last_synced_at.replace(tzinfo=timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_activity_stale_hours())
+    return last_synced_at < cutoff
 
 
 def _cockpit_events_and_commit_activity(
     db: Session, owner: str, token: str, tenant_id: int | None, repo_names: list[str]
-) -> tuple[list[OrgEventSummary], tuple[list[int], list[int]]]:
+) -> tuple[list[OrgEventSummary], bool, bool, tuple[list[int], list[int], bool]]:
     # Bundled into one call, not two independent asyncio.gather entries, because both
     # branches below read `db` when tenant_id is set -- a SQLAlchemy Session isn't safe
     # to use concurrently from two threads at once, unlike every other helper in the
     # cockpit's gather, which only ever touches the GitHub token/client.
-    recent_events = _safe_recent_events(db, owner, token, tenant_id)
+    recent_events, recent_events_ok = _safe_recent_events(db, owner, token, tenant_id)
+    recent_events_stale = _recent_events_staleness(db, tenant_id) if tenant_id is not None else False
     if tenant_id is not None:
-        commit_activity = _cockpit_commit_activity_from_aggregate(db, tenant_id)
+        commit_activity = (*_cockpit_commit_activity_from_aggregate(db, tenant_id), True)
     else:
         commit_activity = _safe_commit_activity_4w_and_heatmap_52w(owner, token, repo_names)
-    return recent_events, commit_activity
+    return recent_events, not recent_events_ok, recent_events_stale, commit_activity
 
 
 def _cockpit_commit_activity_from_aggregate(db: Session, tenant_id: int) -> tuple[list[int], list[int]]:
@@ -284,12 +324,12 @@ def _search_count(client: GitHubClient, query: str) -> int:
     return result.get("total_count", 0) if isinstance(result, dict) else 0
 
 
-def _safe_open_pr_count(owner: str, token: str) -> int:
+def _safe_open_pr_count(owner: str, token: str) -> tuple[int, bool]:
     try:
         client = GitHubClient(token)
-        return _search_count(client, f"org:{owner} type:pr state:open")
+        return _search_count(client, f"org:{owner} type:pr state:open"), True
     except (httpx.HTTPStatusError, httpx.RequestError):
-        return 0
+        return 0, False
 
 
 def _safe_pr_merge_rate_4w(owner: str, token: str) -> list[PrWeekBucket]:
@@ -315,26 +355,34 @@ def _safe_pr_merge_rate_4w(owner: str, token: str) -> list[PrWeekBucket]:
 
 def _safe_commit_activity_4w_and_heatmap_52w(
     owner: str, token: str, repo_names: list[str]
-) -> tuple[list[int], list[int]]:
+) -> tuple[list[int], list[int], bool]:
     # Both windows are slices of the exact same GitHub call
     # (/repos/{owner}/{repo}/stats/commit_activity already returns 52 weeks), so this
     # fetches each repo once and derives both aggregates from it -- fetching twice
     # (once per aggregate) would double this endpoint's GitHub API cost for no reason.
-    # A single failing repo zeroes both aggregates rather than partially summing --
-    # simpler than reconciling "which repos contributed" and consistent with this
-    # function's own all-or-nothing best-effort contract to its caller.
+    #
+    # Each repo's future is resolved individually below: a failing repo is skipped (its
+    # commits just don't contribute) rather than zeroing the whole org's aggregate, and the
+    # returned `ok` flag tells the caller at least one repo's stats couldn't be fetched, so
+    # the resulting totals are a real partial sum, not a silent lie dressed up as "0 commits."
+    client = GitHubClient(token)
+    totals_4w = [0, 0, 0, 0]
+    totals_52w = [0] * 52
+    ok = True
     try:
-        client = GitHubClient(token)
-        totals_4w = [0, 0, 0, 0]
-        totals_52w = [0] * 52
         with ThreadPoolExecutor(max_workers=10) as pool:
             futures = [
                 pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/stats/commit_activity")
                 for repo in repo_names[:_MAX_REPOS_FOR_AGGREGATES]
             ]
             for future in futures:
-                weeks = future.result()
+                try:
+                    weeks = future.result()
+                except (httpx.HTTPStatusError, httpx.RequestError):
+                    ok = False
+                    continue
                 if not isinstance(weeks, list):
+                    ok = False
                     continue
                 if len(weeks) >= 4:
                     for i, week in enumerate(weeks[-4:]):
@@ -342,27 +390,34 @@ def _safe_commit_activity_4w_and_heatmap_52w(
                 if len(weeks) >= 52:
                     for i, week in enumerate(weeks[-52:]):
                         totals_52w[i] += week.get("total", 0)
-        return totals_4w, totals_52w
     except (httpx.HTTPStatusError, httpx.RequestError):
-        return [0, 0, 0, 0], [0] * 52
+        return [0, 0, 0, 0], [0] * 52, False
+    return totals_4w, totals_52w, ok
 
 
-def _safe_total_cache_bytes(owner: str, token: str, repo_names: list[str]) -> int:
+def _safe_total_cache_bytes(owner: str, token: str, repo_names: list[str]) -> tuple[int, bool]:
+    client = GitHubClient(token)
+    total = 0
+    ok = True
     try:
-        client = GitHubClient(token)
         with ThreadPoolExecutor(max_workers=10) as pool:
             futures = [
                 pool.submit(client.request, "GET", f"/repos/{owner}/{repo}/actions/caches")
                 for repo in repo_names[:_MAX_REPOS_FOR_AGGREGATES]
             ]
-            results = [future.result() for future in futures]
-            return sum(
-                sum(c.get("size_in_bytes", 0) for c in data.get("actions_caches", []))
-                for data in results
-                if isinstance(data, dict)
-            )
+            for future in futures:
+                try:
+                    data = future.result()
+                except (httpx.HTTPStatusError, httpx.RequestError):
+                    ok = False
+                    continue
+                if isinstance(data, dict):
+                    total += sum(c.get("size_in_bytes", 0) for c in data.get("actions_caches", []))
+                else:
+                    ok = False
     except (httpx.HTTPStatusError, httpx.RequestError):
-        return 0
+        return 0, False
+    return total, ok
 
 
 def _milestone_state(due_on: str | None, progress_pct: float) -> str:
@@ -543,11 +598,11 @@ async def personal_analytics_cockpit(
     repo_names = [r["name"] for r in repos]
 
     (
-        member_count,
-        (recent_events, (commit_activity_4w, commit_heatmap_52w)),
-        open_pr_count,
+        (member_count, member_count_ok),
+        (recent_events, recent_events_degraded, recent_events_stale, (commit_activity_4w, commit_heatmap_52w, commit_activity_ok)),
+        (open_pr_count, open_pr_count_ok),
         pr_merge_rate_4w,
-        total_cache_size_bytes,
+        (total_cache_size_bytes, cache_bytes_ok),
         (milestones, at_risk_repos),
         pr_cycle_time_8w,
         release_cadence_4w,
@@ -562,6 +617,14 @@ async def personal_analytics_cockpit(
         anyio.to_thread.run_sync(lambda: _safe_milestones(owner, token, repo_names)),
         anyio.to_thread.run_sync(lambda: _safe_pr_cycle_time_8w(owner, token)),
         anyio.to_thread.run_sync(lambda: _safe_release_cadence_4w(owner, token, repo_names)),
+    )
+
+    degraded = (
+        not member_count_ok
+        or not open_pr_count_ok
+        or not cache_bytes_ok
+        or not commit_activity_ok
+        or recent_events_degraded
     )
 
     return CockpitResponse(
@@ -581,6 +644,9 @@ async def personal_analytics_cockpit(
         pr_cycle_time_8w=pr_cycle_time_8w,
         release_cadence_4w=release_cadence_4w,
         commit_activity_source="aggregate" if connected_tenant_id is not None else "github",
+        recent_events_source="aggregate" if connected_tenant_id is not None else "github",
+        recent_events_stale=recent_events_stale,
+        degraded=degraded,
     )
 
 
