@@ -34,7 +34,9 @@ from pathlib import Path
 import psycopg
 import redis
 
+import org_membership_store
 import repo_events_store
+import security_alerts_store
 from config import settings
 
 log = logging.getLogger(__name__)
@@ -47,6 +49,22 @@ _DB_URL = settings.database_url.get_secret_value().replace("postgresql+psycopg:/
 _STREAM_KEY = "webhook_events"
 _GROUP_NAME = "event_processors"
 _CONSUMER_NAME = f"worker-{os.getpid()}"
+
+# Security alert events (dependabot_alert/code_scanning_alert/secret_scanning_alert,
+# S6-follow-on PR 1) are durably queued by the receiver onto the same shared stream as
+# every other ingested event type, but normalize into security_alerts (post-S6 PR 2),
+# not repo_events -- their payload.alert shape and upsert-on-state-change semantics
+# don't fit repo_events's insert-once activity-log model. _process_entry branches on
+# this set before calling the repo_events path.
+_SECURITY_ALERT_EVENT_TYPES = {"dependabot_alert", "code_scanning_alert", "secret_scanning_alert"}
+
+# member/organization normalize into org_members/repo_collaborators (Collaborators PR 1 of 3).
+# membership/team are durably queued (same webhooks.py change) but have no normalizer yet --
+# team-based repo access is deferred, see org_membership_store.py's module docstring -- so
+# _process_entry acks-and-skips them via _NOT_YET_NORMALIZED_EVENT_TYPES, same placeholder
+# pattern PR #350 used for the security alerts before their own consumer existed.
+_ORG_MEMBERSHIP_EVENT_TYPES = {"member", "organization"}
+_NOT_YET_NORMALIZED_EVENT_TYPES = {"membership", "team"}
 
 # How long a claimed-but-unacked entry sits idle before another pass reclaims it --
 # comfortably longer than any single event's normalize+insert should ever take.
@@ -161,6 +179,137 @@ def _normalize(event_type: str, payload: dict, received_at: datetime) -> dict | 
     }
 
 
+# event_type -> security_alerts.kind. Kept separate from the event_type string itself
+# (rather than storing "dependabot_alert" verbatim) so a future consumer of this table
+# (PR 3's Security dashboard repoint) works with the same short vocabulary GitHub's own
+# REST API uses for these alert categories (dependabot/code-scanning/secret-scanning),
+# not webhook-specific event-type naming.
+_ALERT_KIND_BY_EVENT_TYPE = {
+    "dependabot_alert": "dependabot",
+    "code_scanning_alert": "code_scanning",
+    "secret_scanning_alert": "secret_scanning",
+}
+
+
+def _parse_alert_timestamp(value: str | None, fallback: datetime) -> datetime:
+    """GitHub sends alert.created_at/updated_at as ISO 8601 with a trailing 'Z', which
+    datetime.fromisoformat only accepts starting in Python 3.11 -- normalize by hand
+    rather than assume the runtime's exact minor version. Falls back to received_at
+    (webhook_deliveries ingestion time) for a missing/malformed value, same defensive
+    posture as _normalize's occurred_at fallback."""
+    if not value:
+        return fallback
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return fallback
+
+
+def _normalize_security_alert(event_type: str, payload: dict, received_at: datetime) -> dict | None:
+    """Returns the security_alerts column values for this alert webhook payload, or
+    None if it can't be normalized (missing repository/alert/number -- shouldn't happen
+    for a real GitHub delivery, but defend against a malformed/test payload rather than
+    crash the consumer loop, same posture as _normalize)."""
+    repository = payload.get("repository") or {}
+    repo_full_name = repository.get("full_name")
+    alert = payload.get("alert") or {}
+    number = alert.get("number")
+    if not repo_full_name or number is None:
+        return None
+
+    kind = _ALERT_KIND_BY_EVENT_TYPE[event_type]
+    if kind == "dependabot":
+        severity = (alert.get("security_advisory") or {}).get("severity")
+        details = {
+            "action": payload.get("action"),
+            "dependency": alert.get("dependency"),
+            "security_advisory": alert.get("security_advisory"),
+        }
+    elif kind == "code_scanning":
+        severity = (alert.get("rule") or {}).get("severity")
+        details = {
+            "action": payload.get("action"),
+            "rule": alert.get("rule"),
+            "tool": alert.get("tool"),
+        }
+    else:  # secret_scanning -- no severity in GitHub's payload for this alert type
+        severity = None
+        details = {
+            "action": payload.get("action"),
+            "secret_type": alert.get("secret_type"),
+            "secret_type_display_name": alert.get("secret_type_display_name"),
+            # Only present once the alert is resolved -- None on the initial "created"
+            # webhook. Needed by the Security dashboard's secret-scanning panel (post-S6
+            # PR 3) to show why an alert was closed, matching GitHub's own live API shape.
+            "resolution": alert.get("resolution"),
+        }
+
+    return {
+        "repo": repo_full_name,
+        "kind": kind,
+        "number": number,
+        "state": alert.get("state", ""),
+        "severity": severity,
+        "details": details,
+        "created_at": _parse_alert_timestamp(alert.get("created_at"), received_at),
+        "updated_at": _parse_alert_timestamp(alert.get("updated_at"), received_at),
+    }
+
+
+def _normalize_member_event(payload: dict) -> dict | None:
+    """Returns repo_collaborators column values for a `member` event payload, or None if
+    it can't be normalized (missing repository/member.login). action is 'added'/'edited'/
+    'removed'; permission is read from changes.permission.to. Per GitHub's own webhook
+    payload schemas (octokit/webhooks' JSON schemas, the authoritative source -- the
+    prose docs don't spell this out clearly), `changes.permission` is *optional* on both
+    'added' and 'edited', not guaranteed on either -- so this can legitimately come back
+    None (falls back to "unknown" below) for a real delivery, not just a malformed test
+    payload. is_outside_collaborator can't be determined from this event alone (GitHub's
+    member payload doesn't carry org-membership status) -- None here (an honest "not yet
+    known", not a False claim), filled in by the future reconciliation poll
+    (Collaborators PR 2), same known-staleness posture as org_members.role."""
+    repository = payload.get("repository") or {}
+    repo_full_name = repository.get("full_name")
+    member = payload.get("member") or {}
+    login = member.get("login")
+    if not repo_full_name or not login:
+        return None
+
+    permission = ((payload.get("changes") or {}).get("permission") or {}).get("to")
+    return {
+        "repo": repo_full_name,
+        "login": login,
+        "permission": permission or "unknown",
+        "is_outside_collaborator": None,
+    }
+
+
+def _normalize_organization_event(payload: dict) -> dict | None:
+    """Returns org_members column values for an `organization` event's member_added
+    payload, or None if it can't be normalized (missing membership.user.login) -- also
+    None (a no-op) for actions other than member_added/member_removed (member_invited/
+    renamed/deleted don't affect this table).
+
+    `role`/`avatar_url` use `or` fallbacks, not `dict.get(key, default)` -- a payload
+    can carry an explicit JSON `null` for either (GitHub doesn't guarantee non-null
+    here any more than it guarantees `changes.permission` on a `member` event, see
+    `_normalize_member_event`'s docstring), and `.get(key, default)` only applies the
+    default when the key is *missing*, not when it's present with a null value. Both
+    columns are NOT NULL on org_members (migration 0040), so an unguarded None would
+    crash the insert and leave the stream entry unacked forever (CodeRabbit finding on
+    Collaborators PR 1's fix commit)."""
+    membership = payload.get("membership") or {}
+    user = membership.get("user") or {}
+    login = user.get("login")
+    if not login:
+        return None
+    return {
+        "login": login,
+        "avatar_url": user.get("avatar_url") or "",
+        "role": membership.get("role") or "member",
+    }
+
+
 def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry_id: str, fields: dict) -> None:
     delivery_row_id = fields.get("delivery_row_id")
     if delivery_row_id is None:
@@ -189,10 +338,78 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
         redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
         return
 
+    if event_type in _NOT_YET_NORMALIZED_EVENT_TYPES:
+        # Team-based repo access (membership/team events) is explicitly deferred -- see
+        # org_membership_store.py's module docstring. Ack so this entry doesn't sit
+        # pending forever; leave webhook_deliveries.status as 'queued' (not 'processed')
+        # so a future consumer can still find it by event_type, same posture as PR #350's
+        # original placeholder for the security alerts.
+        log.debug("webhook_deliveries row %s is a %s event with no consumer yet, leaving queued", delivery_row_id, event_type)
+        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+        return
+
     try:
         payload = json.loads(payload_bytes)
     except json.JSONDecodeError:
         log.error("webhook_deliveries row %s has malformed JSON payload, dropping", delivery_row_id)
+        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+        return
+
+    if event_type in _ORG_MEMBERSHIP_EVENT_TYPES:
+        with pg_conn.cursor() as cur:
+            cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+            if event_type == "member":
+                member_normalized = _normalize_member_event(payload)
+                action = payload.get("action")
+                if member_normalized is None:
+                    log.error("webhook_deliveries row %s has no repository.full_name or member.login, dropping", delivery_row_id)
+                    redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+                    return
+                if action == "removed":
+                    org_membership_store.remove_repo_collaborator(
+                        cur, tenant_id=tenant_id, repo=member_normalized["repo"], login=member_normalized["login"],
+                        event_received_at=received_at,
+                    )
+                else:
+                    org_membership_store.upsert_repo_collaborator(cur, tenant_id=tenant_id, granted_at=received_at, **member_normalized)
+            else:  # organization
+                action = payload.get("action")
+                if action == "member_removed":
+                    login = ((payload.get("membership") or {}).get("user") or {}).get("login")
+                    if not login:
+                        log.error("webhook_deliveries row %s has no membership.user.login, dropping", delivery_row_id)
+                        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+                        return
+                    org_membership_store.remove_org_member(cur, tenant_id=tenant_id, login=login, event_received_at=received_at)
+                elif action == "member_added":
+                    org_normalized = _normalize_organization_event(payload)
+                    if org_normalized is None:
+                        log.error("webhook_deliveries row %s has no membership.user.login, dropping", delivery_row_id)
+                        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+                        return
+                    org_membership_store.upsert_org_member(cur, tenant_id=tenant_id, added_at=received_at, **org_normalized)
+                else:
+                    # member_invited/renamed/deleted don't affect org_members -- ack as a no-op.
+                    log.debug("webhook_deliveries row %s is an organization/%s event, no-op for org_members", delivery_row_id, action)
+            cur.execute("UPDATE webhook_deliveries SET status = 'processed' WHERE id = %s", (delivery_row_id,))
+        pg_conn.commit()
+        redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+        return
+
+    if event_type in _SECURITY_ALERT_EVENT_TYPES:
+        alert_normalized = _normalize_security_alert(event_type, payload, received_at)
+        if alert_normalized is None:
+            log.error("webhook_deliveries row %s has no repository.full_name or alert.number, dropping", delivery_row_id)
+            redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
+            return
+
+        with pg_conn.cursor() as cur:
+            # Mirrors src.core.rbac.set_tenant_session_context -- see the repo_events
+            # branch below for the full rationale, same mechanism applies here.
+            cur.execute(f"SET app.tenant_id = {int(tenant_id)}")
+            security_alerts_store.upsert_security_alert(cur, tenant_id=tenant_id, **alert_normalized)
+            cur.execute("UPDATE webhook_deliveries SET status = 'processed' WHERE id = %s", (delivery_row_id,))
+        pg_conn.commit()
         redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
         return
 

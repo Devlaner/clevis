@@ -28,6 +28,7 @@ from src.routers import (
     webhooks,
 )
 from src.services.gap_heal_loop import gap_heal_loop
+from src.services.membership_reconcile_loop import membership_reconcile_loop
 
 # CORS allowed origins are a deploy-time security boundary, set via the CORS_ORIGINS env var.
 _cors_origins = settings.cors_origins
@@ -36,15 +37,20 @@ _cors_origins = settings.cors_origins
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     setup_logging()
-    task = asyncio.create_task(gap_heal_loop())
+    # Two independent background loops -- activity-sync gap-healing (S5) and org-membership
+    # reconciliation (Collaborators PR 2 of 3) are unrelated sweeps, each already tolerant of
+    # a single iteration's exception without dying, so there's no reason to share one task.
+    tasks = [asyncio.create_task(gap_heal_loop()), asyncio.create_task(membership_reconcile_loop())]
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(

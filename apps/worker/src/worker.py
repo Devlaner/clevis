@@ -2,6 +2,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -9,6 +10,8 @@ import psycopg
 from pydantic import BaseModel, Field, ValidationError
 
 import backfill
+import membership_reconcile
+import org_membership_store
 import repo_events_store
 from _crypto import decrypt_job_token
 from _sanitize import sanitize_error
@@ -90,6 +93,12 @@ class BackfillRepoEventsPayload(BaseModel):
     tenant_id: int
     account_login: str = Field(min_length=1)
     account_type: str = Field(min_length=1)
+    token: str = Field(min_length=1)
+
+
+class ReconcileOrgMembershipPayload(BaseModel):
+    tenant_id: int
+    org_login: str = Field(min_length=1)
     token: str = Field(min_length=1)
 
 
@@ -312,12 +321,118 @@ def _handle_backfill_repo_events(conn: psycopg.Connection, job_id: int, payload_
     log.info("job %d done: backfilled %d/%d events for %s", job_id, inserted_count, len(raw_events), payload.account_login)
 
 
+def _handle_reconcile_org_membership(conn: psycopg.Connection, job_id: int, payload_raw: str, retry_count: int) -> None:
+    try:
+        payload = ReconcileOrgMembershipPayload.model_validate_json(payload_raw)
+    except ValidationError as error:
+        log.error("job %d has an invalid payload: %s", job_id, error)
+        _mark_failed(conn, job_id, sanitize_error(error), retry_count)
+        return
+
+    try:
+        token = decrypt_job_token(payload.token, settings.job_secret_key.get_secret_value())
+    except Exception as error:
+        log.error("job %d failed to decrypt its token: %s", job_id, error)
+        _mark_failed(conn, job_id, sanitize_error(error), retry_count)
+        return
+
+    base = settings.github_api_base
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        with httpx.Client(timeout=20) as client:
+            roster = membership_reconcile.fetch_org_roster(client, base, headers, payload.org_login)
+    except httpx.HTTPStatusError as error:
+        resp = error.response
+        # _get_with_retry already retried a 429/secondary-403 rate limit up to 3 times inside
+        # fetch_org_roster's own request loop -- reaching here with one of those statuses means
+        # the limit was still in effect after that backoff, not that the request is invalid.
+        # Requeue it for the job-level retry (a later attempt, well after this run) instead of
+        # treating it the same as a genuine 4xx like 404/403-permission-denied.
+        if resp.status_code == 429 or membership_reconcile._is_secondary_rate_limit(resp) or resp.status_code >= 500:
+            log.warning("job %d got a %d from GitHub (attempt %d)", job_id, resp.status_code, retry_count + 1)
+            _requeue_for_retry(conn, job_id, retry_count, sanitize_error(_github_error_message(resp)))
+        else:
+            log.error("job %d failed: GitHub API error %d", job_id, resp.status_code)
+            _mark_failed(conn, job_id, sanitize_error(_github_error_message(resp)), retry_count)
+        return
+    except httpx.RequestError as error:
+        log.warning("job %d hit a network error (attempt %d): %s", job_id, retry_count + 1, error)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
+        return
+    except membership_reconcile.RosterIncomplete as error:
+        # Never treat an untrustworthy members/admins/outside_collaborators fetch as ground
+        # truth -- reconcile_org_members would DELETE real members a looping/malformed page
+        # this run couldn't retrieve. Requeue and retry rather than mark_failed: this is very
+        # likely transient (a GitHub pagination glitch, a momentary bad response body) and
+        # self-heals on the next attempt.
+        log.warning("job %d got an incomplete roster (attempt %d): %s", job_id, retry_count + 1, error)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
+        return
+
+    two_factor_disabled = roster["two_factor_disabled_logins"]
+    members = [
+        {
+            **m,
+            # None (overlay unavailable) stays None; otherwise a member is 2FA-enabled iff
+            # NOT in the disabled set -- mirrors collab.py's list_members overlay logic.
+            "two_factor_enabled": None if two_factor_disabled is None else m["login"] not in two_factor_disabled,
+        }
+        for m in roster["members"]
+    ]
+    member_logins = {m["login"] for m in members}
+
+    try:
+        with conn.cursor() as cur:
+            # Same session-context mechanism as event_consumer.py's _process_entry and
+            # worker.py's own backfill handler -- see either's comment for why this isn't a
+            # clevis_worker BYPASSRLS grant instead.
+            cur.execute(f"SET app.tenant_id = {int(payload.tenant_id)}")
+            synced_at = datetime.now(timezone.utc)
+            org_membership_store.reconcile_org_members(cur, tenant_id=payload.tenant_id, members=members, synced_at=synced_at)
+            org_membership_store.reconcile_repo_collaborator_outside_status(
+                cur, tenant_id=payload.tenant_id, member_logins=member_logins, outside_logins=roster["outside_logins"]
+            )
+            # Marks this tenant as freshly reconciled regardless of whether the roster
+            # actually changed -- same posture as activity_sync_cursors's cursor, upserted
+            # in the same transaction so a rolled-back run (below) doesn't advance the
+            # cursor past a reconciliation that never actually happened.
+            cur.execute(
+                """
+                INSERT INTO org_membership_sync_cursors (tenant_id, org_login, last_synced_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (tenant_id) DO UPDATE SET
+                    org_login = EXCLUDED.org_login,
+                    last_synced_at = EXCLUDED.last_synced_at,
+                    updated_at = NOW()
+                """,
+                (payload.tenant_id, payload.org_login),
+            )
+        conn.commit()
+    except psycopg.Error as error:
+        # Without a rollback here, this connection's transaction stays aborted -- see
+        # _handle_backfill_repo_events's identical comment for why that would leave the job
+        # stuck instead of requeued.
+        conn.rollback()
+        log.warning("job %d failed to store reconciled membership (attempt %d): %s", job_id, retry_count + 1, error)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
+        return
+
+    _mark_done(conn, job_id, {"ok": True, "members_seen": len(members)}, retry_count)
+    log.info("job %d done: reconciled %d members for %s", job_id, len(members), payload.org_login)
+
+
 # job_type -> handler. Each handler takes (conn, job_id, payload_raw, retry_count) and is
 # responsible for its own payload validation and terminal/retry outcome via _mark_done /
 # _mark_failed / _requeue_for_retry.
 JOB_HANDLERS = {
     "github.clear_actions_cache": _handle_clear_actions_cache,
     "github.backfill_repo_events": _handle_backfill_repo_events,
+    "github.reconcile_org_membership": _handle_reconcile_org_membership,
 }
 
 

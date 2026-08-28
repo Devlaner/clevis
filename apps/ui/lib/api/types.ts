@@ -487,6 +487,10 @@ export interface RepoSecurityRow {
   // Dimension names the token couldn't evaluate (403/429/network error) -- excluded
   // from `score`. Distinct from a genuine 404 "this is off" answer, which isn't unknown.
   unknown_dimensions: string[]
+  // "aggregate" when dependabot/code_scanning came from ingested webhook events instead
+  // of a live GitHub call (post-S6 PR 3) -- branch_protection/force_push/secret_scanning
+  // have no ingested event covering them and stay live either way.
+  alerts_source: "github" | "aggregate"
 }
 
 export interface VulnCounts {
@@ -518,10 +522,13 @@ export interface SecretAlert {
   created_at: string
   resolved_at: string | null
   repo: string
-  url: string
+  // null when no usable link exists (e.g. aggregate-sourced alerts don't store GitHub's
+  // html_url) -- the UI renders a plain non-link row in that case.
+  url: string | null
 }
 
 export interface SecretScanningResponse {
   repository: string
   alerts: SecretAlert[]
+  source: "github" | "aggregate"
 }

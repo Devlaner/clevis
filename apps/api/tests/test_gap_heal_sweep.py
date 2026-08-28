@@ -131,6 +131,29 @@ def test_sweep_does_not_double_enqueue_while_a_backfill_job_is_still_active(db):
     assert len(jobs) == 1
 
 
+def test_sweep_skips_a_tenant_whose_lock_is_held_by_another_connection(db, _engine):
+    # Regression test: the sweep's check-then-enqueue is only safe within a single sweep
+    # pass. Two concurrent passes (e.g. two API replicas) could both see "no active job"
+    # before either commits and both enqueue -- proven here with a second real connection
+    # holding the (job_type, tenant_id) advisory lock for the whole call, which the running
+    # sweep must lose and skip this tenant entirely (not just avoid enqueueing twice within
+    # one connection, which the dedupe test above already covers).
+    org = org_repo.get_or_create(db, github_login="acme-sweep-locked")
+    stale = datetime.now(timezone.utc) - timedelta(hours=10)
+    _seed_cursor(db, org.tenant_id, "acme-sweep-locked", "Organization", stale)
+
+    with _engine.connect() as other_conn:
+        other_conn.begin()
+        other_conn.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:job_type), :tenant_id)"),
+            {"job_type": "github.backfill_repo_events", "tenant_id": org.tenant_id},
+        )
+        with patch("src.services.gap_heal_sweep.resolve_org_token", return_value="tok"):
+            run_gap_heal_sweep(db)
+
+    assert _backfill_jobs(db) == []
+
+
 def test_sweep_re_enqueues_once_the_active_job_reaches_a_terminal_state(db):
     org = org_repo.get_or_create(db, github_login="acme-sweep-retry")
     stale = datetime.now(timezone.utc) - timedelta(hours=10)

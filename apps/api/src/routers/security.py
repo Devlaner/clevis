@@ -22,7 +22,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
-from src.core.db import get_db
+from src.core.db import SecurityAlert, get_db
+from src.core.rbac import set_tenant_session_context
+from src.repositories import installation_repo, org_repo, tenant_repo
 from src.schemas.security import (
     MatrixSummary,
     RepoSecurityRow,
@@ -54,7 +56,81 @@ def _branch_protection_status(exc: httpx.HTTPStatusError) -> str:
     return "unprotected"
 
 
-def _repo_row(client: GitHubClient, owner: str, repo: dict) -> RepoSecurityRow:
+def _security_connected_tenant(db: Session, user_id: int, owner: str) -> int | None:
+    """Mirrors analytics.py's _cockpit_connected_tenant exactly -- same personal-endpoint
+    membership check (this router is also require_auth-only, no OrgContext), same
+    installation_id-presence gate, same RLS session-context setup. Duplicated rather than
+    imported: routers don't import each other's private helpers in this codebase (see
+    repos.py's _repo_org_connected for the same precedent)."""
+    org = org_repo.get_by_login_ci(db, owner)
+    if org is None:
+        return None
+    org = org_repo.ensure_tenant_linked(db, org)
+    if tenant_repo.get_membership(db, org.tenant_id, user_id) is None:
+        return None
+    installation = installation_repo.get_for_org(db, org_id=org.id, account_login=owner)
+    if installation is None or installation.installation_id is None:
+        return None
+    set_tenant_session_context(db, org.tenant_id, user_id)
+    return org.tenant_id
+
+
+def _open_alerts_by_repo(db: Session, tenant_id: int, repo_full_names: list[str]) -> dict[str, list]:
+    """One query for every scanned repo's dependabot/code_scanning security_alerts rows
+    (every state, not just open -- see _dependabot_from_aggregate for why), not one query
+    per repo -- also sidesteps ThreadPoolExecutor entirely: _repo_row
+    below runs concurrently across repos (existing pattern), and a SQLAlchemy Session
+    isn't safe to share across threads, so this pre-fetches everything up front on the
+    request thread and hands each worker a plain dict slice instead of `db` itself."""
+    if not repo_full_names:
+        return {}
+    rows = (
+        db.query(SecurityAlert.repo, SecurityAlert.kind, SecurityAlert.severity, SecurityAlert.state)
+        .filter(
+            SecurityAlert.tenant_id == tenant_id,
+            SecurityAlert.repo.in_(repo_full_names),
+            SecurityAlert.kind.in_(("dependabot", "code_scanning")),
+        )
+        .all()
+    )
+    by_repo: dict[str, list] = {}
+    for row in rows:
+        by_repo.setdefault(row.repo, []).append(row)
+    return by_repo
+
+
+def _dependabot_from_aggregate(dependabot_rows: list) -> dict:
+    """dependabot dimension from security_alerts rows already filtered to kind=='dependabot'
+    (post-S6 PR 3) instead of a live GitHub call. Considers every state (open, dismissed,
+    fixed, ...) for dependabot_enabled -- a repo whose only Dependabot alerts have all been
+    dismissed still has Dependabot enabled, so restricting this to state=="open" would wrongly
+    read as disabled (CodeRabbit finding on PR #352). critical_count/high_count only count
+    'open' rows, since only a currently-open alert is a live finding.
+
+    Caller (_repo_row) only reaches this with a non-empty dependabot_rows -- a repo with zero
+    ingested dependabot rows falls back to the live GitHub path instead (CodeRabbit finding on
+    PR #356), since an empty result is ambiguous (genuinely no alerts ever vs. not-yet-ingested)
+    and security_alerts has no completeness cursor to tell the two apart. Gated independently
+    of code_scanning rows -- one kind can be ingested for a repo while the other isn't yet
+    (CodeRabbit finding on PR #356, round 2), so trusting the aggregate for one kind says
+    nothing about completeness for the other."""
+    open_rows = [r for r in dependabot_rows if r.state == "open"]
+    return {
+        "dependabot_enabled": len(dependabot_rows) > 0,
+        "critical_count": sum(1 for r in open_rows if r.severity == "critical"),
+        "high_count": sum(1 for r in open_rows if r.severity == "high"),
+    }
+
+
+def _code_scanning_clear_from_aggregate(code_scanning_rows: list) -> bool:
+    """code_scanning dimension from security_alerts rows already filtered to
+    kind=='code_scanning'. Same completeness/per-kind reasoning as
+    _dependabot_from_aggregate's docstring -- caller only reaches this with a non-empty
+    code_scanning_rows."""
+    return not any(r.state == "open" for r in code_scanning_rows)
+
+
+def _repo_row(client: GitHubClient, owner: str, repo: dict, alerts_by_repo: dict[str, list] | None = None) -> RepoSecurityRow:
     name = repo["name"]
     branch = repo.get("default_branch")
     unknown: list[str] = []
@@ -82,42 +158,66 @@ def _repo_row(client: GitHubClient, owner: str, repo: dict) -> RepoSecurityRow:
         (repo.get("security_and_analysis") or {}).get("secret_scanning") or {}
     ).get("status") == "enabled"
 
-    dependabot_enabled = False
-    critical_count = 0
-    high_count = 0
-    try:
-        alerts = client.request("GET", f"/repos/{owner}/{name}/dependabot/alerts", params={"state": "open"})
-        dependabot_enabled = True
-        if isinstance(alerts, list):
-            for alert in alerts:
-                severity = (alert.get("security_advisory") or {}).get("severity")
-                if severity == "critical":
-                    critical_count += 1
-                elif severity == "high":
-                    high_count += 1
-    except httpx.HTTPStatusError as exc:
-        # 404 means Dependabot alerts are genuinely disabled for this repo -- a real
-        # "no alerts" answer. Any other status (403 missing security-events scope,
-        # 429, ...) means the alert count is unknown, not zero, so it must not
-        # silently score as "no critical/high alerts" -- see the identical fix in
-        # DependabotAlertsCheck (packages/checks/src/checks/github_checks.py, 3184c76).
-        if exc.response.status_code != 404:
-            unknown.append("dependabot")
-    except httpx.RequestError:
-        unknown.append("dependabot")
+    alerts_source = "github"
+    # security_alerts has no backfill/sync-cursor -- only webhook events populate it, so a repo
+    # with zero rows here is ambiguous ("genuinely no alerts ever" vs. "not yet ingested"), same
+    # completeness gap as personal_secret_scanning (CodeRabbit finding on PR #356). Gated
+    # per-repo AND per-kind, not once for the whole tenant or the whole repo: one repo can have
+    # real ingested rows while another has none yet, and within one repo a dependabot_alert
+    # webhook can have arrived while no code_scanning_alert webhook ever has (or vice versa) --
+    # trusting the aggregate for one kind says nothing about completeness for the other
+    # (CodeRabbit finding on PR #356, round 2).
+    repo_alert_rows = alerts_by_repo.get(f"{owner}/{name}", []) if alerts_by_repo is not None else []
+    dependabot_alert_rows = [r for r in repo_alert_rows if r.kind == "dependabot"]
+    code_scanning_alert_rows = [r for r in repo_alert_rows if r.kind == "code_scanning"]
 
-    code_scanning_clear = True
-    try:
-        cs_alerts = client.request("GET", f"/repos/{owner}/{name}/code-scanning/alerts", params={"state": "open"})
-        if isinstance(cs_alerts, list):
-            code_scanning_clear = len(cs_alerts) == 0
-    except httpx.HTTPStatusError as exc:
-        # Same 404-vs-other distinction as Dependabot above: 404 is a genuine
-        # "disabled, so no alerts" answer; anything else means no visibility.
-        if exc.response.status_code != 404:
+    if dependabot_alert_rows:
+        alerts_source = "aggregate"
+        aggregate = _dependabot_from_aggregate(dependabot_alert_rows)
+        dependabot_enabled = aggregate["dependabot_enabled"]
+        critical_count = aggregate["critical_count"]
+        high_count = aggregate["high_count"]
+    else:
+        dependabot_enabled = False
+        critical_count = 0
+        high_count = 0
+        try:
+            alerts = client.request("GET", f"/repos/{owner}/{name}/dependabot/alerts", params={"state": "open"})
+            dependabot_enabled = True
+            if isinstance(alerts, list):
+                for alert in alerts:
+                    severity = (alert.get("security_advisory") or {}).get("severity")
+                    if severity == "critical":
+                        critical_count += 1
+                    elif severity == "high":
+                        high_count += 1
+        except httpx.HTTPStatusError as exc:
+            # 404 means Dependabot alerts are genuinely disabled for this repo -- a real
+            # "no alerts" answer. Any other status (403 missing security-events scope,
+            # 429, ...) means the alert count is unknown, not zero, so it must not
+            # silently score as "no critical/high alerts" -- see the identical fix in
+            # DependabotAlertsCheck (packages/checks/src/checks/github_checks.py, 3184c76).
+            if exc.response.status_code != 404:
+                unknown.append("dependabot")
+        except httpx.RequestError:
+            unknown.append("dependabot")
+
+    if code_scanning_alert_rows:
+        alerts_source = "aggregate"
+        code_scanning_clear = _code_scanning_clear_from_aggregate(code_scanning_alert_rows)
+    else:
+        code_scanning_clear = True
+        try:
+            cs_alerts = client.request("GET", f"/repos/{owner}/{name}/code-scanning/alerts", params={"state": "open"})
+            if isinstance(cs_alerts, list):
+                code_scanning_clear = len(cs_alerts) == 0
+        except httpx.HTTPStatusError as exc:
+            # Same 404-vs-other distinction as Dependabot above: 404 is a genuine
+            # "disabled, so no alerts" answer; anything else means no visibility.
+            if exc.response.status_code != 404:
+                unknown.append("code_scanning")
+        except httpx.RequestError:
             unknown.append("code_scanning")
-    except httpx.RequestError:
-        unknown.append("code_scanning")
 
     dimensions = {
         "branch_protection": branch_protection,
@@ -140,16 +240,21 @@ def _repo_row(client: GitHubClient, owner: str, repo: dict) -> RepoSecurityRow:
         force_push_allowed=force_push_allowed,
         score=score,
         unknown_dimensions=unknown,
+        alerts_source=alerts_source,
     )
 
 
-def _build_matrix(owner: str, token: str) -> SecurityMatrixResponse:
+def _build_matrix(owner: str, token: str, db: Session | None = None, tenant_id: int | None = None) -> SecurityMatrixResponse:
     client = GitHubClient(token)
     repos = client.request_paginated(f"/orgs/{owner}/repos", params={"type": "all", "sort": "pushed"})
     scanned = repos[:_MAX_REPOS_FOR_MATRIX]
 
+    alerts_by_repo = None
+    if db is not None and tenant_id is not None:
+        alerts_by_repo = _open_alerts_by_repo(db, tenant_id, [f"{owner}/{r['name']}" for r in scanned])
+
     with ThreadPoolExecutor(max_workers=10) as pool:
-        rows = list(pool.map(lambda r: _repo_row(client, owner, r), scanned))
+        rows = list(pool.map(lambda r: _repo_row(client, owner, r, alerts_by_repo), scanned))
 
     vuln = VulnCounts(
         critical=sum(r.dependabot_critical_count for r in rows),
@@ -177,10 +282,41 @@ def personal_security_matrix(
         token = resolve_owner_token(db, user_id=user.id, owner=owner, client_token=x_github_token)
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    tenant_id = _security_connected_tenant(db, user.id, owner)
     try:
-        return _build_matrix(owner, token)
+        return _build_matrix(owner, token, db=db, tenant_id=tenant_id)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         raise _github_error(exc) from exc
+
+
+def _secret_scanning_alerts_from_aggregate(db: Session, tenant_id: int, owner: str, repo: str) -> list[SecretAlert]:
+    """security_alerts (post-S6 PR 3) instead of a live GitHub call. No `url` field is
+    stored (only the live GitHub API response carries html_url) -- None, not "" (a
+    fake/broken link), since SecretAlert.url is nullable precisely for this case (CodeRabbit
+    finding on PR #352); the UI renders a plain non-link row when url is missing."""
+    rows = (
+        db.query(SecurityAlert)
+        .filter(
+            SecurityAlert.tenant_id == tenant_id,
+            SecurityAlert.repo == f"{owner}/{repo}",
+            SecurityAlert.kind == "secret_scanning",
+        )
+        .all()
+    )
+    return [
+        SecretAlert(
+            number=row.number,
+            state=row.state,
+            secret_type=row.details.get("secret_type", ""),
+            secret_type_display=row.details.get("secret_type_display_name", row.details.get("secret_type", "")),
+            resolved_reason=row.details.get("resolution"),
+            created_at=row.created_at,
+            resolved_at=row.updated_at if row.state != "open" else None,
+            repo=f"{owner}/{repo}",
+            url=None,
+        )
+        for row in rows
+    ]
 
 
 @router.get("/me/repos/{owner}/{repo}/secret-scanning", response_model=SecretScanningResponse)
@@ -195,6 +331,18 @@ def personal_secret_scanning(
         token = resolve_owner_token(db, user_id=user.id, owner=owner, client_token=x_github_token)
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    tenant_id = _security_connected_tenant(db, user.id, owner)
+    if tenant_id is not None:
+        alerts = _secret_scanning_alerts_from_aggregate(db, tenant_id, owner, repo)
+        # security_alerts has no backfill/sync-cursor -- only webhook events populate it, so a
+        # zero-row result is ambiguous: it could mean "genuinely no alerts" or "this repo's
+        # webhook events just haven't arrived/been ingested yet". An empty aggregate result can't
+        # be trusted as authoritative the way collab.py's cursor-gated reads can (CodeRabbit
+        # finding on PR #356) -- fall back to the live call rather than silently under-reporting
+        # real open secret-scanning alerts as "none".
+        if alerts:
+            return SecretScanningResponse(repository=f"{owner}/{repo}", alerts=alerts, source="aggregate")
 
     client = GitHubClient(token)
     try:
@@ -218,4 +366,4 @@ def personal_secret_scanning(
         for a in raw
         if isinstance(a, dict) and "number" in a and "created_at" in a
     ]
-    return SecretScanningResponse(repository=f"{owner}/{repo}", alerts=alerts)
+    return SecretScanningResponse(repository=f"{owner}/{repo}", alerts=alerts, source="github")

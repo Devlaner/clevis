@@ -20,6 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from src.core.config import settings
@@ -196,6 +197,103 @@ class RepoEventDailyCount(Base):
     count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class SecurityAlert(Base):
+    """Normalized store for GitHub Security-alert webhook events (dependabot_alert/
+    code_scanning_alert/secret_scanning_alert), migration 0039 (post-S6, PR 2 of 3).
+    Populated by apps/worker's event_consumer.py from webhook_deliveries rows already
+    durably queued since PR #350. Not read by the API yet -- that's PR 3's job, same
+    deferral pattern as RepoEvent was under S4 before S6 read it.
+
+    One polymorphic table (kind discriminates dependabot/code_scanning/secret_scanning)
+    rather than three near-identical tables -- see migration 0039's docstring for the
+    full rationale. Upserted (not insert-and-skip like RepoEvent): a redelivered alert
+    webhook reflects a real state transition (e.g. open -> dismissed), not a duplicate
+    of an immutable log entry, so (tenant_id, repo, kind, number) is an upsert key, not
+    a dedupe-and-drop key."""
+
+    __tablename__ = "security_alerts"
+    __table_args__ = (
+        Index("ix_security_alerts_tenant_id", "tenant_id"),
+        Index("ix_security_alerts_tenant_id_repo", "tenant_id", "repo"),
+        UniqueConstraint("tenant_id", "repo", "kind", "number", name="uq_security_alerts_tenant_repo_kind_number"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    repo: Mapped[str] = mapped_column(String, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    number: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str | None] = mapped_column(String, nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class OrgMember(Base):
+    """Normalized store for org membership, migration 0040 (Collaborators PR 1 of 3).
+    Populated by apps/worker's event_consumer.py from the `organization` webhook event's
+    member_added/member_removed actions. Not read by the API yet -- that's PR 3's job.
+
+    Represents current membership, not a log: a row is deleted on member_removed, not
+    soft-marked. `role` is captured from the member_added payload's membership.role at
+    add-time (accurate then), but no webhook event covers a role changing *afterward* at
+    all (verified against GitHub's docs -- no member_updated/role-change action exists) --
+    so this column can drift stale for an existing member whose role later changes, until
+    the reconciliation poll (apps/worker/src/membership_reconcile.py, Collaborators PR 2 of
+    3) corrects it on its next run. See migration 0040's docstring for the full rationale."""
+
+    __tablename__ = "org_members"
+    __table_args__ = (
+        Index("ix_org_members_tenant_id", "tenant_id"),
+        UniqueConstraint("tenant_id", "login", name="uq_org_members_tenant_login"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    login: Mapped[str] = mapped_column(String, nullable=False)
+    avatar_url: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False, server_default="member")
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # NULL means "never polled" -- migration 0041 (Collaborators PR 2 of 3). No webhook event
+    # covers 2FA status at all, so this is only ever set by the reconciliation poll
+    # (apps/worker/src/membership_reconcile.py); the webhook path (event_consumer.py) never
+    # touches it. A False default would misrepresent an un-polled row as a confirmed "2FA off".
+    two_factor_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+
+class RepoCollaborator(Base):
+    """Normalized store for direct repo access grants, migration 0040 (Collaborators PR 1
+    of 3). Populated by apps/worker's event_consumer.py from the `member` webhook event's
+    added/edited/removed actions. Not read by the API yet -- that's PR 3's job.
+
+    `source` is 'direct' only in this PR -- team-based repo access ('team') is explicitly
+    deferred (requires joining the `team` event against `membership`'s per-team roster, a
+    materially bigger modeling problem than a direct grant, and GitHub's own team-event
+    payloads don't reliably convey the permission level either). See migration 0040's
+    docstring for the full rationale. Represents current access, not a log: a row is
+    deleted on a `removed` action, not soft-marked."""
+
+    __tablename__ = "repo_collaborators"
+    __table_args__ = (
+        Index("ix_repo_collaborators_tenant_id", "tenant_id"),
+        Index("ix_repo_collaborators_tenant_id_repo", "tenant_id", "repo"),
+        UniqueConstraint("tenant_id", "repo", "login", name="uq_repo_collaborators_tenant_repo_login"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    repo: Mapped[str] = mapped_column(String, nullable=False)
+    login: Mapped[str] = mapped_column(String, nullable=False)
+    permission: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False, server_default="direct")
+    # NULL means "not yet known" -- the `member` event alone can't determine org-membership
+    # status; a False default would misrepresent that as a confirmed direct-member claim.
+    # See migration 0040's docstring.
+    is_outside_collaborator: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ActivitySyncCursor(Base):
     """Per-tenant "how far synced" cursor (issue #192, S5 PR 2), migration 0038. One row per
     tenant, upserted by apps/worker's github.backfill_repo_events handler after every successful
@@ -209,6 +307,26 @@ class ActivitySyncCursor(Base):
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
     account_login: Mapped[str] = mapped_column(String, nullable=False)
     account_type: Mapped[str] = mapped_column(String, nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class OrgMembershipSyncCursor(Base):
+    """Per-tenant "how far synced" cursor for the org membership reconciliation poll
+    (Collaborators PR 2 of 3), migration 0041. Mirrors ActivitySyncCursor's shape exactly
+    (one row per org-kind tenant, tenant_id as the primary key, last_synced_at nullable
+    until the first successful run) -- see that class's docstring and migration 0041's for
+    the full rationale. org_login is cached here because, unlike the activity cursor's
+    account_login (available on every install-time-backfill payload since PR #342), the
+    membership-reconcile sweep has no equivalent existing payload to read it from; it's
+    resolved once per sweep tick from the orgs table."""
+
+    __tablename__ = "org_membership_sync_cursors"
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    org_login: Mapped[str] = mapped_column(String, nullable=False)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
