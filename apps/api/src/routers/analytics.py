@@ -353,6 +353,16 @@ def _safe_pr_merge_rate_4w(owner: str, token: str) -> list[PrWeekBucket]:
         return []
 
 
+def _week_total(week: dict) -> int | float:
+    """Raises AttributeError (non-dict week) or TypeError (non-numeric "total") for the caller
+    to treat as a per-repo failure -- a malformed nested record from GitHub must not silently
+    coerce into 0, which would look identical to a real zero-commit week."""
+    total = week.get("total", 0)
+    if not isinstance(total, (int, float)):
+        raise TypeError(f"non-numeric week total: {total!r}")
+    return total
+
+
 def _safe_commit_activity_4w_and_heatmap_52w(
     owner: str, token: str, repo_names: list[str]
 ) -> tuple[list[int], list[int], bool]:
@@ -385,13 +395,32 @@ def _safe_commit_activity_4w_and_heatmap_52w(
             if not isinstance(weeks, list):
                 ok = False
                 continue
-            if len(weeks) >= 4:
-                for i, week in enumerate(weeks[-4:]):
-                    totals_4w[i] += week.get("total", 0)
-            if len(weeks) >= 52:
-                for i, week in enumerate(weeks[-52:]):
-                    totals_52w[i] += week.get("total", 0)
+            # A malformed nested record (a non-dict week, or a non-numeric "total") must not
+            # raise past this point -- an uncaught exception here would escape asyncio.gather
+            # and fail the whole cockpit request instead of just degrading this one repo's
+            # contribution, defeating the whole point of this per-repo isolation. Accumulated
+            # into a local delta first (not directly into totals_4w/52w) so a mid-repo failure
+            # can't leave this one repo's contribution half-applied across the two arrays.
+            try:
+                delta_4w = [_week_total(week) for week in weeks[-4:]] if len(weeks) >= 4 else [0, 0, 0, 0]
+                delta_52w = [_week_total(week) for week in weeks[-52:]] if len(weeks) >= 52 else [0] * 52
+            except (AttributeError, TypeError):
+                ok = False
+                continue
+            for i in range(4):
+                totals_4w[i] += delta_4w[i]
+            for i in range(52):
+                totals_52w[i] += delta_52w[i]
     return totals_4w, totals_52w, ok
+
+
+def _cache_entry_bytes(entry: dict) -> int | float:
+    """Same contract as _week_total: raises for the caller to treat as a per-repo failure
+    instead of silently coercing a malformed entry into 0 bytes."""
+    size = entry.get("size_in_bytes", 0)
+    if not isinstance(size, (int, float)):
+        raise TypeError(f"non-numeric cache entry size: {size!r}")
+    return size
 
 
 def _safe_total_cache_bytes(owner: str, token: str, repo_names: list[str]) -> tuple[int, bool]:
@@ -411,9 +440,15 @@ def _safe_total_cache_bytes(owner: str, token: str, repo_names: list[str]) -> tu
             except (httpx.HTTPStatusError, httpx.RequestError):
                 ok = False
                 continue
-            if isinstance(data, dict):
-                total += sum(c.get("size_in_bytes", 0) for c in data.get("actions_caches", []))
-            else:
+            if not isinstance(data, dict):
+                ok = False
+                continue
+            # Same non-dict-entry/non-numeric-field guard as the commit-activity helper above --
+            # a malformed cache entry must degrade this one repo, not raise past future.result()
+            # and fail the whole cockpit request.
+            try:
+                total += sum(_cache_entry_bytes(c) for c in data.get("actions_caches", []))
+            except (AttributeError, TypeError):
                 ok = False
     return total, ok
 

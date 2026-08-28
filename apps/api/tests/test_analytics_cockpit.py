@@ -617,6 +617,59 @@ def test_safe_commit_activity_4w_and_heatmap_52w_one_bad_repo_sums_the_rest_but_
     assert ok is False  # but the caller still knows this is a partial sum
 
 
+def test_safe_commit_activity_4w_and_heatmap_52w_malformed_week_entry_degrades_not_raises():
+    """A non-dict week (or a week whose "total" isn't numeric) must be treated as a per-repo
+    failure, not raise past future.result() and fail the whole cockpit request -- this is
+    exactly the escape-asyncio.gather scenario CodeRabbit flagged on this PR."""
+    from src.routers.analytics import _safe_commit_activity_4w_and_heatmap_52w
+
+    weeks_good = [{"total": 2} for _ in range(52)]
+    weeks_malformed = [{"total": "not-a-number"} for _ in range(52)]  # e.g. a week entry as a bare string
+
+    def _side_effect(method, path):
+        if "repo-bad" in path:
+            return weeks_malformed
+        return weeks_good
+
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _side_effect
+        activity, heatmap, ok = _safe_commit_activity_4w_and_heatmap_52w(
+            "acme", "ghp_test", ["repo-bad", "repo-good"]
+        )
+
+    assert activity == [2, 2, 2, 2]  # repo-good's contribution survives, repo-bad's doesn't
+    assert heatmap[0] == 2
+    assert ok is False
+
+
+def test_safe_commit_activity_4w_and_heatmap_52w_non_dict_week_degrades_not_raises():
+    from src.routers.analytics import _safe_commit_activity_4w_and_heatmap_52w
+
+    weeks_malformed = ["not-a-dict"] * 52
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = weeks_malformed
+        activity, heatmap, ok = _safe_commit_activity_4w_and_heatmap_52w("acme", "ghp_test", ["repo-a"])
+
+    assert activity == [0, 0, 0, 0]
+    assert ok is False
+
+
+def test_safe_total_cache_bytes_malformed_entry_degrades_not_raises():
+    from src.routers.analytics import _safe_total_cache_bytes
+
+    def _side_effect(method, path):
+        if "repo-bad" in path:
+            return {"actions_caches": [{"size_in_bytes": "not-a-number"}]}
+        return {"actions_caches": [{"size_in_bytes": 100}]}
+
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = _side_effect
+        total, ok = _safe_total_cache_bytes("acme", "ghp_test", ["repo-bad", "repo-good"])
+
+    assert total == 100  # repo-good's contribution survives
+    assert ok is False
+
+
 def test_safe_total_cache_bytes_returns_zero_and_not_ok_on_error():
     from src.routers.analytics import _safe_total_cache_bytes
 
