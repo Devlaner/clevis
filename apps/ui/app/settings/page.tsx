@@ -165,11 +165,19 @@ function AppearanceSection() {
 
 // ── Org memberships section ───────────────────────────────────────────────────
 
-function OrgMembershipsSection() {
-  const { data: memberships = [], isLoading, isError, error, isFetching, refetch } = useQuery<MyOrgMembership[]>({
+// Shared by OrgMembershipsSection and ConnectedOrgsSection below -- both need to know which
+// orgs the caller belongs to (the latter specifically to know which orgs it admins, to fetch
+// their installations). One hook, one queryFn reference, so React Query's dedup-by-key doesn't
+// depend on which of the two mounts first actually issuing the request.
+function useMyOrgMemberships() {
+  return useQuery<MyOrgMembership[]>({
     queryKey: ["my-orgs"],
     queryFn: () => api.orgs.mine(),
   })
+}
+
+function OrgMembershipsSection() {
+  const { data: memberships = [], isLoading, isError, error, isFetching, refetch } = useMyOrgMemberships()
 
   return (
     <div className="card">
@@ -253,12 +261,7 @@ function ConnectedOrgsSection() {
     queryKey: ["installations", "me"],
     queryFn: () => api.installations.list(),
   })
-  // Shares the "my-orgs" cache key with OrgMembershipsSection above -- one fetch, not two,
-  // when both sections mount together (React Query dedupes by key).
-  const membershipsQuery = useQuery<MyOrgMembership[]>({
-    queryKey: ["my-orgs"],
-    queryFn: () => api.orgs.mine(),
-  })
+  const membershipsQuery = useMyOrgMemberships()
   const adminOrgLogins = (membershipsQuery.data ?? []).filter((m) => m.role === "admin").map((m) => m.org_login)
 
   // Only orgs the caller admins -- listForOrg is 403 for a plain member (installations are

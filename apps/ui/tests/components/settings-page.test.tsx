@@ -321,4 +321,57 @@ describe("SettingsPage", () => {
     expect(installationsListForOrgMock).not.toHaveBeenCalled();
   });
 
+  it("retries all three connected-accounts queries when Retry is clicked", async () => {
+    orgsMineMock.mockRejectedValue(new Error("boom"));
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("Failed to load connected accounts.")).toBeInTheDocument();
+    });
+
+    orgsMineMock.mockClear();
+    installationsListMock.mockClear();
+    const retryButtons = screen.getAllByRole("button", { name: "Retry" });
+    fireEvent.click(retryButtons[retryButtons.length - 1]);
+
+    await waitFor(() => {
+      expect(orgsMineMock).toHaveBeenCalled();
+      expect(installationsListMock).toHaveBeenCalled();
+    });
+  });
+
+  it("shows a spinner on the row being disconnected while the request is in flight", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "shabnam", account_type: "User", installation_id: 7, created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+    const removeGate = deferred<void>();
+    installationsRemoveMock.mockReturnValue(removeGate.promise);
+
+    renderPage();
+
+    const disconnectButton = await screen.findByRole("button", { name: /disconnect/i });
+    fireEvent.click(disconnectButton);
+    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+
+    await waitFor(() => {
+      expect(installationsRemoveMock).toHaveBeenCalled();
+    });
+    // Neither "Disconnect" nor "Confirm disconnect" text remains while the mutation is
+    // in flight -- the row shows a spinner instead.
+    expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm disconnect" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      removeGate.resolve();
+      await removeGate.promise;
+    });
+  });
+
 });

@@ -10,16 +10,16 @@ test.describe("Settings — org connection surface", () => {
 
     // Org-connection UI lives on Settings — real GitHub OAuth can't run in CI,
     // so this asserts the install surface is reachable and wired (issue #187).
-    await expect(page.getByText("Personal GitHub installs")).toBeVisible()
+    await expect(page.getByText("Connected GitHub accounts")).toBeVisible()
     await expect(
-      page.getByText(/No organizations connected yet|Install the Clevis GitHub App/i),
+      page.getByText(/No accounts connected yet|Install the Clevis GitHub App/i),
     ).toBeVisible()
 
     // Install button is present when NEXT_PUBLIC_GITHUB_APP_SLUG is set in the
     // stack; otherwise the page explains how to enable it. Either is fine — both
     // prove the connection section rendered instead of a stub.
     const installButton = page.getByRole("button", { name: /Install GitHub App/i })
-    const missingSlugHint = page.getByText(/NEXT_PUBLIC_GITHUB_APP_SLUG/i)
+    const missingSlugHint = page.getByText(/GitHub App integration isn.t set up/i)
     await expect(installButton.or(missingSlugHint)).toBeVisible()
   })
 })

@@ -648,13 +648,24 @@ def test_delete_org_installation_nonexistent_installation_id_404s(db, acme_org):
 def test_delete_org_installation_cannot_delete_another_orgs_installation(db, acme_org):
     """An admin of acme must not be able to disconnect an installation belonging to a
     different org just by naming its installation_id in the URL."""
+    other_admin = _make_user(db, "other-admin@e.com")
     other_org = org_repo.get_or_create(db, github_login="other-org")
+    org_membership_repo.get_or_create(db, org_id=other_org.id, user_id=other_admin.id, role="admin")
     installation_repo.create(
         db, account_login="other-org", account_type="Organization", auth_mode="app", installation_id=42, org_id=other_org.id
     )
     resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/42")
     assert resp.status_code == 404
-    assert installation_repo.get_by_installation_id_for_org(db, org_id=other_org.id, installation_id=42) is not None
+
+    # Verified through the real API as other-org's own admin, not installation_repo
+    # directly: acme's request above set RLS session context (app.tenant_id) to acme's
+    # tenant, which would make a same-session repo-level lookup of other-org's row
+    # silently return None (RLS hiding it, not the row being gone) and pass for the wrong
+    # reason under CI's RLS-enforcing clevis_api role -- a fresh authenticated request as
+    # other-org's admin re-sets the correct tenant context instead.
+    list_resp = _client(db, other_admin).get("/orgs/other-org/installations")
+    assert list_resp.status_code == 200
+    assert any(i["installation_id"] == 42 for i in list_resp.json())
 
 
 def test_delete_org_installation_github_error_leaves_row_intact(db, acme_org):
@@ -711,7 +722,16 @@ def test_delete_personal_installation_cannot_delete_another_users_installation(d
     )
     resp = _client(db, me).delete("/me/installations/7")
     assert resp.status_code == 404
-    assert installation_repo.get_by_installation_id_for_user(db, owner_user_id=other.id, installation_id=7) is not None
+
+    # Verified through the real API as the actual owner, not installation_repo directly:
+    # `me`'s request above set RLS session context (app.user_id) to `me`'s id, which would
+    # make a same-session repo-level lookup of `other`'s row silently return None (RLS
+    # hiding it, not the row being gone) and pass for the wrong reason under CI's
+    # RLS-enforcing clevis_api role -- a fresh authenticated request as `other` re-sets
+    # the correct context instead.
+    list_resp = _client(db, other).get("/me/installations")
+    assert list_resp.status_code == 200
+    assert any(i["installation_id"] == 7 for i in list_resp.json())
 
 
 def test_delete_personal_installation_requires_auth(db):

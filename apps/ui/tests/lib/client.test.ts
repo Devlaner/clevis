@@ -505,6 +505,22 @@ describe("installations.lookup / installations.sync", () => {
     const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(String(url)).toContain("/orgs/acme/installations/sync");
   });
+
+  it("DELETEs /me/installations/{id} for scope: me", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))));
+    await api.installations.remove({ scope: "me" }, 7);
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain("/me/installations/7");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("DELETEs /orgs/{orgLogin}/installations/{id} for scope: org", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(null, { status: 204 }))));
+    await api.installations.remove({ scope: "org", orgLogin: "acme" }, 42);
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain("/orgs/acme/installations/42");
+    expect(init.method).toBe("DELETE");
+  });
 });
 
 describe("api.auth email verification (issue #217)", () => {
