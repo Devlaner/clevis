@@ -45,6 +45,13 @@ def _engine():
     # up there; only swallow the expected privilege error, not real bugs.
     try:
         with eng.begin() as conn:
+            # TRUNCATE takes an ACCESS EXCLUSIVE lock on every table involved -- if a stray
+            # connection (e.g. a hung manual dev/E2E session against this same DB) is still
+            # holding a lock on one of them, an unbounded TRUNCATE would hang teardown
+            # indefinitely instead of failing fast. lock_timeout bounds the wait; it's
+            # transaction-scoped (SET LOCAL) so it can't leak onto other users of this
+            # session-scoped connection.
+            conn.execute(text("SET LOCAL lock_timeout = '5s'"))
             # Base.metadata.tables (unordered), not .sorted_tables -- a topological sort isn't
             # needed since TRUNCATE ... CASCADE handles FK ordering itself, and orgs/tenants have
             # a genuine FK cycle between them that makes .sorted_tables raise a SAWarning.
@@ -53,9 +60,10 @@ def _engine():
                 quoted = ", ".join(f'"{name}"' for name in table_names)
                 conn.execute(text(f"TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE"))
     except DBAPIError as exc:
-        if "InsufficientPrivilege" not in type(exc.orig).__name__:
+        orig_type = type(exc.orig).__name__
+        if orig_type not in ("InsufficientPrivilege", "LockNotAvailable"):
             raise
-        logger.warning("skipping post-session DB truncate: connected role lacks TRUNCATE privilege")
+        logger.warning("skipping post-session DB truncate: %s", orig_type)
 
 
 @pytest.fixture
