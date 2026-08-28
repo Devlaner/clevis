@@ -330,6 +330,15 @@ export const api = {
             `/orgs/${encodeURIComponent(target.orgLogin)}/installations/sync`,
             body,
           ),
+    // Disconnect: uninstalls the App on GitHub's side (a real revocation), then removes
+    // the local row -- see apps/api/src/routers/installations.py's module docstring.
+    remove: (
+      target: { scope: "me" } | { scope: "org"; orgLogin: string },
+      installationId: number,
+    ) =>
+      target.scope === "me"
+        ? del(`/me/installations/${installationId}`)
+        : del(`/orgs/${encodeURIComponent(target.orgLogin)}/installations/${installationId}`),
   },
   orgs: {
     mine: () => get<MyOrgMembership[]>("/me/orgs"),

@@ -19,6 +19,10 @@
                                               to, so the post-install UI callback (which only gets
                                               installation_id/setup_action from GitHub) knows
                                               whether to call the /me or /orgs sync endpoint next.
+  DELETE /orgs/{org_login}/installations/{installation_id}   admin: disconnect -- uninstalls the
+                                              App on GitHub's side (a real revocation, not just
+                                              removing our own row) then deletes the local row.
+  DELETE /me/installations/{installation_id}  same, for the caller's own personal installation.
 """
 
 import logging
@@ -125,6 +129,47 @@ def list_org_installations(
     db: Session = Depends(get_db),
 ):
     return installation_repo.list_for_org(db, org_id=ctx.org.id)
+
+
+def _uninstall_on_github(installation_id: int) -> None:
+    """Shared by both disconnect endpoints. Raises HTTPException on any failure that means
+    the local row must NOT be deleted (GitHub App not configured, or a real GitHub API error
+    other than 404) -- callers only proceed to delete the local row once this returns cleanly."""
+    try:
+        github_app.delete_installation(installation_id)
+    except github_app.GitHubAppNotConfigured:
+        raise HTTPException(status_code=503, detail="GitHub App is not configured; cannot disconnect")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=400, detail=f"GitHub API error: {exc.response.status_code}")
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="GitHub API unreachable")
+
+
+@router.delete("/orgs/{org_login}/installations/{installation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_org_installation(
+    installation_id: int,
+    ctx: OrgContext = Depends(require_org_role(min_role="admin")),
+    user: UserOut = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    installation = installation_repo.get_by_installation_id_for_org(db, org_id=ctx.org.id, installation_id=installation_id)
+    if installation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Installation not found for this organization")
+
+    _uninstall_on_github(installation_id)
+
+    # require_org_role already set tenant session context for ctx.org.tenant_id above --
+    # delete_by_installation_id's own resolve-then-set is for its other caller (the
+    # unauthenticated webhook receiver), a no-op re-set here for this authenticated path.
+    count, tenant_id = installation_repo.delete_by_installation_id(db, installation_id)
+    audit_repo.write(
+        db,
+        actor=user.email,
+        action="installation.disconnected",
+        target=ctx.org.github_login,
+        payload={"installation_id": installation_id, "rows_deleted": count},
+        tenant_id=tenant_id,
+    )
 
 
 def _bootstrap_org_admin_from_installation(db: Session, db_user: User, org_login: str, installation_id: int) -> Org:
@@ -239,6 +284,31 @@ def list_personal_installations(
     db: Session = Depends(get_db),
 ):
     return installation_repo.list_for_user(db, owner_user_id=user.id)
+
+
+@router.delete("/me/installations/{installation_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_personal_installation(
+    installation_id: int,
+    user: UserOut = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    installation = installation_repo.get_by_installation_id_for_user(db, owner_user_id=user.id, installation_id=installation_id)
+    if installation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Installation not found")
+
+    _uninstall_on_github(installation_id)
+
+    personal_tenant = tenant_repo.ensure_personal_tenant(db, user.id)
+    set_tenant_session_context(db, personal_tenant.id, user.id)
+    count, tenant_id = installation_repo.delete_by_installation_id(db, installation_id)
+    audit_repo.write(
+        db,
+        actor=user.email,
+        action="installation.disconnected.personal",
+        target=installation.account_login,
+        payload={"installation_id": installation_id, "rows_deleted": count},
+        tenant_id=tenant_id,
+    )
 
 
 @router.post("/me/installations/sync", response_model=SyncInstallationsResponse)

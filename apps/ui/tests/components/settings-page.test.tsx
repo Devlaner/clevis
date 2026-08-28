@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const orgsMineMock = vi.fn();
 const installationsListMock = vi.fn();
+const installationsListForOrgMock = vi.fn();
+const installationsRemoveMock = vi.fn();
 const tokensListMock = vi.fn();
 const configGetAllMock = vi.fn();
 const patchMeMock = vi.fn();
@@ -20,7 +22,11 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/api/client", () => ({
   api: {
     orgs: { mine: (...args: unknown[]) => orgsMineMock(...args) },
-    installations: { list: (...args: unknown[]) => installationsListMock(...args) },
+    installations: {
+      list: (...args: unknown[]) => installationsListMock(...args),
+      listForOrg: (...args: unknown[]) => installationsListForOrgMock(...args),
+      remove: (...args: unknown[]) => installationsRemoveMock(...args),
+    },
     tokens: { list: (...args: unknown[]) => tokensListMock(...args) },
     config: {
       getAll: (...args: unknown[]) => configGetAllMock(...args),
@@ -82,6 +88,8 @@ describe("SettingsPage", () => {
   beforeEach(() => {
     orgsMineMock.mockReset();
     installationsListMock.mockReset();
+    installationsListForOrgMock.mockReset();
+    installationsRemoveMock.mockReset();
     tokensListMock.mockReset();
     configGetAllMock.mockReset();
     patchMeMock.mockReset();
@@ -111,7 +119,10 @@ describe("SettingsPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Failed to load organizations.")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // Two independent cards read the same failed "my-orgs" query -- OrgMembershipsSection
+    // and ConnectedOrgsSection (which also needs it to know which orgs the caller admins) --
+    // so each surfaces its own retry affordance.
+    expect(screen.getAllByRole("button", { name: "Retry" }).length).toBeGreaterThanOrEqual(1);
 
     await waitFor(() => {
       expect(screen.getByText("Instance configuration")).toBeInTheDocument();
@@ -210,6 +221,104 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(revokeSessionsMock).toHaveBeenCalledTimes(1));
     // logout() clears the token, which removes the authenticated Settings page entirely.
     await waitFor(() => expect(localStorage.getItem(TOKEN_KEY)).toBeNull());
+  });
+
+  // ── Connected accounts (installation-connect-disconnect-ux) ────────────────
+
+  it("shows an unconfigured message instead of the install button when the App slug isn't set", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/GitHub App integration isn.t set up on this instance yet/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: /install github app/i })).not.toBeInTheDocument();
+  });
+
+  it("shows an empty state when nothing is connected", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/No accounts connected yet/i)).toBeInTheDocument();
+    });
+  });
+
+  it("lists both personal and admin-org installations, and disconnects one after a confirm click", async () => {
+    orgsMineMock.mockResolvedValue([{ org_login: "acme", role: "admin" }]);
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "shabnam", account_type: "User", installation_id: 7, created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    installationsListForOrgMock.mockResolvedValue([
+      { id: 2, account_login: "acme", account_type: "Organization", installation_id: 42, created_at: "2026-01-02T00:00:00Z" },
+    ]);
+    installationsRemoveMock.mockResolvedValue(undefined);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("shabnam")).toBeInTheDocument();
+      expect(screen.getByText("acme")).toBeInTheDocument();
+    });
+    expect(installationsListForOrgMock).toHaveBeenCalledWith("acme");
+
+    const disconnectButtons = screen.getAllByRole("button", { name: /disconnect/i });
+    expect(disconnectButtons).toHaveLength(2);
+
+    fireEvent.click(disconnectButtons[0]);
+    expect(installationsRemoveMock).not.toHaveBeenCalled();
+    expect(await screen.findByRole("button", { name: /confirm disconnect/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm disconnect/i }));
+
+    await waitFor(() => {
+      expect(installationsRemoveMock).toHaveBeenCalledWith({ scope: "me" }, 7);
+    });
+  });
+
+  it("disconnects an org-scoped installation with the org scope, not the personal one", async () => {
+    orgsMineMock.mockResolvedValue([{ org_login: "acme", role: "admin" }]);
+    installationsListMock.mockResolvedValue([]);
+    installationsListForOrgMock.mockResolvedValue([
+      { id: 2, account_login: "acme", account_type: "Organization", installation_id: 42, created_at: "2026-01-02T00:00:00Z" },
+    ]);
+    installationsRemoveMock.mockResolvedValue(undefined);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    const disconnectButton = await screen.findByRole("button", { name: /disconnect/i });
+    fireEvent.click(disconnectButton);
+    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+
+    await waitFor(() => {
+      expect(installationsRemoveMock).toHaveBeenCalledWith({ scope: "org", orgLogin: "acme" }, 42);
+    });
+  });
+
+  it("does not fetch installations for orgs the caller is only a member of, not an admin", async () => {
+    orgsMineMock.mockResolvedValue([{ org_login: "acme", role: "member" }]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/No accounts connected yet/i)).toBeInTheDocument();
+    });
+    expect(installationsListForOrgMock).not.toHaveBeenCalled();
   });
 
 });

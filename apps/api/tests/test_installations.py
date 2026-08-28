@@ -601,3 +601,135 @@ def test_lookup_installation_returns_503_when_app_not_configured(db):
     ):
         resp = _client(db, me).get("/me/installations/lookup/3")
     assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Disconnect (DELETE) -- installation-connect-disconnect-ux
+# ---------------------------------------------------------------------------
+
+
+def test_delete_org_installation_admin_disconnects(db, acme_org):
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=acme_org["org"].id
+    )
+    with patch("src.routers.installations.github_app.delete_installation") as mock_delete:
+        resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/42")
+
+    assert resp.status_code == 204
+    mock_delete.assert_called_once_with(42)
+    assert installation_repo.get_by_installation_id_for_org(db, org_id=acme_org["org"].id, installation_id=42) is None
+    logs = db.query(AuditLog).filter(AuditLog.action == "installation.disconnected").all()
+    assert len(logs) == 1
+    assert logs[0].actor == acme_org["admin"].email
+
+
+def test_delete_org_installation_member_forbidden(db, acme_org):
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=acme_org["org"].id
+    )
+    resp = _client(db, acme_org["member"]).delete("/orgs/acme/installations/42")
+    assert resp.status_code == 403
+    assert installation_repo.get_by_installation_id_for_org(db, org_id=acme_org["org"].id, installation_id=42) is not None
+
+
+def test_delete_org_installation_outsider_forbidden(db, acme_org):
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=acme_org["org"].id
+    )
+    resp = _client(db, _OUTSIDER).delete("/orgs/acme/installations/42")
+    assert resp.status_code == 403
+
+
+def test_delete_org_installation_nonexistent_installation_id_404s(db, acme_org):
+    resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/999")
+    assert resp.status_code == 404
+
+
+def test_delete_org_installation_cannot_delete_another_orgs_installation(db, acme_org):
+    """An admin of acme must not be able to disconnect an installation belonging to a
+    different org just by naming its installation_id in the URL."""
+    other_org = org_repo.get_or_create(db, github_login="other-org")
+    installation_repo.create(
+        db, account_login="other-org", account_type="Organization", auth_mode="app", installation_id=42, org_id=other_org.id
+    )
+    resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/42")
+    assert resp.status_code == 404
+    assert installation_repo.get_by_installation_id_for_org(db, org_id=other_org.id, installation_id=42) is not None
+
+
+def test_delete_org_installation_github_error_leaves_row_intact(db, acme_org):
+    """If GitHub's uninstall call fails for a real reason (not 404), the local row must
+    survive so a retry is straightforward and Clevis's own record doesn't silently drift
+    out of sync with a GitHub-side installation that's still actually there."""
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=acme_org["org"].id
+    )
+    response = httpx.Response(500, request=httpx.Request("DELETE", "https://api.github.com/app/installations/42"))
+    with patch(
+        "src.routers.installations.github_app.delete_installation",
+        side_effect=httpx.HTTPStatusError("server error", request=response.request, response=response),
+    ):
+        resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/42")
+
+    assert resp.status_code == 400
+    assert installation_repo.get_by_installation_id_for_org(db, org_id=acme_org["org"].id, installation_id=42) is not None
+
+
+def test_delete_org_installation_returns_503_when_app_not_configured(db, acme_org):
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=acme_org["org"].id
+    )
+    with patch(
+        "src.routers.installations.github_app.delete_installation",
+        side_effect=github_app.GitHubAppNotConfigured("not configured"),
+    ):
+        resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/42")
+    assert resp.status_code == 503
+    assert installation_repo.get_by_installation_id_for_org(db, org_id=acme_org["org"].id, installation_id=42) is not None
+
+
+def test_delete_personal_installation_owner_disconnects(db):
+    me = _make_user(db, "shabnam@e.com", github_login="shabnam")
+    installation_repo.create(
+        db, account_login="shabnam", account_type="User", auth_mode="app", installation_id=7, owner_user_id=me.id
+    )
+    with patch("src.routers.installations.github_app.delete_installation") as mock_delete:
+        resp = _client(db, me).delete("/me/installations/7")
+
+    assert resp.status_code == 204
+    mock_delete.assert_called_once_with(7)
+    assert installation_repo.get_by_installation_id_for_user(db, owner_user_id=me.id, installation_id=7) is None
+    logs = db.query(AuditLog).filter(AuditLog.action == "installation.disconnected.personal").all()
+    assert len(logs) == 1
+
+
+def test_delete_personal_installation_cannot_delete_another_users_installation(db):
+    me = _make_user(db, "shabnam@e.com", github_login="shabnam")
+    other = _make_user(db, "other@e.com", github_login="other")
+    installation_repo.create(
+        db, account_login="other", account_type="User", auth_mode="app", installation_id=7, owner_user_id=other.id
+    )
+    resp = _client(db, me).delete("/me/installations/7")
+    assert resp.status_code == 404
+    assert installation_repo.get_by_installation_id_for_user(db, owner_user_id=other.id, installation_id=7) is not None
+
+
+def test_delete_personal_installation_requires_auth(db):
+    app = FastAPI()
+    app.include_router(inst_router)
+    app.dependency_overrides[get_db] = lambda: db
+    resp = TestClient(app).delete("/me/installations/7")
+    assert resp.status_code == 401
+
+
+def test_delete_org_installation_returns_503_when_github_unreachable(db, acme_org):
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=42, org_id=acme_org["org"].id
+    )
+    with patch(
+        "src.routers.installations.github_app.delete_installation",
+        side_effect=httpx.RequestError("connection failed"),
+    ):
+        resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/42")
+    assert resp.status_code == 503
+    assert installation_repo.get_by_installation_id_for_org(db, org_id=acme_org["org"].id, installation_id=42) is not None

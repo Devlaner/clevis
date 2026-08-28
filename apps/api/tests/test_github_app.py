@@ -154,6 +154,53 @@ def _mock_get_client(mock_resp):
     return mock_client
 
 
+def _mock_delete_client(mock_resp: MagicMock) -> MagicMock:
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.delete = MagicMock(return_value=mock_resp)
+    return mock_client
+
+
+def test_delete_installation_calls_the_uninstall_endpoint(app_configured):
+    mock_resp = MagicMock(status_code=204)
+    with patch("src.services.github_app.httpx.Client") as mock_cls:
+        mock_cls.return_value = _mock_delete_client(mock_resp)
+        github_app.delete_installation(42)
+
+    mock_resp.raise_for_status.assert_called_once()
+    url = mock_cls.return_value.delete.call_args.args[0]
+    assert url.endswith("/app/installations/42")
+    headers = mock_cls.return_value.delete.call_args.kwargs["headers"]
+    assert headers["Authorization"].startswith("Bearer ")
+
+
+def test_delete_installation_treats_404_as_success(app_configured):
+    """Already uninstalled on GitHub's side (e.g. the user beat us to it) -- same end
+    state as a successful delete, not an error."""
+    mock_resp = MagicMock(status_code=404)
+    with patch("src.services.github_app.httpx.Client") as mock_cls:
+        mock_cls.return_value = _mock_delete_client(mock_resp)
+        github_app.delete_installation(42)  # must not raise
+
+    mock_resp.raise_for_status.assert_not_called()
+
+
+def test_delete_installation_propagates_other_http_errors(app_configured):
+    mock_resp = MagicMock(status_code=500)
+    mock_resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError(
+            "server error",
+            request=httpx.Request("DELETE", "https://api.github.com/app/installations/42"),
+            response=httpx.Response(500),
+        )
+    )
+    with patch("src.services.github_app.httpx.Client") as mock_cls:
+        mock_cls.return_value = _mock_delete_client(mock_resp)
+        with pytest.raises(httpx.HTTPStatusError):
+            github_app.delete_installation(42)
+
+
 def test_get_org_membership_role_returns_role_for_active_membership():
     mock_resp = MagicMock(status_code=200)
     mock_resp.json = MagicMock(return_value={"state": "active", "role": "admin"})

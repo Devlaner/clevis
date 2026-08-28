@@ -103,6 +103,30 @@ def get_installation(installation_id: int) -> dict:
     return resp.json()
 
 
+def delete_installation(installation_id: int) -> None:
+    """Uninstall the App from an account/org via GitHub's App API (DELETE /app/installations/{id}),
+    using the App's own JWT -- this is a real revocation, not just removing our own DB row, so a
+    user who disconnects in Clevis's UI actually stops granting Clevis repo access, the same as if
+    they'd uninstalled it from github.com/settings/installations themselves. A 404 (already
+    uninstalled -- e.g. the user beat us to it on GitHub's side) is treated as success, not an
+    error, since the end state either way is "no installation." Raises httpx.HTTPStatusError for
+    any other GitHub error or GitHubAppNotConfigured; callers must not delete the local DB row on
+    those, so a failed uninstall doesn't leave Clevis's own record silently out of sync with a
+    GitHub-side installation that's still actually there."""
+    app_jwt = generate_app_jwt()
+    url = f"{settings.github_api_base}/app/installations/{installation_id}"
+    headers = {
+        "Authorization": f"Bearer {app_jwt}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    with httpx.Client(timeout=20) as client:
+        resp = client.delete(url, headers=headers)
+    if resp.status_code == 404:
+        return
+    resp.raise_for_status()
+
+
 def get_installation_token(installation_id: int) -> str:
     """Return a valid installation access token, minting and caching it as needed."""
     with _lock:

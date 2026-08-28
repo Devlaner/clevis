@@ -349,7 +349,7 @@ describe("OverviewPage cockpit", () => {
     await waitFor(() => {
       expect(screen.getByText(/No account selected yet/)).toBeInTheDocument();
     });
-    const settingsLink = screen.getByRole("link", { name: "Settings" });
+    const settingsLink = screen.getByRole("link", { name: "Connect a GitHub account" });
     expect(settingsLink).toHaveAttribute("href", "/settings");
     expect(cockpitMock).not.toHaveBeenCalled();
   });
