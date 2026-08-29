@@ -4,7 +4,7 @@ import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
-import { EmptyState } from "@/components/empty-state"
+import { EmptyStatePage } from "@/components/empty-state"
 import { api } from "@/lib/api/client"
 import { useActiveScope } from "@/lib/active-scope"
 import type { MyOrgMembership } from "@/lib/api/types"
@@ -33,7 +33,7 @@ export default function CollaboratorsPage() {
           description="Manage your organization's team and invitations."
         />
         <div className="card">
-          <EmptyState title="Redirecting…" description="Taking you to member management." />
+          <EmptyStatePage message="Redirecting… — Taking you to member management." />
         </div>
       </>
     )
@@ -47,10 +47,7 @@ export default function CollaboratorsPage() {
       />
       <div className="card">
         {isError ? (
-          <EmptyState
-            title="Couldn't load your organizations"
-            description="Something went wrong checking your organization memberships. Try refreshing the page."
-          />
+          <EmptyStatePage message="Couldn't load your organizations — Something went wrong checking your organization memberships. Try refreshing the page." />
         ) : memberships.length > 0 ? (
           <div className="border border-dashed border-border rounded-md px-6 py-12">
             <p className="text-sm text-muted-foreground">
@@ -67,9 +64,9 @@ export default function CollaboratorsPage() {
             </p>
           </div>
         ) : (
-          <EmptyState
-            title="No organization to manage"
-            description="Member management is available for organizations where you're an admin. Visit Settings to see your organizations."
+          <EmptyStatePage
+            message="No organization to manage — Member management is available for organizations where you're an admin."
+            action={{ href: "/settings", label: "Visit Settings" }}
           />
         )}
       </div>
