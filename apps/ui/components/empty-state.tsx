@@ -1,4 +1,6 @@
 import Link from "next/link"
+import { buttonVariants } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
 
 /**
  * Empty state variants — no icons, no centered layouts, just text.
@@ -59,19 +61,17 @@ interface EmptyStateNoAccountProps {
 }
 
 export function EmptyStateNoAccount({ bare = false, message: messageOverride }: EmptyStateNoAccountProps) {
-  const message = (
-    <p className="px-4 py-6 text-sm text-muted-foreground">
-      {messageOverride ?? (
-        <>
-          No account selected yet — this page has nothing to query. Pick an organization or your personal
-          account from the profile menu, or connect one in{" "}
-          <Link href="/settings" className="text-primary hover:underline">Settings</Link> first if you
-          haven&rsquo;t already.
-        </>
-      )}
-    </p>
+  const content = (
+    <div className="px-4 py-6 flex flex-col gap-3 items-start">
+      <p className="text-sm text-muted-foreground">
+        {messageOverride ?? "No account selected yet — this page has nothing to query. Pick an organization or your personal account from the profile menu, or connect one below if you haven’t already."}
+      </p>
+      <Link href="/settings" className={cn(buttonVariants({ size: "sm" }))}>
+        Connect a GitHub account
+      </Link>
+    </div>
   )
-  return bare ? message : <div className="card mb-6">{message}</div>
+  return bare ? content : <div className="card mb-6">{content}</div>
 }
 
 /**

@@ -51,4 +51,10 @@ describe("EmptyStateNoAccount", () => {
     expect(screen.getByText("No account selected — type an organization below.")).toBeInTheDocument();
     expect(screen.queryByText(/this page has nothing to query/)).not.toBeInTheDocument();
   });
+
+  it("renders a real CTA button pointing at Settings, not just a text link", () => {
+    render(<EmptyStateNoAccount />);
+    const link = screen.getByRole("link", { name: "Connect a GitHub account" });
+    expect(link).toHaveAttribute("href", "/settings");
+  });
 });

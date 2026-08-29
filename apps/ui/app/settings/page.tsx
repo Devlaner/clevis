@@ -2,12 +2,13 @@
 
 import { useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Trash, Plus, CircleNotch, Check, ArrowSquareOut, CheckCircle } from "@phosphor-icons/react"
 import { PageHeader } from "@/components/page-header"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { SectionError } from "@/components/section-error"
+import { EmptyStatePage } from "@/components/empty-state"
 import Link from "next/link"
 import { api } from "@/lib/api/client"
 import { initialConfigValues, mergeSavedConfigValue } from "@/lib/config-values"
@@ -164,11 +165,19 @@ function AppearanceSection() {
 
 // ── Org memberships section ───────────────────────────────────────────────────
 
-function OrgMembershipsSection() {
-  const { data: memberships = [], isLoading, isError, error, isFetching, refetch } = useQuery<MyOrgMembership[]>({
+// Shared by OrgMembershipsSection and ConnectedOrgsSection below -- both need to know which
+// orgs the caller belongs to (the latter specifically to know which orgs it admins, to fetch
+// their installations). One hook, one queryFn reference, so React Query's dedup-by-key doesn't
+// depend on which of the two mounts first actually issuing the request.
+function useMyOrgMemberships() {
+  return useQuery<MyOrgMembership[]>({
     queryKey: ["my-orgs"],
     queryFn: () => api.orgs.mine(),
   })
+}
+
+function OrgMembershipsSection() {
+  const { data: memberships = [], isLoading, isError, error, isFetching, refetch } = useMyOrgMemberships()
 
   return (
     <div className="card">
@@ -229,22 +238,87 @@ function OrgMembershipsSection() {
   )
 }
 
-// ── Connected organizations (GitHub App, personal installs) ──────────────────
+// ── Connected organizations (GitHub App, personal + org-scoped installs) ─────
+
+type ConnectedInstallation = InstallationMeta & (
+  | { scope: "me" }
+  | { scope: "org"; orgLogin: string }
+)
 
 function ConnectedOrgsSection() {
-  const { data: installs = [], isLoading, isError, error, isFetching, refetch } = useQuery<InstallationMeta[]>({
-    queryKey: ["installations"],
+  const queryClient = useQueryClient()
+  const [confirmingKey, setConfirmingKey] = useState<string | null>(null)
+
+  // Auto-disarm if the user doesn't confirm within a few seconds, same pattern as
+  // ProfileSection's "Sign out of all devices" above.
+  useEffect(() => {
+    if (!confirmingKey) return
+    const timer = setTimeout(() => setConfirmingKey(null), 4000)
+    return () => clearTimeout(timer)
+  }, [confirmingKey])
+
+  const personalQuery = useQuery<InstallationMeta[]>({
+    queryKey: ["installations", "me"],
     queryFn: () => api.installations.list(),
   })
+  const membershipsQuery = useMyOrgMemberships()
+  const adminOrgLogins = (membershipsQuery.data ?? []).filter((m) => m.role === "admin").map((m) => m.org_login)
+
+  // Only orgs the caller admins -- listForOrg is 403 for a plain member (installations are
+  // an admin concern, matching the DELETE endpoint's own require_org_role(min_role="admin")).
+  const orgInstallQueries = useQueries({
+    queries: adminOrgLogins.map((orgLogin) => ({
+      queryKey: ["installations", "org", orgLogin],
+      queryFn: () => api.installations.listForOrg(orgLogin),
+      enabled: !membershipsQuery.isLoading,
+    })),
+  })
+
+  const isLoading = personalQuery.isLoading || membershipsQuery.isLoading
+  const isError = personalQuery.isError || membershipsQuery.isError || orgInstallQueries.some((q) => q.isError)
+  const isFetching = personalQuery.isFetching || membershipsQuery.isFetching || orgInstallQueries.some((q) => q.isFetching)
+  const refetchAll = () => {
+    personalQuery.refetch()
+    membershipsQuery.refetch()
+    orgInstallQueries.forEach((q) => q.refetch())
+  }
+
+  const rows: ConnectedInstallation[] = [
+    ...(personalQuery.data ?? []).map((i) => ({ ...i, scope: "me" as const })),
+    ...adminOrgLogins.flatMap((orgLogin, idx) =>
+      (orgInstallQueries[idx]?.data ?? []).map((i) => ({ ...i, scope: "org" as const, orgLogin })),
+    ),
+  ]
+
+  const disconnect = useMutation({
+    mutationFn: (row: ConnectedInstallation) => {
+      if (row.installation_id == null) return Promise.reject(new Error("This connection has no GitHub installation to disconnect."))
+      return api.installations.remove(row.scope === "me" ? { scope: "me" } : { scope: "org", orgLogin: row.orgLogin }, row.installation_id)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["installations"] })
+      setConfirmingKey(null)
+    },
+    onError: () => setConfirmingKey(null),
+  })
+
+  const rowKey = (row: ConnectedInstallation) => `${row.scope}:${row.id}`
+
   const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG
   const installUrl = slug ? `https://github.com/apps/${slug}/installations/new` : null
 
   return (
     <div className="card">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-        <span className="section-label">Personal GitHub installs</span>
-        {installs.length > 0 && <span className="stat-chip">{installs.length} connected</span>}
+        <span className="section-label">Connected GitHub accounts</span>
+        {rows.length > 0 && <span className="stat-chip">{rows.length} connected</span>}
       </div>
+
+      {disconnect.isError && (
+        <p role="alert" className="px-4 pt-3 text-xs text-destructive">
+          {disconnect.error instanceof Error ? disconnect.error.message : "Disconnect failed."}
+        </p>
+      )}
 
       {isLoading ? (
         <div className="px-4 py-6 flex items-center gap-2 text-sm text-muted-foreground">
@@ -252,36 +326,63 @@ function ConnectedOrgsSection() {
         </div>
       ) : isError ? (
         <SectionError
-          message={error instanceof Error ? error.message : "Failed to load organizations."}
-          onRetry={() => refetch()}
+          message="Failed to load connected accounts."
+          onRetry={refetchAll}
           retrying={isFetching}
         />
-      ) : installs.length === 0 ? (
-        <div className="px-4 py-6">
-          <p className="text-sm text-muted-foreground">
-            No organizations connected yet. Install the Clevis GitHub App on a GitHub organization to get started.
-          </p>
-        </div>
+      ) : rows.length === 0 ? (
+        <EmptyStatePage message="No accounts connected yet. Install the Clevis GitHub App on an organization or your personal account to get started." />
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
               <tr className="border-b border-border">
-                <th className="text-left text-muted-foreground font-medium px-4 py-2">Organization</th>
+                <th className="text-left text-muted-foreground font-medium px-4 py-2">Account</th>
                 <th className="text-left text-muted-foreground font-medium px-4 py-2">Type</th>
                 <th className="text-left text-muted-foreground font-medium px-4 py-2">Connected</th>
+                <th className="px-4 py-2" />
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {installs.map((i) => (
-                <tr key={i.id} className="hover:bg-elevated transition-colors">
-                  <td className="px-4 py-2.5 font-mono text-foreground/80">{i.account_login}</td>
-                  <td className="px-4 py-2.5 text-muted-foreground">{i.account_type}</td>
-                  <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">
-                    {new Date(i.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
-                  </td>
-                </tr>
-              ))}
+              {rows.map((row) => {
+                const key = rowKey(row)
+                const isConfirming = confirmingKey === key
+                const isThisRowMutating = disconnect.isPending && disconnect.variables && rowKey(disconnect.variables) === key
+                return (
+                  <tr key={key} className="hover:bg-elevated transition-colors">
+                    <td className="px-4 py-2.5 font-mono text-foreground/80">
+                      {row.account_login}
+                      {row.scope === "org" && <span className="ml-1.5 text-muted-foreground">(org)</span>}
+                    </td>
+                    <td className="px-4 py-2.5 text-muted-foreground">{row.account_type}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground whitespace-nowrap">
+                      {new Date(row.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                    </td>
+                    <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        disabled={disconnect.isPending}
+                        onClick={() => {
+                          if (isConfirming) {
+                            disconnect.mutate(row)
+                          } else {
+                            setConfirmingKey(key)
+                          }
+                        }}
+                      >
+                        {isThisRowMutating ? (
+                          <CircleNotch className="size-3 animate-spin" />
+                        ) : isConfirming ? (
+                          "Confirm disconnect"
+                        ) : (
+                          <><Trash className="size-3" />Disconnect</>
+                        )}
+                      </Button>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -294,7 +395,7 @@ function ConnectedOrgsSection() {
           </Button>
         ) : (
           <p className="text-xs text-muted-foreground">
-            Set <code className="font-mono">NEXT_PUBLIC_GITHUB_APP_SLUG</code> to enable the install button.
+            GitHub App integration isn&rsquo;t set up on this instance yet — ask a workspace admin to configure it.
           </p>
         )}
       </div>

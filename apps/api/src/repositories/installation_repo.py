@@ -121,6 +121,27 @@ def get_for_user(db: Session, owner_user_id: int, account_login: str) -> GitHubI
     )
 
 
+def get_by_installation_id_for_org(db: Session, org_id: int, installation_id: int) -> GitHubInstallation | None:
+    """Scoped lookup for the disconnect endpoint -- confirms installation_id genuinely belongs
+    to this org before anything (a GitHub-side uninstall call, a DB delete) acts on it, so an
+    org admin can't disconnect another tenant's installation by guessing its id."""
+    return (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.org_id == org_id, GitHubInstallation.installation_id == installation_id)
+        .first()
+    )
+
+
+def get_by_installation_id_for_user(db: Session, owner_user_id: int, installation_id: int) -> GitHubInstallation | None:
+    """Same contract as get_by_installation_id_for_org, for the personal-installation
+    disconnect endpoint."""
+    return (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.owner_user_id == owner_user_id, GitHubInstallation.installation_id == installation_id)
+        .first()
+    )
+
+
 def list_for_org(db: Session, org_id: int) -> list[GitHubInstallation]:
     return (
         db.query(GitHubInstallation)
