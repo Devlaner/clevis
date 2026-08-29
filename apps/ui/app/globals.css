@@ -60,61 +60,62 @@
 }
 
 :root {
-  /* Surfaces — 4-stop depth system, graphite base (Vercel-graphite direction) */
-  --background:  #0d0d0e;   /* page bg */
-  --card:        #161617;   /* primary card surface */
-  --elevated:    #1d1d1f;   /* inputs, hover states */
-  --overlay:     #232326;   /* modals, dropdowns */
+  /* Surfaces — 4-stop depth system, Ember Terminal (near-black, warm) */
+  --background:  #0b0a08;   /* page bg */
+  --card:        #161310;   /* primary card surface */
+  --elevated:    #1e1a15;   /* inputs, hover states */
+  --overlay:     #241f18;   /* modals, dropdowns */
 
   /* Text */
-  --foreground:         #f2f2f3;
-  --muted-foreground:   #8f8f93;
-  --subtle-foreground:  #55555a;
+  --foreground:         #f2ede4;
+  --muted-foreground:   #948a7a;
+  --subtle-foreground:  #5c5546;
 
   /* Borders */
-  --border:       #2a2a2c;
-  --border-muted: #1f1f21;
+  --border:       #2c261c;
+  --border-muted: #201b14;
 
-  /* Brand accent — electric blue, used for primary actions + active states */
-  --primary:            #3b82f6;
-  --primary-foreground: #ffffff;
-  --ring:               #3b82f6;
+  /* Brand accent — ember amber, used for primary actions + active states */
+  --primary:            #e2932f;
+  --primary-foreground: #1a1006;
+  --ring:               #e2932f;
 
   /* Semantic — separate from the brand accent above */
-  --accent:             #22c55e;
-  --accent-foreground:  #052e12;
-  --destructive:        #ef4444;
-  --warning:            #f59e0b;
+  --accent:             #6fae8c;
+  --accent-foreground:  #0d1f16;
+  --destructive:        #d1453b;
+  --warning:            #c99a3e;
   --alert:              var(--destructive);
 
   /* Sidebar */
-  --sidebar:                    #0a0a0b;
-  --sidebar-foreground:         #f2f2f3;
-  --sidebar-primary:            #3b82f6;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent:             #1a1a1c;
-  --sidebar-accent-foreground:  #f2f2f3;
-  --sidebar-border:             #232325;
-  --sidebar-ring:               #3b82f6;
+  --sidebar:                    #080705;
+  --sidebar-foreground:         #f2ede4;
+  --sidebar-primary:            #e2932f;
+  --sidebar-primary-foreground: #1a1006;
+  --sidebar-accent:             #1e1a15;
+  --sidebar-accent-foreground:  #f2ede4;
+  --sidebar-border:             #2c261c;
+  --sidebar-ring:               #e2932f;
 
   /* Popover / card foreground */
-  --card-foreground:      #f2f2f3;
-  --popover:              #161617;
-  --popover-foreground:   #f2f2f3;
-  --secondary:            #1d1d1f;
-  --secondary-foreground: #f2f2f3;
-  --muted:                #1d1d1f;
-  --input:                #161617;
+  --card-foreground:      #f2ede4;
+  --popover:              #161310;
+  --popover-foreground:   #f2ede4;
+  --secondary:            #1e1a15;
+  --secondary-foreground: #f2ede4;
+  --muted:                #1e1a15;
+  --input:                #161310;
 
   /* Charts */
-  --chart-1: #3b82f6;   /* blue   — primary data */
-  --chart-2: #22c55e;   /* green  — positive */
-  --chart-3: #38bdf8;   /* sky    — secondary */
-  --chart-4: #f87171;   /* red    — negative */
-  --chart-5: #a78bfa;   /* violet — tertiary (charts only, not UI) */
+  --chart-1: #e2932f;   /* ember  — primary data */
+  --chart-2: #6fae8c;   /* sage   — positive */
+  --chart-3: #c9a227;   /* gold   — secondary */
+  --chart-4: #d1453b;   /* red    — negative */
+  --chart-5: #9c8aa5;   /* violet — tertiary (charts only, not UI) */
 
-  /* Soft radius — one scale for the whole app (cards, buttons, inputs alike) */
-  --radius: 0.375rem;
+  /* Sharp radius — one scale for the whole app (cards, buttons, inputs alike);
+     borders do the separating, not soft corners or shadow (Ember Terminal). */
+  --radius: 0.125rem;
 
   /* Motion — strong custom easing curves (emil-design-eng / impeccable: exponential ease-out) */
   --ease-out:    cubic-bezier(0.23, 1, 0.32, 1);     /* enter/exit, press release */
@@ -127,12 +128,13 @@
 
 /*
  * Themes — neutral "shade/vibe" palettes selected via [data-theme] on <html>.
- * :root above is the default (Midnight), so data-theme="midnight" needs no block.
- * Each block overrides the surface / text / border / sidebar tokens; --radius,
- * --font-mono and chart colors are inherited from :root.
+ * :root above is the default (Ember Terminal, key "midnight"), so
+ * data-theme="midnight" needs no block. Each block overrides the surface /
+ * text / border / sidebar tokens; --radius, --font-mono and chart colors are
+ * inherited from :root.
  */
 
-/* Carbon — neutral dark gray, a touch lighter and warmer than Midnight */
+/* Carbon — neutral dark gray, a touch lighter and warmer than Ember Terminal */
 [data-theme="carbon"] {
   --background: #141414;
   --card: #1c1c1c;
@@ -215,39 +217,39 @@
   --sidebar-ring: #6cb6ff;
 }
 
-/* Paper — off-white light */
+/* Paper — Ember Terminal's light companion: same ember/sage hues, warm ivory ground */
 [data-theme="paper"] {
-  --background: #fafafa;
+  --background: #f7f3ec;
   --card: #ffffff;
-  --elevated: #f4f4f5;
+  --elevated: #efe8db;
   --overlay: #ffffff;
-  --foreground: #18181b;
-  --muted-foreground: #71717a;
-  --subtle-foreground: #a1a1aa;
-  --border: #e4e4e7;
-  --border-muted: #efeff1;
-  --primary: #2563eb;
-  --primary-foreground: #ffffff;
-  --ring: #2563eb;
-  --accent: #16a34a;
-  --accent-foreground: #ffffff;
-  --destructive: #e61919;
-  --warning: #d97706;
-  --card-foreground: #18181b;
+  --foreground: #201f1d;
+  --muted-foreground: #7a6f5c;
+  --subtle-foreground: #b0a48c;
+  --border: #e2d9c5;
+  --border-muted: #ede6d7;
+  --primary: #c17d1f;
+  --primary-foreground: #fffaf2;
+  --ring: #c17d1f;
+  --accent: #3f7d63;
+  --accent-foreground: #f0f7f3;
+  --destructive: #c0392b;
+  --warning: #b5811f;
+  --card-foreground: #201f1d;
   --popover: #ffffff;
-  --popover-foreground: #18181b;
-  --secondary: #f4f4f5;
-  --secondary-foreground: #18181b;
-  --muted: #f4f4f5;
+  --popover-foreground: #201f1d;
+  --secondary: #efe8db;
+  --secondary-foreground: #201f1d;
+  --muted: #efe8db;
   --input: #ffffff;
-  --sidebar: #f4f4f5;
-  --sidebar-foreground: #18181b;
-  --sidebar-primary: #2563eb;
-  --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #e8e8eb;
-  --sidebar-accent-foreground: #18181b;
-  --sidebar-border: #e0e0e3;
-  --sidebar-ring: #2563eb;
+  --sidebar: #efe8db;
+  --sidebar-foreground: #201f1d;
+  --sidebar-primary: #c17d1f;
+  --sidebar-primary-foreground: #fffaf2;
+  --sidebar-accent: #e2d9c5;
+  --sidebar-accent-foreground: #201f1d;
+  --sidebar-border: #ded3ba;
+  --sidebar-ring: #c17d1f;
 }
 
 /* Ash — cool light gray */

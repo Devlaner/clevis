@@ -16,11 +16,11 @@ export interface ThemeMeta {
 }
 
 export const THEMES: ThemeMeta[] = [
-  { name: "midnight", label: "Midnight", isDark: true },
+  { name: "midnight", label: "Ember Terminal", isDark: true },
   { name: "carbon", label: "Carbon", isDark: true },
   { name: "slate", label: "Slate", isDark: true },
   { name: "dim", label: "Dim", isDark: true },
-  { name: "paper", label: "Paper", isDark: false },
+  { name: "paper", label: "Ember Light", isDark: false },
   { name: "ash", label: "Ash", isDark: false },
 ]
 
