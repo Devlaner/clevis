@@ -321,7 +321,7 @@ export default function ReposPage() {
                 )}
               </label>
               <Input
-                placeholder="ghp_... (org must already be connected via GitHub sign-in or the App)"
+                placeholder="ghp_... (leave blank to use the connected GitHub App)"
                 type="password"
                 value={token}
                 onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}
