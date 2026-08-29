@@ -1,10 +1,10 @@
 "use client"
 
 import { useQuery } from "@tanstack/react-query"
-import Link from "next/link"
 import { PageHeader } from "@/components/page-header"
 import { Skeleton } from "@/components/ui/skeleton"
 import { SectionError } from "@/components/section-error"
+import { EmptyStateNoAccount } from "@/components/empty-state"
 import { GitPullRequest } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
 import { useActiveScope } from "@/lib/active-scope"
@@ -81,14 +81,7 @@ export default function PullRequestsPage() {
           {pulls.length > 0 && <span className="stat-chip">{pulls.length} total</span>}
         </div>
         {!hasOrg ? (
-          <div className="px-4 py-8">
-            <p className="text-sm text-muted-foreground">
-              No account selected yet. Pick one from the profile menu, or{" "}
-              <Link href="/security" className="text-primary hover:underline">
-                configure →
-              </Link>
-            </p>
-          </div>
+          <EmptyStateNoAccount bare />
         ) : reposQuery.isError ? (
           <SectionError
             message={reposQuery.error instanceof Error ? reposQuery.error.message : "Failed to load repositories."}
