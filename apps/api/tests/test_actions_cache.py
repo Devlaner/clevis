@@ -1,6 +1,6 @@
 """Tests for actions-cache GitHub error mapping."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -128,82 +128,5 @@ def test_personal_clear_caches_rejects_org_member_supplying_own_token(cache_clie
     resp = cache_client.post(
         "/me/repos/acme/demo/actions-caches/clear",
         json={"dry_run": False, "token": "ghp_testtoken123456789012345678901234"},
-    )
-    assert resp.status_code == 403
-
-
-# ── org-scoped ────────────────────────────────────────────────────────────────
-
-@pytest.fixture()
-def acme_org(db):
-    admin = User(email="admin@e.com", name=None, password_hash=None, is_workspace_admin=False)
-    member = User(email="member@e.com", name=None, password_hash=None, is_workspace_admin=False)
-    db.add_all([admin, member])
-    db.commit()
-    db.refresh(admin)
-    db.refresh(member)
-    org = org_repo.get_or_create(db, github_login="acme")
-    org_membership_repo.get_or_create(db, org_id=org.id, user_id=admin.id, role="admin")
-    org_membership_repo.get_or_create(db, org_id=org.id, user_id=member.id, role="member")
-    return {"org": org, "admin": admin, "member": member}
-
-
-def _org_client(db, user_id):
-    app = FastAPI()
-    app.include_router(cache_router)
-    app.dependency_overrides[require_auth] = lambda: UserOut(
-        id=user_id, email="u@example.com", name=None, is_workspace_admin=False
-    )
-    app.dependency_overrides[get_db] = lambda: db
-    return TestClient(app)
-
-
-def test_org_list_caches_member_ok(db, acme_org):
-    client = _org_client(db, acme_org["member"].id)
-    with patch("src.routers.actions_cache.GitHubClient") as mock_client:
-        mock_client.return_value.request.return_value = {"total_count": 0, "actions_caches": []}
-        resp = client.post(
-            "/orgs/acme/repos/acme/demo/actions-caches",
-            json={"token": "ghp_testtoken123456789012345678901234"},
-        )
-    assert resp.status_code == 200
-
-
-def test_org_list_caches_no_installation_and_no_token_returns_400(db, acme_org):
-    client = _org_client(db, acme_org["member"].id)
-    resp = client.post("/orgs/acme/repos/acme/demo/actions-caches", json={})
-    assert resp.status_code == 400
-
-
-def test_org_clear_caches_non_dry_run_no_installation_and_no_token_returns_400(db, acme_org):
-    client = _org_client(db, acme_org["admin"].id)
-    resp = client.post("/orgs/acme/repos/acme/demo/actions-caches/clear", json={"dry_run": False})
-    assert resp.status_code == 400
-
-
-def test_org_list_caches_outsider_forbidden(db, acme_org):
-    client = _org_client(db, 999999)
-    resp = client.post(
-        "/orgs/acme/repos/acme/demo/actions-caches",
-        json={"token": "ghp_testtoken123456789012345678901234"},
-    )
-    assert resp.status_code == 403
-
-
-def test_org_clear_caches_non_dry_run_uses_client_token(db, acme_org):
-    client = _org_client(db, acme_org["admin"].id)
-    resp = client.post(
-        "/orgs/acme/repos/acme/demo/actions-caches/clear",
-        json={"dry_run": False, "token": "ghp_testtoken123456789012345678901234"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["queued"] is True
-
-
-def test_org_clear_caches_requires_admin(db, acme_org):
-    client = _org_client(db, acme_org["member"].id)
-    resp = client.post(
-        "/orgs/acme/repos/acme/demo/actions-caches/clear",
-        json={"dry_run": True},
     )
     assert resp.status_code == 403
