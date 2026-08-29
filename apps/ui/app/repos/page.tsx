@@ -312,7 +312,7 @@ export default function ReposPage() {
               <label className="text-xs font-medium text-foreground mb-1.5 flex items-center gap-1.5">
                 GitHub Token
                 <span className="text-[0.6875rem] text-muted-foreground font-normal">
-                  optional if the GitHub App is connected for this org
+                  optional if the GitHub App is connected for this org — a token alone can&rsquo;t connect a new org
                 </span>
                 {tokenSaved && (
                   <span className="inline-flex items-center gap-1 text-[0.6875rem] text-primary">
@@ -321,7 +321,7 @@ export default function ReposPage() {
                 )}
               </label>
               <Input
-                placeholder="ghp_... (leave blank to use the connected GitHub App)"
+                placeholder="ghp_... (org must already be connected via GitHub sign-in or the App)"
                 type="password"
                 value={token}
                 onChange={(e) => { setToken(e.target.value); setTokenSaved(false) }}

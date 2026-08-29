@@ -85,7 +85,14 @@ def require_org_role(min_role: Literal["member", "admin"]):
         if ctx is not None:
             return ctx
         if org_repo.get_by_login(db, org_login) is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Org not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"'{org_login}' isn't connected to Clevis yet — sign in with GitHub or "
+                    "install the GitHub App for this org first. A pasted personal access "
+                    "token alone doesn't connect a new org."
+                ),
+            )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
 
     return dependency
