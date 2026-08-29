@@ -73,19 +73,3 @@ export function EmptyStateNoAccount({ bare = false, message: messageOverride }: 
   )
   return bare ? content : <div className="card mb-6">{content}</div>
 }
-
-/**
- * Legacy compat shim — existing pages that pass icon/title/description
- * are redirected to EmptyStatePage so the old pattern doesn't crash.
- * Remove once all callers are migrated.
- */
-interface LegacyEmptyStateProps {
-  icon?: unknown
-  title: string
-  description: string
-  cta?: React.ReactNode
-}
-
-export function EmptyState({ title, description }: LegacyEmptyStateProps) {
-  return <EmptyStatePage message={`${title} — ${description}`} />
-}
