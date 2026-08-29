@@ -4,7 +4,6 @@ from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import get_db
-from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
 from src.repositories import tenant_repo
 from src.schemas.cache import CacheClearInput, CacheClearResponse, CacheListInput, CacheListResponse
 from src.services.cache_service import clear
@@ -12,7 +11,6 @@ from src.services.github_client import GitHubClient
 from src.services.token_resolution import (
     InsufficientOrgRole,
     NoGitHubTokenAvailable,
-    resolve_org_token,
     resolve_owner_token,
 )
 
@@ -38,43 +36,6 @@ def _list_caches(owner: str, repo: str, token: str) -> CacheListResponse:
 
 def _client_token(payload: CacheListInput | CacheClearInput) -> str | None:
     return payload.token.get_secret_value() if payload.token else None
-
-
-@router.post("/orgs/{org_login}/repos/{owner}/{repo}/actions-caches", response_model=CacheListResponse)
-def org_list_caches(
-    org_login: str,
-    owner: str,
-    repo: str,
-    payload: CacheListInput,
-    ctx: OrgContext = Depends(require_org_role(min_role="member")),
-    db: Session = Depends(get_db),
-):
-    assert_owner_matches_org(owner, ctx)
-    try:
-        token = resolve_org_token(db, org_id=ctx.org.id, account_login=owner, client_token=_client_token(payload))
-    except NoGitHubTokenAvailable as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return _list_caches(owner, repo, token)
-
-
-@router.post("/orgs/{org_login}/repos/{owner}/{repo}/actions-caches/clear", response_model=CacheClearResponse)
-def org_clear_caches(
-    org_login: str,
-    owner: str,
-    repo: str,
-    payload: CacheClearInput,
-    ctx: OrgContext = Depends(require_org_role(min_role="admin")),
-    user: UserOut = Depends(require_auth),
-    db: Session = Depends(get_db),
-):
-    assert_owner_matches_org(owner, ctx)
-    token = ""
-    if not payload.dry_run:
-        try:
-            token = resolve_org_token(db, org_id=ctx.org.id, account_login=owner, client_token=_client_token(payload))
-        except NoGitHubTokenAvailable as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-    return clear(db, owner, repo, payload, actor=user.email, token=token, tenant_id=ctx.org.tenant_id)
 
 
 @router.post("/me/repos/{owner}/{repo}/actions-caches", response_model=CacheListResponse)
