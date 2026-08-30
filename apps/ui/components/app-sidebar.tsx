@@ -1,7 +1,7 @@
 "use client"
 
 import { usePathname, useRouter } from "next/navigation"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useQuery } from "@tanstack/react-query"
 import { GearSix, Check, SignOut, UserPlus, ArrowSquareOut, User } from "@phosphor-icons/react"
@@ -209,7 +209,7 @@ export function AppSidebar() {
     queryFn: () => api.orgs.mine(),
   })
 
-  const { data: installs = [] } = useQuery<InstallationMeta[]>({
+  const { data: installs = [], isLoading: installsLoading } = useQuery<InstallationMeta[]>({
     queryKey: ["installations"],
     queryFn: () => api.installations.list(),
   })
@@ -217,16 +217,35 @@ export function AppSidebar() {
   const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG
   const personalInstallUrl = !personalInstall && slug ? `https://github.com/apps/${slug}/installations/new` : null
 
-  const scopeOptions: ScopeOption[] = [
-    ...(personalInstall
-      ? [{ scope: { kind: "personal", login: personalInstall.account_login } as ActiveScope, label: personalInstall.account_login, sublabel: "Personal account" }]
-      : []),
-    ...memberships.map((m) => ({
-      scope: { kind: "org", login: m.org_login } as ActiveScope,
-      label: m.org_login,
-      sublabel: `Organization · ${m.role}`,
-    })),
-  ]
+  const scopeOptions: ScopeOption[] = useMemo(
+    () => [
+      ...(personalInstall
+        ? [{ scope: { kind: "personal", login: personalInstall.account_login } as ActiveScope, label: personalInstall.account_login, sublabel: "Personal account" }]
+        : []),
+      ...memberships.map((m) => ({
+        scope: { kind: "org", login: m.org_login } as ActiveScope,
+        label: m.org_login,
+        sublabel: `Organization · ${m.role}`,
+      })),
+    ],
+    [personalInstall, memberships],
+  )
+
+  // Issue #371: when a user has exactly one place to look (one org membership, or just
+  // their personal install), auto-select it as the real active scope once the data loads
+  // -- otherwise the sidebar cosmetically shows that org under the avatar while every page
+  // still says "no account selected yet" because `scope` was never set. Only fires when
+  // nothing is persisted (`scope === null`); an explicit pick always persists, so a
+  // multi-org user's choice is never overridden. `useRef` keeps it to a single attempt.
+  const autoSelectedScope = useRef(false)
+  useEffect(() => {
+    if (autoSelectedScope.current || scope !== null) return
+    if (membershipsLoading || installsLoading) return
+    if (scopeOptions.length === 1) {
+      autoSelectedScope.current = true
+      setScope(scopeOptions[0].scope)
+    }
+  }, [scope, membershipsLoading, installsLoading, scopeOptions, setScope])
 
   // Profile identity row reflects the active scope, falling back to real
   // membership/installation data if nothing has been picked yet.

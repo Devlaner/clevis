@@ -512,4 +512,32 @@ describe("AppSidebar scope switcher", () => {
     const connectLink = await screen.findByRole("link", { name: /connect your personal github account/i });
     expect(connectLink).toHaveAttribute("href", "https://github.com/apps/clevis/installations/new");
   });
+
+  // Issue #371
+  it("auto-selects the sole org membership as the active scope when nothing is persisted", async () => {
+    orgMemberships = [{ org_login: "acme", role: "admin" }];
+    installations = [];
+    expect(localStorage.getItem("active_scope")).toBeNull();
+    renderSidebar();
+
+    await waitFor(() =>
+      expect(localStorage.getItem("active_scope")).toBe(
+        JSON.stringify({ kind: "org", login: "acme" }),
+      ),
+    );
+  });
+
+  it("does not auto-select when the user has more than one candidate scope", async () => {
+    orgMemberships = [
+      { org_login: "acme", role: "admin" },
+      { org_login: "globex", role: "member" },
+    ];
+    installations = [];
+    renderSidebar();
+
+    // give the effect a chance to (not) fire
+    await screen.findByRole("button", { name: /user/i });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(localStorage.getItem("active_scope")).toBeNull();
+  });
 });
