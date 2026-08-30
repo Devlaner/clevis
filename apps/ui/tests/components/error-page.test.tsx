@@ -8,19 +8,23 @@ describe("app/error.tsx (root error boundary)", () => {
     cleanup();
   });
 
-  it("renders the fallback heading and the error message", () => {
-    render(<ErrorPage error={new Error("boom while rendering")} reset={vi.fn()} />);
+  it("renders the fallback heading and generic copy (never the raw error message)", () => {
+    render(<ErrorPage error={new Error("Cannot read properties of undefined")} reset={vi.fn()} />);
 
     expect(screen.getByText("Something went wrong")).toBeInTheDocument();
-    expect(screen.getByText("boom while rendering")).toBeInTheDocument();
+    expect(
+      screen.getByText(/An unexpected error occurred while rendering this page/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Cannot read properties/)).not.toBeInTheDocument();
   });
 
-  it("shows generic copy when the error has no message", () => {
-    render(<ErrorPage error={new Error("")} reset={vi.fn()} />);
+  it("shows the digest as a reference when present, and omits it otherwise", () => {
+    const withDigest = Object.assign(new Error("x"), { digest: "abc123" });
+    const { rerender } = render(<ErrorPage error={withDigest} reset={vi.fn()} />);
+    expect(screen.getByText("Reference: abc123")).toBeInTheDocument();
 
-    expect(
-      screen.getByText("An unexpected error occurred while rendering this page."),
-    ).toBeInTheDocument();
+    rerender(<ErrorPage error={new Error("x")} reset={vi.fn()} />);
+    expect(screen.queryByText(/Reference:/)).not.toBeInTheDocument();
   });
 
   it("calls reset when 'Try again' is clicked", () => {

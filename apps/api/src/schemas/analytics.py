@@ -19,11 +19,16 @@ class CheckResult(BaseModel):
     (issue #370). ``value`` is deliberately a union of every shape the six checks and the
     runner's error paths emit: a bare bool (MFA), a ``{str: int}`` counts dict (all the
     repo-level checks), or a plain string (runner-level failure messages).
+
+    ``severity`` stays a free ``str`` on purpose: it's the source-of-truth
+    ``CheckMetadata.severity`` (unconstrained), it's only a cosmetic chip in the UI, and
+    ``github_checks.py`` already uses a wider vocabulary ("critical") elsewhere -- pinning
+    it here would turn a new check's severity label into a 500 on the whole overview.
     """
 
     id: str
     title: str
-    severity: Literal["high", "medium", "low"]
+    severity: str
     remediation: str
     status: Literal["pass", "fail", "error", "not_applicable"]
     value: bool | str | dict[str, int] | None = None
