@@ -95,7 +95,10 @@ def _redis_client() -> redis.Redis:
             settings.redis_url.get_secret_value(),
             decode_responses=True,
             socket_connect_timeout=2,
-            socket_timeout=2,
+            # Must exceed _BLOCK_MS: the client-side read timeout has to outlast the
+            # server-side XREADGROUP BLOCK duration it's waiting on, or redis-py raises
+            # a false-alarm TimeoutError on every idle poll (issue #367).
+            socket_timeout=(_BLOCK_MS / 1000) + 2,
         )
     return _client
 
