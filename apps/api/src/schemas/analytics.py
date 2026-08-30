@@ -11,13 +11,31 @@ class AnalyticsInput(BaseModel):
     token: SecretStr | None = None
 
 
+class CheckResult(BaseModel):
+    """One security-check result as produced by ``checks.runner.run_all_checks``.
+
+    Typed so a shape drift in ``packages/checks`` fails fast at the API boundary with a
+    clear validation error instead of silently reaching the UI and crashing a render
+    (issue #370). ``value`` is deliberately a union of every shape the six checks and the
+    runner's error paths emit: a bare bool (MFA), a ``{str: int}`` counts dict (all the
+    repo-level checks), or a plain string (runner-level failure messages).
+    """
+
+    id: str
+    title: str
+    severity: Literal["high", "medium", "low"]
+    remediation: str
+    status: Literal["pass", "fail", "error", "not_applicable"]
+    value: bool | str | dict[str, int] | None = None
+
+
 class AnalyticsResponse(BaseModel):
     owner: str
     score: int
     total_checks: int
     failed_checks: int
     repo_count: int
-    checks: list[dict]
+    checks: list[CheckResult]
 
 
 class ScanHistoryEntry(BaseModel):
