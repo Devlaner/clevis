@@ -29,11 +29,52 @@ import httpx
 
 from sqlalchemy.orm import Session
 
-from src.core.db import User, set_session_user
-from src.repositories import org_membership_repo, org_repo, tenant_repo
+from src.core.db import Org, User, set_session_user
+from src.repositories import audit_repo, org_membership_repo, org_repo, tenant_repo
 from src.services import github_oauth
 
 logger = logging.getLogger(__name__)
+
+
+def connect_admin_org_from_token(
+    db: Session, user: User, org_login: str, user_token: str
+) -> Org | None:
+    """Single-org version of :func:`sync_org_admin_memberships` for the legacy-PAT path
+    (issue #368): when a workspace admin saves a PAT for an org Clevis has never connected,
+    use that PAT to establish the ``Org`` + admin membership so the ``/orgs/{org}/...``
+    dashboard pages work, instead of every one of them 404ing.
+
+    Same authorization policy as the OAuth path: only connects when GitHub reports the caller
+    as an **admin/owner** of ``org_login``. A plain GitHub member still goes through the
+    explicit invite-accept flow — pasting a PAT must not be a back door around it.
+
+    Returns the connected ``Org`` (canonical GitHub casing), or ``None`` if the PAT can't
+    resolve it (missing ``read:org``, GitHub error, malformed response, or the caller isn't
+    an admin). **Never raises** — the token save must succeed regardless.
+    """
+    try:
+        memberships = github_oauth.list_user_org_memberships(user_token)
+    except Exception as exc:  # noqa: BLE001 -- best-effort; a bad response must not 500 the save
+        logger.info("PAT org auto-connect skipped for %s: %s", org_login, exc)
+        return None
+
+    match = next(
+        (m for m in memberships if m.login.lower() == org_login.lower() and m.role == "admin"),
+        None,
+    )
+    if match is None:
+        return None
+
+    set_session_user(db, user.id)
+    org = org_repo.get_or_create(db, github_login=match.login, github_org_id=match.github_org_id)
+    membership = org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="admin")
+    if membership.role != "admin":
+        org_membership_repo.update_role(db, org_id=org.id, user_id=user.id, role="admin")
+    audit_repo.write(
+        db, user.email, "token.org_autolinked", match.login, {"role": "admin"},
+        tenant_id=org.tenant_id,
+    )
+    return org
 
 
 def sync_org_admin_memberships(db: Session, user: User, user_token: str) -> None:

@@ -94,7 +94,7 @@ Once the instance is running, here's how to go from a fresh deploy to a connecte
 
 That's it — Overview, Activity, Repositories, Collaborators, Health & Security, and Cache all work off the connected org from step 2. A legacy personal access token (**Settings → Personal access tokens (legacy)**) is only ever needed as a manual fallback for an org that has no GitHub App installation — it is not a required step.
 
-**A pasted PAT alone does not connect a new org to Clevis.** It only supplies GitHub-side credentials for an org that's already connected via step 2 above; Repositories, Activity, Releases, Automation, and Collaborators all require that connection first (only Overview's `/me/analytics/overview` endpoint has no such requirement). If you paste a token for an org Clevis has never seen, you'll get a clear "isn't connected to Clevis yet" error rather than being able to browse that org's data.
+**Pasting a PAT connects the org only if you're a GitHub admin of it.** When a workspace admin saves a token whose `read:org` scope lets Clevis confirm they own/administer that org, Clevis connects it then and there (same Org + membership records the App-install and OAuth paths create). If the token lacks `read:org`, or GitHub reports you as a plain member rather than an admin, the token is still saved but only powers Overview's `/me/analytics/overview` endpoint — Repositories, Activity, Releases, Automation, and Collaborators need the step-2 App connection (or, for a non-admin, an accepted org invite) first, and those pages return a clear "isn't connected to Clevis yet" error until then.
 
 ---
 

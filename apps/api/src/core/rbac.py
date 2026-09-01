@@ -53,8 +53,12 @@ def resolve_org_role(db: Session, org_login: str, user_id: int, min_role: Litera
     min_role. Shared by require_org_role itself and by installations.py's
     sync_org_installation, which needs a non-raising check to decide whether to take its
     known-admin fast path or fall through to first-time GitHub-verified bootstrap --
-    keeping the two checks from silently drifting apart (issue #190 CodeRabbit follow-up)."""
-    org = org_repo.get_by_login(db, org_login)
+    keeping the two checks from silently drifting apart (issue #190 CodeRabbit follow-up).
+
+    Lookup is case-insensitive (issue #368): GitHub org logins are unique regardless of
+    case, and an Org row is stored under GitHub's canonical casing -- so a user who typed
+    "myorg" for an org GitHub canonicalises as "MyOrg" must still resolve to it, not 404."""
+    org = org_repo.get_by_login_ci(db, org_login)
     if org is None:
         return None
     # org.tenant_id is nullable (see db.py's Org.tenant_id docstring) -- a legacy row
@@ -84,13 +88,14 @@ def require_org_role(min_role: Literal["member", "admin"]):
         ctx = resolve_org_role(db, org_login, user.id, min_role)
         if ctx is not None:
             return ctx
-        if org_repo.get_by_login(db, org_login) is None:
+        if org_repo.get_by_login_ci(db, org_login) is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=(
                     f"'{org_login}' isn't connected to Clevis yet — sign in with GitHub or "
-                    "install the GitHub App for this org first. A pasted personal access "
-                    "token alone doesn't connect a new org."
+                    "install the GitHub App for this org first. A pasted personal access token "
+                    "connects the org only if it has read:org scope and GitHub confirms you "
+                    "administer it."
                 ),
             )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Org access required")
