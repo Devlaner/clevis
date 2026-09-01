@@ -204,12 +204,16 @@ export function AppSidebar() {
   // the request when both are mounted. Only route the "Invite members" link at an
   // org where the user is actually an admin — mirrors the /collaborators fallback
   // logic (prefer the active org scope, else the first admin org, else /settings).
-  const { data: memberships = [], isLoading: membershipsLoading } = useQuery<MyOrgMembership[]>({
+  const {
+    data: memberships = [],
+    isLoading: membershipsLoading,
+    isSuccess: membershipsReady,
+  } = useQuery<MyOrgMembership[]>({
     queryKey: ["my-orgs"],
     queryFn: () => api.orgs.mine(),
   })
 
-  const { data: installs = [], isLoading: installsLoading } = useQuery<InstallationMeta[]>({
+  const { data: installs = [], isSuccess: installsReady } = useQuery<InstallationMeta[]>({
     queryKey: ["installations"],
     queryFn: () => api.installations.list(),
   })
@@ -238,15 +242,20 @@ export function AppSidebar() {
   // set. Only fires when nothing is persisted (`scope === null`); an explicit pick from the
   // profile menu always persists, so it's never overridden, and a multi-scope user can
   // still switch freely. `useRef` keeps it to a single attempt.
+  //
+  // Gate on isSuccess (not just !isLoading): a failed query also clears isLoading but
+  // leaves the `= []` fallback in place, which could make a partial/empty result look like
+  // "exactly one scope" and persist it. If a query genuinely errors we simply don't
+  // auto-select and the user picks manually -- same as the pre-#371 baseline, no regression.
   const autoSelectedScope = useRef(false)
   useEffect(() => {
     if (autoSelectedScope.current || scope !== null) return
-    if (membershipsLoading || installsLoading) return
+    if (!membershipsReady || !installsReady) return
     if (scopeOptions.length >= 1) {
       autoSelectedScope.current = true
       setScope(scopeOptions[0].scope)
     }
-  }, [scope, membershipsLoading, installsLoading, scopeOptions, setScope])
+  }, [scope, membershipsReady, installsReady, scopeOptions, setScope])
 
   // Profile identity row reflects the active scope, falling back to real
   // membership/installation data if nothing has been picked yet.
