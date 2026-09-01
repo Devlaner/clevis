@@ -40,41 +40,53 @@ def connect_admin_org_from_token(
     db: Session, user: User, org_login: str, user_token: str
 ) -> Org | None:
     """Single-org version of :func:`sync_org_admin_memberships` for the legacy-PAT path
-    (issue #368): when a workspace admin saves a PAT for an org Clevis has never connected,
-    use that PAT to establish the ``Org`` + admin membership so the ``/orgs/{org}/...``
-    dashboard pages work, instead of every one of them 404ing.
+    (issue #368): when a workspace admin saves a PAT for an org, use that PAT to establish
+    (or, for an existing ``member`` row, promote) the caller's admin ``Org`` membership so
+    the ``/orgs/{org}/...`` dashboard pages work, instead of every one of them 404ing.
 
     Same authorization policy as the OAuth path: only connects when GitHub reports the caller
     as an **admin/owner** of ``org_login``. A plain GitHub member still goes through the
     explicit invite-accept flow — pasting a PAT must not be a back door around it.
 
+    Unlike :func:`sync_org_admin_memberships` (issue #72) this only ever *grants* — it does
+    not demote/remove a membership GitHub no longer backs. That down-reconciliation stays in
+    the OAuth-login sweep; this best-effort helper is a connect path, not a full port.
+
+    The PAT is trusted the way the OAuth path trusts its token: its ``/user/memberships/orgs``
+    result is taken as the caller's own membership. The endpoint is ``require_workspace_admin``
+    (instance-level god), so a workspace admin pasting a third party's org-admin PAT is the
+    trust boundary here, not a new escalation.
+
     Returns the connected ``Org`` (canonical GitHub casing), or ``None`` if the PAT can't
-    resolve it (missing ``read:org``, GitHub error, malformed response, or the caller isn't
-    an admin). **Never raises** — the token save must succeed regardless.
+    resolve it (missing ``read:org``, GitHub error, malformed response, the caller isn't an
+    admin, or any DB error mid-provision). **Never raises** — the token save must succeed
+    regardless; on a mid-provision failure the partial work is rolled back.
     """
     try:
         memberships = github_oauth.list_user_org_memberships(user_token)
-    except Exception as exc:  # noqa: BLE001 -- best-effort; a bad response must not 500 the save
-        logger.info("PAT org auto-connect skipped for %s: %s", org_login, exc)
-        return None
+        match = next(
+            (m for m in memberships if m.login.lower() == org_login.lower() and m.role == "admin"),
+            None,
+        )
+        if match is None:
+            return None
 
-    match = next(
-        (m for m in memberships if m.login.lower() == org_login.lower() and m.role == "admin"),
-        None,
-    )
-    if match is None:
+        set_session_user(db, user.id)
+        org = org_repo.get_or_create(db, github_login=match.login, github_org_id=match.github_org_id)
+        membership = org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="admin")
+        if membership.role != "admin":
+            org_membership_repo.update_role(db, org_id=org.id, user_id=user.id, role="admin")
+        audit_repo.write(
+            db, user.email, "token.org_autolinked", match.login, {"role": "admin"},
+            tenant_id=org.tenant_id,
+        )
+        return org
+    except Exception:  # noqa: BLE001 -- best-effort; nothing here may 500 the token save
+        db.rollback()
+        logger.warning(
+            "PAT org auto-connect failed for %s (token still saved)", org_login, exc_info=True
+        )
         return None
-
-    set_session_user(db, user.id)
-    org = org_repo.get_or_create(db, github_login=match.login, github_org_id=match.github_org_id)
-    membership = org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="admin")
-    if membership.role != "admin":
-        org_membership_repo.update_role(db, org_id=org.id, user_id=user.id, role="admin")
-    audit_repo.write(
-        db, user.email, "token.org_autolinked", match.login, {"role": "admin"},
-        tenant_id=org.tenant_id,
-    )
-    return org
 
 
 def sync_org_admin_memberships(db: Session, user: User, user_token: str) -> None:

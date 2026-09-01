@@ -71,6 +71,22 @@ def test_require_org_role_passes_after_autolink(db, admin):
     assert ctx.org.github_login == "acme"
 
 
+def test_unconnected_org_gets_honest_404(db, admin):
+    """When the PAT can't auto-connect (here: no matching membership), the org-scoped
+    RBAC gate returns the honest "isn't connected to Clevis yet" 404, not "Org not found"."""
+    from fastapi import HTTPException
+
+    client = _admin_client(db, admin)
+    memberships = [GitHubOrgMembership(github_org_id=1, login="other-org", role="admin")]
+    with patch(_PATCH_TARGET, return_value=memberships):
+        client.put("/tokens/acme", json={"token": "ghp_valid"})
+
+    with pytest.raises(HTTPException) as exc:
+        require_org_role("member")(org_login="acme", db=db, user=admin)
+    assert exc.value.status_code == 404
+    assert "isn't connected to Clevis yet" in exc.value.detail
+
+
 def test_github_error_still_saves_token(db, admin):
     import httpx
 
