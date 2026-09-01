@@ -231,17 +231,18 @@ export function AppSidebar() {
     [personalInstall, memberships],
   )
 
-  // Issue #371: when a user has exactly one place to look (one org membership, or just
-  // their personal install), auto-select it as the real active scope once the data loads
-  // -- otherwise the sidebar cosmetically shows that org under the avatar while every page
-  // still says "no account selected yet" because `scope` was never set. Only fires when
-  // nothing is persisted (`scope === null`); an explicit pick always persists, so a
-  // multi-org user's choice is never overridden. `useRef` keeps it to a single attempt.
+  // Issue #371: when nothing is persisted yet, auto-select the first available scope (the
+  // personal install if there is one, else the first org membership) as the real active
+  // scope once the data loads -- otherwise the sidebar cosmetically shows an org under the
+  // avatar while every page still says "no account selected yet" because `scope` was never
+  // set. Only fires when nothing is persisted (`scope === null`); an explicit pick from the
+  // profile menu always persists, so it's never overridden, and a multi-scope user can
+  // still switch freely. `useRef` keeps it to a single attempt.
   const autoSelectedScope = useRef(false)
   useEffect(() => {
     if (autoSelectedScope.current || scope !== null) return
     if (membershipsLoading || installsLoading) return
-    if (scopeOptions.length === 1) {
+    if (scopeOptions.length >= 1) {
       autoSelectedScope.current = true
       setScope(scopeOptions[0].scope)
     }

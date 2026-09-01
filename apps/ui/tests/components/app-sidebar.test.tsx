@@ -527,7 +527,7 @@ describe("AppSidebar scope switcher", () => {
     );
   });
 
-  it("does not auto-select when the user has more than one candidate scope", async () => {
+  it("auto-selects the first scope for a multi-org user, so no page shows the empty state", async () => {
     orgMemberships = [
       { org_login: "acme", role: "admin" },
       { org_login: "globex", role: "member" },
@@ -535,9 +535,26 @@ describe("AppSidebar scope switcher", () => {
     installations = [];
     renderSidebar();
 
-    // give the effect a chance to (not) fire
+    await waitFor(() =>
+      expect(localStorage.getItem("active_scope")).toBe(
+        JSON.stringify({ kind: "org", login: "acme" }),
+      ),
+    );
+  });
+
+  it("does not override an already-persisted explicit scope choice", async () => {
+    localStorage.setItem("active_scope", JSON.stringify({ kind: "org", login: "globex" }));
+    orgMemberships = [
+      { org_login: "acme", role: "admin" },
+      { org_login: "globex", role: "member" },
+    ];
+    installations = [];
+    renderSidebar();
+
     await screen.findByRole("button", { name: /user/i });
     await new Promise((r) => setTimeout(r, 50));
-    expect(localStorage.getItem("active_scope")).toBeNull();
+    expect(localStorage.getItem("active_scope")).toBe(
+      JSON.stringify({ kind: "org", login: "globex" }),
+    );
   });
 });
