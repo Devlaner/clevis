@@ -48,9 +48,7 @@ const groups = [
     { title: "Audit Log",        href: "/audit" },
   ],
   [
-    { title: "My PRs",     href: "/my/prs" },
-    { title: "My Reviews", href: "/my/reviews" },
-    { title: "My Issues",  href: "/my/issues" },
+    { title: "My Work",    href: "/my" },
   ],
 ]
 
