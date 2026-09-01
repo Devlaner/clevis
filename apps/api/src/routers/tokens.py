@@ -17,6 +17,7 @@ from src.core.auth import UserOut, require_workspace_admin
 from src.core.config import settings
 from src.core.db import SavedToken, get_db
 from src.repositories import audit_repo, org_repo, tenant_repo
+from src.services import org_provisioning
 
 router = APIRouter()
 
@@ -61,9 +62,13 @@ def upsert_token(
     org: str,
     body: UpsertTokenRequest,
     db: Session = Depends(get_db),
-    _user: UserOut = Depends(require_workspace_admin),
+    user: UserOut = Depends(require_workspace_admin),
 ) -> TokenMeta:
-    """Save or update the token for an org (encrypted at rest). Workspace admin only."""
+    """Save or update the token for an org (encrypted at rest). Workspace admin only.
+
+    Also best-effort connects the org to Clevis using the pasted PAT (issue #368) so the
+    org-scoped dashboard pages work afterwards, not just Overview.
+    """
     encrypted = encrypt_job_token(
         body.token.get_secret_value(),
         settings.job_secret_key.get_secret_value(),
@@ -74,7 +79,28 @@ def upsert_token(
     # no OR-NULL escape -- see migration 0030's docstring) can accept the write; if not,
     # tenant_id stays NULL (migration 0033 loosens WITH CHECK for exactly this case).
     existing_org = org_repo.get_by_login_ci(db, org)
-    tenant_id = org_repo.ensure_tenant_linked(db, existing_org).tenant_id if existing_org else None
+
+    # Skip the auto-connect path (a paginated GitHub crawl) only when there's nothing it
+    # could do: the caller already has an *admin* membership for this org. A missing row
+    # -- or a "member" row GitHub might now report as "admin" -- still goes through the
+    # helper so a first connection / promotion isn't missed on token save.
+    nothing_to_do = False
+    if existing_org is not None:
+        existing_org = org_repo.ensure_tenant_linked(db, existing_org)
+        membership = tenant_repo.get_membership(db, existing_org.tenant_id, user.id)
+        nothing_to_do = membership is not None and membership.role == "admin"
+
+    # Issue #368: if this admin can't already reach the org, try to establish the Org +
+    # admin membership from the pasted PAT -- otherwise every /orgs/{org}/... page 404s
+    # with "not connected" despite a fully valid token.
+    if not nothing_to_do:
+        connected_org = org_provisioning.connect_admin_org_from_token(
+            db, user, org, body.token.get_secret_value()
+        )
+        if connected_org is not None:
+            existing_org = connected_org
+
+    tenant_id = existing_org.tenant_id if existing_org else None
 
     row = db.query(SavedToken).filter_by(org=org).first()
     if row:
