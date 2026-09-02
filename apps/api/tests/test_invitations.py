@@ -1,5 +1,6 @@
 """Tests for the org invitation create/list/revoke/accept flow."""
 
+import secrets
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -109,6 +110,95 @@ def test_create_invitation_allows_new_invite_after_the_pending_one_expires(db, a
 
     resp = client.post("/orgs/acme/invitations", json={"email": "bob@acme.com"})
     assert resp.status_code == 200
+
+
+def test_invitation_repo_rejects_a_second_pending_row(db, acme_org):
+    # Issue #270: the DB-level guard. Bypasses the router's pre-check by calling the
+    # repo directly -- without the partial unique index (migration 0042) this second
+    # insert would silently create a duplicate pending row.
+    org, admin = acme_org["org"], acme_org["admin"]
+    invitation_repo.create(db, org_id=org.id, email="dup@acme.com", invited_by_user_id=admin.id)
+
+    with pytest.raises(invitation_repo.DuplicatePendingInvitation):
+        invitation_repo.create(db, org_id=org.id, email="DUP@ACME.COM", invited_by_user_id=admin.id)
+
+    pending = invitation_repo.list_pending_for_email(db, "dup@acme.com")
+    assert len(pending) == 1
+
+
+def test_concurrent_create_invitation_leaves_exactly_one_pending_row():
+    # Issue #270: the actual race -- two real, independently-committing connections
+    # insert the same pending invite concurrently. The partial unique index must let
+    # exactly one win; the loser must surface as DuplicatePendingInvitation, not a
+    # 500 or a second row. Self-contained (no savepoint-scoped `db` fixture, whose
+    # open transaction would deadlock the worker threads on tenants/orgs), with
+    # explicit cleanup -- same approach as test_rls_isolation.py.
+    import threading
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session as RawSession
+
+    from src.core.config import settings
+    from src.repositories import org_repo
+
+    engine = create_engine(settings.database_url.get_secret_value())
+    login = f"race-org-{secrets.token_hex(4)}"
+    org_id = admin_id = None
+    try:
+        with RawSession(engine) as seed:
+            admin = User(email=f"{login}-admin@e.com", name=None, password_hash=None, email_verified=True)
+            seed.add(admin)
+            seed.flush()
+            admin_id = admin.id
+            org = org_repo.get_or_create(seed, github_login=login)
+            org_id = org.id
+            seed.commit()
+
+        barrier = threading.Barrier(2)
+        results: list[str] = []
+        lock = threading.Lock()
+
+        def worker() -> None:
+            outcome = "ok"
+            try:
+                with RawSession(engine) as s:
+                    barrier.wait(timeout=10)
+                    try:
+                        invitation_repo.create(s, org_id=org_id, email="race@acme.com", invited_by_user_id=admin_id)
+                    except invitation_repo.DuplicatePendingInvitation:
+                        outcome = "duplicate"
+            except Exception as exc:  # noqa: BLE001 -- surface anything unexpected
+                outcome = f"unexpected:{type(exc).__name__}"
+            with lock:
+                results.append(outcome)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15)
+
+        assert sorted(results) == ["duplicate", "ok"], results
+        with engine.connect() as c:
+            n = c.execute(
+                text(
+                    "SELECT count(*) FROM invitations "
+                    "WHERE org_id = :o AND lower(email) = 'race@acme.com' AND status = 'pending'"
+                ),
+                {"o": org_id},
+            ).scalar()
+        assert n == 1
+    finally:
+        with engine.begin() as c:
+            if org_id is not None:
+                # orgs.tenant_id <-> tenants.org_id is a reciprocal FK cycle; break it first.
+                c.execute(text("UPDATE orgs SET tenant_id = NULL WHERE id = :o"), {"o": org_id})
+                c.execute(text("DELETE FROM invitations WHERE org_id = :o"), {"o": org_id})
+                c.execute(text("DELETE FROM tenants WHERE org_id = :o"), {"o": org_id})
+                c.execute(text("DELETE FROM orgs WHERE id = :o"), {"o": org_id})
+            if admin_id is not None:
+                c.execute(text("DELETE FROM users WHERE id = :u"), {"u": admin_id})
+        engine.dispose()
 
 
 def test_list_invitations_admin_only(db, acme_org):
