@@ -11,13 +11,36 @@ class AnalyticsInput(BaseModel):
     token: SecretStr | None = None
 
 
+class CheckResult(BaseModel):
+    """One security-check result as produced by ``checks.runner.run_all_checks``.
+
+    Typed so a shape drift in ``packages/checks`` fails fast at the API boundary with a
+    clear validation error instead of silently reaching the UI and crashing a render
+    (issue #370). ``value`` is deliberately a union of every shape the six checks and the
+    runner's error paths emit: a bare bool (MFA), a ``{str: int}`` counts dict (all the
+    repo-level checks), or a plain string (runner-level failure messages).
+
+    ``severity`` stays a free ``str`` on purpose: it's the source-of-truth
+    ``CheckMetadata.severity`` (unconstrained), it's only a cosmetic chip in the UI, and
+    ``github_checks.py`` already uses a wider vocabulary ("critical") elsewhere -- pinning
+    it here would turn a new check's severity label into a 500 on the whole overview.
+    """
+
+    id: str
+    title: str
+    severity: str
+    remediation: str
+    status: Literal["pass", "fail", "error", "not_applicable"]
+    value: bool | str | dict[str, int] | None = None
+
+
 class AnalyticsResponse(BaseModel):
     owner: str
     score: int
     total_checks: int
     failed_checks: int
     repo_count: int
-    checks: list[dict]
+    checks: list[CheckResult]
 
 
 class ScanHistoryEntry(BaseModel):
