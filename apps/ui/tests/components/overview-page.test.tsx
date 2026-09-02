@@ -255,6 +255,19 @@ describe("OverviewPage cockpit", () => {
     expect(screen.getByText("pushed 3 commits to main")).toBeInTheDocument();
   });
 
+  it("titles the card 'Recent Highlights' and links to the full activity feed (issue #285)", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+
+    renderPage();
+
+    expect(await screen.findByText("Recent Highlights")).toBeInTheDocument();
+    expect(screen.queryByText("Recent Activity")).not.toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /view full activity feed/i });
+    expect(link).toHaveAttribute("href", "/activity");
+  });
+
   it("hides the Needs Attention card when there are no at-risk repos", async () => {
     localStorage.setItem("default_org", "acme");
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
