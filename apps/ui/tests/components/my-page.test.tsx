@@ -88,7 +88,7 @@ describe("MyWorkPage (tabbed /my)", () => {
     renderPage();
 
     await waitFor(() => expect(myReviewsMock).toHaveBeenCalledWith("acme", 1, 25, "ghp_test"));
-    expect(screen.getByRole("tab", { name: "My Reviews" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("button", { name: "My Reviews", pressed: true })).toBeInTheDocument();
     expect(myPrsMock).not.toHaveBeenCalled();
   });
 
@@ -99,7 +99,7 @@ describe("MyWorkPage (tabbed /my)", () => {
     renderPage();
     await waitFor(() => expect(myPrsMock).toHaveBeenCalled());
 
-    fireEvent.click(screen.getByRole("tab", { name: "My Issues" }));
+    fireEvent.click(screen.getByRole("button", { name: "My Issues" }));
     expect(replace).toHaveBeenCalledWith("?tab=issues", { scroll: false });
   });
 
@@ -111,7 +111,7 @@ describe("MyWorkPage (tabbed /my)", () => {
     renderPage();
     await waitFor(() => expect(myIssuesMock).toHaveBeenCalled());
 
-    fireEvent.click(screen.getByRole("tab", { name: "My PRs" }));
+    fireEvent.click(screen.getByRole("button", { name: "My PRs" }));
     expect(replace).toHaveBeenCalledWith("?", { scroll: false });
   });
 });

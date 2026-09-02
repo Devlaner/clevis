@@ -91,15 +91,14 @@ export default function MyWorkPage() {
     <>
       <PageHeader title="My Work" description={config.description} />
 
-      <div className="flex items-center gap-1.5 mb-5" role="tablist" aria-label="My Work views">
+      <div className="flex items-center gap-1.5 mb-5">
         {TABS.map((t) => {
           const active = t.id === activeTab
           return (
             <button
               key={t.id}
               type="button"
-              role="tab"
-              aria-selected={active}
+              aria-pressed={active}
               onClick={() => selectTab(t.id)}
               className={`text-xs font-medium px-2.5 py-1 rounded-md border transition-colors ${
                 active
