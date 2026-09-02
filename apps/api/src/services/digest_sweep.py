@@ -8,7 +8,7 @@ off by default -- controlled by the `digest_cadence` instance-config key
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -76,7 +76,9 @@ def run_digest_sweep(db: Session) -> None:
             if last_sent is not None:
                 if last_sent.tzinfo is None:
                     last_sent = last_sent.replace(tzinfo=timezone.utc)
-                if (now - last_sent).days < interval_days:
+                # 12h grace so the digest doesn't drift a poll-interval later every
+                # period (timedelta.days floors; the send only lands on a poll tick).
+                if now - last_sent < timedelta(days=interval_days, hours=-12):
                     continue
 
             # Serialise the check-then-send window across replicas (see sweep_lock.py).
@@ -97,13 +99,15 @@ def run_digest_sweep(db: Session) -> None:
 
             subject = digest_service.render_subject(content)
             body = digest_service.render_text(content)
+            # is_configured() was checked at the top of the sweep. If SMTP drops
+            # mid-run a send just fails like any other error -- caught here so a
+            # partial success still records its digest.sent marker (otherwise the
+            # next tick re-sends to everyone, including admins already emailed).
             sent = 0
             for address in recipients:
                 try:
                     email.send_email(address, subject, body)
                     sent += 1
-                except email.EmailNotConfigured:
-                    raise
                 except Exception:
                     logger.exception("digest sweep: failed to email %s for tenant %d", address, tenant_id)
 
@@ -118,10 +122,6 @@ def run_digest_sweep(db: Session) -> None:
                 )
             else:
                 db.commit()  # release the lock even when every send failed
-        except email.EmailNotConfigured:
-            db.rollback()
-            logger.warning("digest sweep: SMTP became unconfigured mid-sweep; stopping")
-            return
         except Exception:
             db.rollback()
             logger.exception("digest sweep: iteration failed for tenant %d", tenant_id)

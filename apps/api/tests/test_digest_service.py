@@ -55,6 +55,22 @@ def test_build_digest_reports_score_delta_and_failing_checks(db):
     assert "score 75" in digest_service.render_subject(content)
 
 
+def test_errored_checks_are_listed_as_risk_items(db):
+    # analytics counts "error" toward failed_checks/score, so the digest must too.
+    org = org_repo.get_or_create(db, github_login="digest-errored")
+    scan_results_repo.insert(
+        db, owner="digest-errored", score=55, total_checks=2, failed_checks=2,
+        checks=[
+            {"id": "a", "title": "Errored check", "severity": "high", "status": "error"},
+            {"id": "b", "title": "Failed check", "severity": "high", "status": "fail"},
+        ],
+        tenant_id=org.tenant_id,
+    )
+    _set_tenant(db, org.tenant_id)
+    content = digest_service.build_digest(db, tenant_id=org.tenant_id, org_login="digest-errored", period_label="weekly")
+    assert set(content.failing_checks) == {"Errored check", "Failed check"}
+
+
 def test_build_digest_tolerates_malformed_checks_json(db):
     org = org_repo.get_or_create(db, github_login="digest-bad")
     scan_results_repo.insert(db, owner="digest-bad", score=50, total_checks=1, failed_checks=1, checks=[], tenant_id=org.tenant_id)

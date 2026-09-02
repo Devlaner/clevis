@@ -209,6 +209,24 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(configUpdateMock).toHaveBeenCalledWith("digest_cadence", "weekly"));
   });
 
+  it("saves the visible cadence value even when it was never in the server config", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    // digest_cadence absent from read_all() -> select shows "Off" but has no state entry.
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+    configUpdateMock.mockResolvedValue({ digest_cadence: "off" });
+
+    renderPage();
+
+    const cadence = await screen.findByDisplayValue("Off");
+    const row = cadence.closest("div")!.parentElement!;
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    // Must send "off", not "" (which _ENUM_KEYS would 422).
+    await waitFor(() => expect(configUpdateMock).toHaveBeenCalledWith("digest_cadence", "off"));
+  });
+
   it("shows a success banner and strips the query param when landing with ?installed=1", async () => {
     searchParams = new URLSearchParams({ installed: "1" });
     orgsMineMock.mockResolvedValue([]);

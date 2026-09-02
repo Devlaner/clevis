@@ -577,11 +577,11 @@ function InstanceConfigSection() {
     if (config) setValues((prev) => initialConfigValues(prev, config))
   }, [config])
 
-  async function saveKey(key: string) {
+  async function saveKey(key: string, explicitValue?: string) {
     setSaving(key)
     setErrors((prev) => ({ ...prev, [key]: "" }))
     try {
-      await api.config.update(key, values[key] ?? "")
+      await api.config.update(key, explicitValue ?? values[key] ?? "")
       const updated = await qc.fetchQuery<Record<string, string>>({
         queryKey: ["config"],
         queryFn: api.config.getAll,
@@ -651,7 +651,21 @@ function InstanceConfigSection() {
                   className="font-mono text-xs"
                 />
               )}
-              <Button size="sm" variant="outline" onClick={() => saveKey(field.key)} disabled={isSavingField}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  saveKey(
+                    field.key,
+                    // A select with no persisted value shows its first option but has
+                    // no entry in `values` yet -- save that visible value, not "".
+                    field.type === "select"
+                      ? (values[field.key] ?? field.options?.[0]?.value ?? "")
+                      : undefined,
+                  )
+                }
+                disabled={isSavingField}
+              >
                 {saveContent}
               </Button>
             </div>
