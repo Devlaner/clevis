@@ -255,9 +255,9 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        <div className="card">
+        <div className="card flex flex-col">
           <div className="px-4 py-3 border-b border-border flex items-center gap-2">
-            <span className="section-label">Recent Activity</span>
+            <span className="section-label">Recent Highlights</span>
             {cockpit?.recent_events_stale && (
               <span
                 className="text-[0.6875rem] text-warning"
@@ -272,6 +272,13 @@ export default function OverviewPage() {
             isLoading={cockpitQuery.isLoading}
             limit={5}
           />
+          <Link
+            href="/activity"
+            className="group mt-auto flex items-center justify-center gap-1 border-t border-border px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+          >
+            View full activity feed
+            <ArrowRight className="size-3.5 shrink-0 transition-transform group-hover:translate-x-0.5" />
+          </Link>
         </div>
       </div>
 
