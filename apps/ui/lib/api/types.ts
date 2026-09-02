@@ -56,10 +56,16 @@ export interface ScanExportCheck {
 }
 
 export interface ScanExportEntry extends ScanHistoryEntry {
-  checks: ScanExportCheck[]
+  // Permissive on purpose: replays historical audit data that older runner
+  // revisions may have stored with a slightly different shape.
+  checks: Partial<ScanExportCheck>[]
 }
 
-export type ScanExportResponse = ScanExportEntry[]
+export interface ScanExportResponse {
+  truncated: boolean
+  row_count: number
+  entries: ScanExportEntry[]
+}
 
 export interface CacheEntry {
   id: number

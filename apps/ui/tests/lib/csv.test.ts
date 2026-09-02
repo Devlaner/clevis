@@ -24,4 +24,14 @@ describe("toCsv", () => {
     ];
     expect(toCsv([{ n: 0 }, { n: null }], numCols)).toBe("n\r\n0\r\n");
   });
+
+  it("neutralises spreadsheet formula injection but leaves plain numbers alone", () => {
+    const c = [{ header: "v", value: (r: { v: string }) => r.v }];
+    expect(toCsv([{ v: "=1+1" }], c)).toBe("v\r\n'=1+1");
+    expect(toCsv([{ v: "@SUM(A1)" }], c)).toBe("v\r\n'@SUM(A1)");
+    expect(toCsv([{ v: "-1+1" }], c)).toBe("v\r\n'-1+1");
+    // A genuine negative number is not a formula and is left as-is.
+    const n = [{ header: "n", value: (r: { n: number }) => r.n }];
+    expect(toCsv([{ n: -5 }], n)).toBe("n\r\n-5");
+  });
 });

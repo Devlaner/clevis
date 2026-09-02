@@ -54,10 +54,22 @@ class ScanHistoryEntry(BaseModel):
 
 class ScanExportEntry(ScanHistoryEntry):
     """A scan-history row plus its full per-check breakdown, for the compliance
-    export (issue #293). ``checks`` is the same ``CheckResult`` shape the live
-    overview returns, replayed from what was persisted at scan time."""
+    export (issue #293). ``checks`` is left as a permissive ``list[dict]`` on
+    purpose: this replays historical audit data, and a row persisted by an older
+    revision of the runner must not fail response validation and 500 the whole
+    export. New scans store the ``CheckResult`` shape (id/title/severity/status/
+    remediation/value)."""
 
-    checks: list[CheckResult] = []
+    checks: list[dict] = []
+
+
+class ScanExportResponse(BaseModel):
+    """Wraps the export rows with a ``truncated`` flag so a windowed audit export
+    that hit the row cap is never silently partial."""
+
+    truncated: bool = False
+    row_count: int = 0
+    entries: list[ScanExportEntry] = []
 
 
 class OrgEventSummary(BaseModel):

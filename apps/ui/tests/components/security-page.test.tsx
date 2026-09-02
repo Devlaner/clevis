@@ -254,19 +254,23 @@ describe("SecurityPage", () => {
     analyticsHistoryMock.mockResolvedValue([
       { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
     ]);
-    analyticsExportMock.mockResolvedValue([
-      {
-        id: 1,
-        owner: "acme",
-        score: 70,
-        total_checks: 2,
-        failed_checks: 1,
-        created_at: "2026-07-10T00:00:00Z",
-        checks: [
-          { id: "organization_members_mfa_required", title: "Org 2FA", severity: "high", status: "fail" },
-        ],
-      },
-    ]);
+    analyticsExportMock.mockResolvedValue({
+      truncated: false,
+      row_count: 1,
+      entries: [
+        {
+          id: 1,
+          owner: "acme",
+          score: 70,
+          total_checks: 2,
+          failed_checks: 1,
+          created_at: "2026-07-10T00:00:00Z",
+          checks: [
+            { id: "organization_members_mfa_required", title: "Org 2FA", severity: "high", status: "fail" },
+          ],
+        },
+      ],
+    });
 
     renderPage();
     fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
@@ -274,13 +278,26 @@ describe("SecurityPage", () => {
     const exportButton = await screen.findByRole("button", { name: /export history/i });
     fireEvent.click(exportButton);
 
-    await waitFor(() => expect(analyticsExportMock).toHaveBeenCalledWith("acme"));
+    await waitFor(() => expect(analyticsExportMock).toHaveBeenCalledWith("acme", undefined, undefined));
     await waitFor(() => expect(downloadTextFileMock).toHaveBeenCalled());
     const [filename, csv, mime] = downloadTextFileMock.mock.calls[0];
     expect(filename).toMatch(/^clevis-scan-history-acme-\d{4}-\d{2}-\d{2}\.csv$/);
     expect(mime).toBe("text/csv");
     expect(csv).toContain("scanned_at,owner,score,total_checks,failed_checks,check_id,check_title,severity,status");
     expect(csv).toContain("organization_members_mfa_required");
+  });
+
+  it("warns when the export was truncated at the row cap", async () => {
+    analyticsHistoryMock.mockResolvedValue([
+      { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+    ]);
+    analyticsExportMock.mockResolvedValue({ truncated: true, row_count: 5000, entries: [] });
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    fireEvent.click(await screen.findByRole("button", { name: /export history/i }));
+
+    expect(await screen.findByText(/capped at 5000 scans/i)).toBeInTheDocument();
   });
 
   it("filters checks down to failed only via the Failed tab", async () => {

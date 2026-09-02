@@ -1,9 +1,19 @@
-// Minimal RFC-4180 CSV serialiser. Kept dependency-free and pure (no DOM) so it
-// unit-tests cleanly and can run server- or client-side.
+// Minimal RFC-4180 CSV serialiser with spreadsheet formula-injection defense.
+// Dependency-free and pure (no DOM) so it unit-tests cleanly and can run
+// server- or client-side.
 
-/** Quote a single field if it contains a comma, quote, CR, or LF; double any embedded quotes. */
+/**
+ * Serialise one field:
+ * - Fields Excel/Sheets would parse as a formula (leading =, +, -, @, tab, CR)
+ *   are prefixed with a single quote so a compliance export can't smuggle a
+ *   formula into a reviewer's spreadsheet. A plain number (incl. negative) is
+ *   left alone -- it's not a formula.
+ * - Then quote if the (possibly prefixed) value contains a comma, quote, CR, or
+ *   LF, doubling any embedded quotes (RFC 4180).
+ */
 function escapeField(value: unknown): string {
-  const s = value === null || value === undefined ? "" : String(value)
+  let s = value === null || value === undefined ? "" : String(value)
+  if (/^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
 }
 

@@ -83,6 +83,8 @@ export default function SecurityPage() {
   const [owner, setOwner] = useState("")
   const [token, setToken] = useState("")
   const [tokenSaved, setTokenSaved] = useState(false)
+  const [exportSince, setExportSince] = useState("")
+  const [exportUntil, setExportUntil] = useState("")
 
   const tab = (searchParams.get("tab") ?? "all") as TabId
   const severityFilter = (searchParams.get("severity") ?? "all") as "all" | "high" | "medium" | "low"
@@ -166,11 +168,12 @@ export default function SecurityPage() {
   // detail and hand the auditor a CSV. One row per check per scan (long format);
   // scans that stored no per-check breakdown still contribute one summary row.
   const exportCsv = useMutation({
-    mutationFn: () => api.analytics.exportHistory(owner.trim()),
-    onSuccess: (rows) => {
-      const flat = rows.flatMap((scanRow) =>
-        (scanRow.checks.length ? scanRow.checks : [null]).map((check) => ({ scanRow, check })),
-      )
+    mutationFn: () => api.analytics.exportHistory(owner.trim(), exportSince || undefined, exportUntil || undefined),
+    onSuccess: (res) => {
+      const flat = res.entries.flatMap((scanRow) => {
+        const checks = scanRow.checks ?? []
+        return (checks.length ? checks : [null]).map((check) => ({ scanRow, check }))
+      })
       const csv = toCsv(flat, [
         { header: "scanned_at", value: ({ scanRow }) => scanRow.created_at },
         { header: "owner", value: ({ scanRow }) => scanRow.owner },
@@ -318,19 +321,47 @@ export default function SecurityPage() {
               </div>
             )}
             {(historyQuery.data?.length ?? 0) > 0 && (
-              <Button
-                variant="outline"
-                onClick={() => exportCsv.mutate()}
-                disabled={exportCsv.isPending}
-              >
-                <DownloadSimple className="size-3.5" />
-                {exportCsv.isPending ? "Exporting…" : "Export history (CSV)"}
-              </Button>
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <input
+                    type="date"
+                    aria-label="Export from date"
+                    value={exportSince}
+                    max={exportUntil || undefined}
+                    onChange={(e) => setExportSince(e.target.value)}
+                    className="card px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <span>–</span>
+                  <input
+                    type="date"
+                    aria-label="Export to date"
+                    value={exportUntil}
+                    min={exportSince || undefined}
+                    onChange={(e) => setExportUntil(e.target.value)}
+                    className="card px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => exportCsv.mutate()}
+                  disabled={exportCsv.isPending}
+                >
+                  <DownloadSimple className="size-3.5" />
+                  {exportCsv.isPending ? "Exporting…" : "Export history (CSV)"}
+                </Button>
+              </div>
             )}
             {exportCsv.isError && (
               <div className="flex items-start gap-2 text-xs text-destructive">
                 <Warning className="size-3.5 mt-0.5 shrink-0" />
                 {exportCsv.error.message}
+              </div>
+            )}
+            {exportCsv.data?.truncated && (
+              <div className="flex items-start gap-2 text-xs text-amber-500">
+                <Warning className="size-3.5 mt-0.5 shrink-0" />
+                Export capped at {exportCsv.data.row_count} scans — narrow the date range for a complete
+                period.
               </div>
             )}
           </div>

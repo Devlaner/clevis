@@ -30,7 +30,7 @@ from src.schemas.analytics import (
     PrCycleTimeWeek,
     PrWeekBucket,
     RunSummaryLite,
-    ScanExportEntry,
+    ScanExportResponse,
     ScanHistoryEntry,
 )
 from src.services.analytics_service import get_account_type, get_overview
@@ -81,22 +81,33 @@ def _persist_scan(db: Session, result: dict, tenant_id: int | None, scanned_by_u
     )
 
 
-def _user_can_read_history(db: Session, user: UserOut, owner: str) -> bool:
-    """Scan history isn't gated by GitHub-side authorization the way a live scan is
-    (GitHub itself rejects a bad token/owner combo) -- it's a local DB read, so it
-    needs its own access check. A user may read `owner`'s history if they're a
-    member of the matching workspace Org, they personally have a GitHub App
-    installation connected for that account login, or they're the one who ran a
-    personal scan against that owner before (scanned_by_user_id, for owners with
-    no workspace Org/membership at all -- the raw-PAT-paste flow)."""
+def _user_history_scope(db: Session, user: UserOut, owner: str) -> str | None:
+    """How much of `owner`'s scan history this user may read. Scan history isn't
+    gated by GitHub-side authorization the way a live scan is -- it's a local DB
+    read, so it needs its own check. Returns:
+
+    - ``"all"``  -- the user is a member of the matching workspace Org, or has a
+      personal GitHub App installation for that account login: they see every
+      scan of that owner.
+    - ``"own"``  -- the user's only claim is a personal (BYO-PAT) scan they ran
+      themselves against a login with no workspace Org/membership: they see only
+      their own scans (`scanned_by_user_id`).
+    - ``None``   -- no access.
+    """
     org = org_repo.get_by_login(db, owner)
     if org is not None:
         org = org_repo.ensure_tenant_linked(db, org)
         if tenant_repo.get_membership(db, org.tenant_id, user.id) is not None:
-            return True
+            return "all"
     if installation_repo.get_for_user(db, owner_user_id=user.id, account_login=owner) is not None:
-        return True
-    return scan_results_repo.exists_for_user(db, owner=owner, user_id=user.id)
+        return "all"
+    if scan_results_repo.exists_for_user(db, owner=owner, user_id=user.id):
+        return "own"
+    return None
+
+
+def _user_can_read_history(db: Session, user: UserOut, owner: str) -> bool:
+    return _user_history_scope(db, user, owner) is not None
 
 
 @router.post("/orgs/{org_login}/analytics/overview", response_model=AnalyticsResponse)
@@ -173,7 +184,7 @@ def personal_analytics_history(
 # endpoints above; the CSV rendering itself is done client-side.
 # ---------------------------------------------------------------------------
 
-_EXPORT_MAX_ROWS = 1000
+_EXPORT_MAX_ROWS = 5000
 
 
 def _export_window(since: date | None, until: date | None) -> tuple[datetime | None, datetime | None]:
@@ -188,7 +199,15 @@ def _export_window(since: date | None, until: date | None) -> tuple[datetime | N
     return since_dt, until_dt
 
 
-@router.get("/orgs/{org_login}/analytics/export", response_model=list[ScanExportEntry])
+def _build_export_response(rows: list[dict], limit: int) -> ScanExportResponse:
+    # list_for_export fetches limit+1 so a full page is distinguishable from a
+    # truncated one -- a compliance export must never be silently partial.
+    truncated = len(rows) > limit
+    entries = rows[:limit]
+    return ScanExportResponse(truncated=truncated, row_count=len(entries), entries=entries)
+
+
+@router.get("/orgs/{org_login}/analytics/export", response_model=ScanExportResponse)
 def org_analytics_export(
     since: date | None = None,
     until: date | None = None,
@@ -197,12 +216,13 @@ def org_analytics_export(
     db: Session = Depends(get_db),
 ):
     since_dt, until_dt = _export_window(since, until)
-    return scan_results_repo.list_for_export(
+    rows = scan_results_repo.list_for_export(
         db, owner=ctx.org.github_login, since=since_dt, until=until_dt, limit=limit
     )
+    return _build_export_response(rows, limit)
 
 
-@router.get("/me/analytics/export", response_model=list[ScanExportEntry])
+@router.get("/me/analytics/export", response_model=ScanExportResponse)
 def personal_analytics_export(
     owner: str,
     since: date | None = None,
@@ -211,10 +231,21 @@ def personal_analytics_export(
     user: UserOut = Depends(require_auth),
     db: Session = Depends(get_db),
 ):
-    if not _user_can_read_history(db, user, owner):
+    scope = _user_history_scope(db, user, owner)
+    if scope is None:
         raise HTTPException(status_code=403, detail="You don't have access to this owner's scan history")
     since_dt, until_dt = _export_window(since, until)
-    return scan_results_repo.list_for_export(db, owner=owner, since=since_dt, until=until_dt, limit=limit)
+    rows = scan_results_repo.list_for_export(
+        db,
+        owner=owner,
+        since=since_dt,
+        until=until_dt,
+        limit=limit,
+        # "own" scope: the caller only ever ran a personal BYO-PAT scan of this
+        # login -- don't hand them scans other users ran (or an org's own rows).
+        scanned_by_user_id=user.id if scope == "own" else None,
+    )
+    return _build_export_response(rows, limit)
 
 
 # ---------------------------------------------------------------------------
