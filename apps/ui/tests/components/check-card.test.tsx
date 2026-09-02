@@ -141,23 +141,36 @@ describe("CheckCard — file as issue (#286)", () => {
     expect(screen.queryByRole("button", { name: "File as issue" })).not.toBeInTheDocument();
   });
 
-  it("files an issue for a failing check, prefilled from the check, and links to the result", async () => {
-    createIssueMock.mockResolvedValue({ number: 7, html_url: "https://github.com/acme/.github/issues/7" });
+  it("files an issue with the user's edited repo and title, and links to the result", async () => {
+    createIssueMock.mockResolvedValue({ number: 7, html_url: "https://github.com/acme/api/issues/7" });
     renderWithClient(<CheckCard check={failing} owner="acme" token="ghp_x" />);
 
     fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
     expect((screen.getByLabelText("Repository") as HTMLInputElement).value).toBe(".github");
     expect((screen.getByLabelText("Issue title") as HTMLInputElement).value).toBe("MFA enforced");
 
+    fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "api" } });
+    fireEvent.change(screen.getByLabelText("Issue title"), { target: { value: "Turn on org MFA" } });
     fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
 
     await waitFor(() => expect(screen.getByText(/Issue #7 created/)).toBeInTheDocument());
     const [owner, repo, body, token] = createIssueMock.mock.calls[0];
     expect(owner).toBe("acme");
-    expect(repo).toBe(".github");
-    expect(body.title).toBe("MFA enforced");
+    expect(repo).toBe("api");
+    expect(body.title).toBe("Turn on org MFA");
     expect(body.body).toContain("Require two-factor authentication");
     expect(token).toBe("ghp_x");
+  });
+
+  it("closes the form on Cancel without calling the API", () => {
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    expect(screen.getByLabelText("Repository")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Repository")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "File as issue" })).toBeInTheDocument();
+    expect(createIssueMock).not.toHaveBeenCalled();
   });
 
   it("shows a scope hint when GitHub rejects the write with a 403", async () => {
@@ -170,5 +183,21 @@ describe("CheckCard — file as issue (#286)", () => {
     await waitFor(() =>
       expect(screen.getByText(/needs the 'Issues: write' permission/)).toBeInTheDocument(),
     );
+  });
+
+  it("shows the raw error message for a non-403 failure, and a generic message otherwise", async () => {
+    createIssueMock.mockRejectedValue(new Error("GitHub API error: 422"));
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.getByText("GitHub API error: 422")).toBeInTheDocument());
+
+    cleanup();
+    createIssueMock.mockReset();
+    createIssueMock.mockRejectedValue("plain string, not an Error");
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.getByText("Failed to create the issue.")).toBeInTheDocument());
   });
 });
