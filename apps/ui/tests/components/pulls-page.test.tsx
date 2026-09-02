@@ -157,6 +157,39 @@ describe("PullRequestsPage", () => {
     expect(await screen.findByText("Failed to load repositories.")).toBeInTheDocument();
   });
 
+  it("regroups the open PRs by author when the 'by author' toggle is selected (issue #284)", async () => {
+    localStorage.setItem("default_org", "acme");
+    reposListMock.mockResolvedValue({
+      org: "acme",
+      total: 1,
+      repos: [{ name: "api", full_name: "acme/api", private: false, description: null, language: null, stargazers_count: 0, forks_count: 0, watchers_count: 0, open_issues_count: 0, pushed_at: null, default_branch: "main", html_url: "https://github.com/acme/api" }],
+    });
+    reposPullsMock.mockResolvedValue({
+      repository: "acme/api",
+      total: 2,
+      pulls: [
+        pull({ number: 1, title: "alice one", user: "alice", html_url: "https://github.com/acme/api/pull/1" }),
+        pull({ number: 2, title: "bob one", user: "bob", html_url: "https://github.com/acme/api/pull/2" }),
+      ],
+    });
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText(/2 total/)).toBeInTheDocument());
+    // repo view: a real table
+    expect(screen.getAllByRole("row").length).toBeGreaterThan(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "by author" }));
+
+    await waitFor(() => expect(screen.queryByRole("table")).not.toBeInTheDocument());
+    // Author-grouped card headings: the author login is its own text node ("alice",
+    // "bob"), with the per-author count in a sibling span.
+    expect(screen.getByText("alice")).toBeInTheDocument();
+    expect(screen.getByText("bob")).toBeInTheDocument();
+    expect(screen.getByText(/#1 alice one/)).toBeInTheDocument();
+    expect(screen.getByText(/#2 bob one/)).toBeInTheDocument();
+  });
+
   it("falls back to 'unknown' when a pull request has no author", async () => {
     localStorage.setItem("default_org", "acme");
     reposListMock.mockResolvedValue({
