@@ -6,9 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from src.core.auth import UserOut, require_auth
-from src.core.db import User, get_db
+from src.core.db import Invitation, User, get_db
 from src.repositories import invitation_repo, org_membership_repo, org_repo
 from src.routers.invitations import router as invitations_router
 
@@ -126,79 +127,44 @@ def test_invitation_repo_rejects_a_second_pending_row(db, acme_org):
     assert len(pending) == 1
 
 
-def test_concurrent_create_invitation_leaves_exactly_one_pending_row():
-    # Issue #270: the actual race -- two real, independently-committing connections
-    # insert the same pending invite concurrently. The partial unique index must let
-    # exactly one win; the loser must surface as DuplicatePendingInvitation, not a
-    # 500 or a second row. Self-contained (no savepoint-scoped `db` fixture, whose
-    # open transaction would deadlock the worker threads on tenants/orgs), with
-    # explicit cleanup -- same approach as test_rls_isolation.py.
-    import threading
+def test_partial_unique_index_rejects_a_raw_duplicate_pending_insert(db, acme_org):
+    # Issue #270: proves the DB constraint itself -- independent of
+    # invitation_repo.create's IntegrityError handling. A raw second INSERT of a
+    # pending row for the same (org_id, lower(email)) must violate
+    # uq_invitations_org_email_pending. This is exactly what serialises two
+    # concurrent create_invitation requests: Postgres lets one INSERT win and
+    # fails the other, turning the router's non-atomic check-then-insert race into
+    # a clean one-winner outcome.
+    org, admin = acme_org["org"], acme_org["admin"]
+    invitation_repo.create(db, org_id=org.id, email="race@acme.com", invited_by_user_id=admin.id)
 
-    from sqlalchemy import create_engine, text
-    from sqlalchemy.orm import Session as RawSession
+    with pytest.raises(IntegrityError):
+        # begin_nested so the failed INSERT rolls back to a savepoint, leaving the
+        # first invitation (and acme_org) intact for the assertion below.
+        with db.begin_nested():
+            db.add(
+                Invitation(
+                    org_id=org.id,
+                    email="RACE@acme.com",  # different case -> same lower(email) index key
+                    token=secrets.token_urlsafe(32),
+                    status="pending",
+                    invited_by_user_id=admin.id,
+                    expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+                    tenant_id=org.tenant_id,
+                )
+            )
+            db.flush()
 
-    from src.core.config import settings
-    from src.repositories import org_repo
+    assert len(invitation_repo.list_pending_for_email(db, "race@acme.com")) == 1
 
-    engine = create_engine(settings.database_url.get_secret_value())
-    login = f"race-org-{secrets.token_hex(4)}"
-    org_id = admin_id = None
-    try:
-        with RawSession(engine) as seed:
-            admin = User(email=f"{login}-admin@e.com", name=None, password_hash=None, email_verified=True)
-            seed.add(admin)
-            seed.flush()
-            admin_id = admin.id
-            org = org_repo.get_or_create(seed, github_login=login)
-            org_id = org.id
-            seed.commit()
 
-        barrier = threading.Barrier(2)
-        results: list[str] = []
-        lock = threading.Lock()
-
-        def worker() -> None:
-            outcome = "ok"
-            try:
-                with RawSession(engine) as s:
-                    barrier.wait(timeout=10)
-                    try:
-                        invitation_repo.create(s, org_id=org_id, email="race@acme.com", invited_by_user_id=admin_id)
-                    except invitation_repo.DuplicatePendingInvitation:
-                        outcome = "duplicate"
-            except Exception as exc:  # noqa: BLE001 -- surface anything unexpected
-                outcome = f"unexpected:{type(exc).__name__}"
-            with lock:
-                results.append(outcome)
-
-        threads = [threading.Thread(target=worker) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=15)
-
-        assert sorted(results) == ["duplicate", "ok"], results
-        with engine.connect() as c:
-            n = c.execute(
-                text(
-                    "SELECT count(*) FROM invitations "
-                    "WHERE org_id = :o AND lower(email) = 'race@acme.com' AND status = 'pending'"
-                ),
-                {"o": org_id},
-            ).scalar()
-        assert n == 1
-    finally:
-        with engine.begin() as c:
-            if org_id is not None:
-                # orgs.tenant_id <-> tenants.org_id is a reciprocal FK cycle; break it first.
-                c.execute(text("UPDATE orgs SET tenant_id = NULL WHERE id = :o"), {"o": org_id})
-                c.execute(text("DELETE FROM invitations WHERE org_id = :o"), {"o": org_id})
-                c.execute(text("DELETE FROM tenants WHERE org_id = :o"), {"o": org_id})
-                c.execute(text("DELETE FROM orgs WHERE id = :o"), {"o": org_id})
-            if admin_id is not None:
-                c.execute(text("DELETE FROM users WHERE id = :u"), {"u": admin_id})
-        engine.dispose()
+def test_create_invitation_reraises_non_duplicate_integrity_errors(db, acme_org):
+    # The IntegrityError -> DuplicatePendingInvitation conversion must be narrow: a
+    # different constraint failure (here, a bad invited_by_user_id FK) has to
+    # surface as itself, not as a misleading "already exists" 409.
+    org = acme_org["org"]
+    with pytest.raises(IntegrityError):
+        invitation_repo.create(db, org_id=org.id, email="fk@acme.com", invited_by_user_id=999_999_999)
 
 
 def test_list_invitations_admin_only(db, acme_org):

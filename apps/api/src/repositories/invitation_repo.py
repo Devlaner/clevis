@@ -51,10 +51,14 @@ def create(db: Session, org_id: int, email: str, invited_by_user_id: int) -> Inv
     try:
         db.commit()
     except IntegrityError as exc:
-        # Lost the race with a concurrent insert of the same (org_id, lower(email))
-        # pending pair -- the pre-check in the router passed for both callers before
-        # either committed. Surface it as the same 409 the pre-check produces.
         db.rollback()
+        # Only convert to a 409 if the failure was actually a duplicate pending invite
+        # (the concurrent-insert race). Any other IntegrityError -- an FK violation, a
+        # token collision, a future constraint -- must surface as itself, not as a
+        # misleading "already exists". Mirrors org_membership_repo.get_or_create, which
+        # re-queries the specific row and re-raises when it isn't there.
+        if get_pending_for_org_and_email(db, org_id=org_id, email=email) is None:
+            raise
         raise DuplicatePendingInvitation(email) from exc
     db.refresh(invitation)
     return invitation
