@@ -8,8 +8,10 @@ import { CheckCard } from "@/components/check-card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { Warning, Key, ShieldWarning } from "@phosphor-icons/react"
+import { Warning, Key, ShieldWarning, DownloadSimple } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
+import { toCsv } from "@/lib/csv"
+import { downloadTextFile } from "@/lib/download"
 import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { DonutChart } from "@/components/charts/donut-chart"
@@ -160,6 +162,31 @@ export default function SecurityPage() {
     },
   })
 
+  // Compliance export (issue #293): pull the full scan history with per-check
+  // detail and hand the auditor a CSV. One row per check per scan (long format);
+  // scans that stored no per-check breakdown still contribute one summary row.
+  const exportCsv = useMutation({
+    mutationFn: () => api.analytics.exportHistory(owner.trim()),
+    onSuccess: (rows) => {
+      const flat = rows.flatMap((scanRow) =>
+        (scanRow.checks.length ? scanRow.checks : [null]).map((check) => ({ scanRow, check })),
+      )
+      const csv = toCsv(flat, [
+        { header: "scanned_at", value: ({ scanRow }) => scanRow.created_at },
+        { header: "owner", value: ({ scanRow }) => scanRow.owner },
+        { header: "score", value: ({ scanRow }) => scanRow.score },
+        { header: "total_checks", value: ({ scanRow }) => scanRow.total_checks },
+        { header: "failed_checks", value: ({ scanRow }) => scanRow.failed_checks },
+        { header: "check_id", value: ({ check }) => check?.id ?? "" },
+        { header: "check_title", value: ({ check }) => check?.title ?? "" },
+        { header: "severity", value: ({ check }) => check?.severity ?? "" },
+        { header: "status", value: ({ check }) => check?.status ?? "" },
+      ])
+      const stamp = new Date().toISOString().slice(0, 10)
+      downloadTextFile(`clevis-scan-history-${owner.trim()}-${stamp}.csv`, csv, "text/csv")
+    },
+  })
+
   const [selectedRepo, setSelectedRepo] = useState("")
   const matrixMutation = useMutation({
     mutationFn: () => api.security.matrix(owner, token),
@@ -288,6 +315,22 @@ export default function SecurityPage() {
               <div data-testid="scan-error" className="flex items-start gap-2 text-xs text-destructive">
                 <Warning className="size-3.5 mt-0.5 shrink-0" />
                 {scan.error.message}
+              </div>
+            )}
+            {(historyQuery.data?.length ?? 0) > 0 && (
+              <Button
+                variant="outline"
+                onClick={() => exportCsv.mutate()}
+                disabled={exportCsv.isPending}
+              >
+                <DownloadSimple className="size-3.5" />
+                {exportCsv.isPending ? "Exporting…" : "Export history (CSV)"}
+              </Button>
+            )}
+            {exportCsv.isError && (
+              <div className="flex items-start gap-2 text-xs text-destructive">
+                <Warning className="size-3.5 mt-0.5 shrink-0" />
+                {exportCsv.error.message}
               </div>
             )}
           </div>

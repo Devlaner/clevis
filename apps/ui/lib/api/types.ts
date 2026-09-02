@@ -48,6 +48,19 @@ export interface ScanHistoryEntry {
 
 export type AnalyticsHistoryResponse = ScanHistoryEntry[]
 
+export interface ScanExportCheck {
+  id: string
+  title: string
+  severity: string
+  status: "pass" | "fail" | "error" | "not_applicable"
+}
+
+export interface ScanExportEntry extends ScanHistoryEntry {
+  checks: ScanExportCheck[]
+}
+
+export type ScanExportResponse = ScanExportEntry[]
+
 export interface CacheEntry {
   id: number
   ref: string

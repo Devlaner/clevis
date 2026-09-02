@@ -30,6 +30,7 @@ from src.schemas.analytics import (
     PrCycleTimeWeek,
     PrWeekBucket,
     RunSummaryLite,
+    ScanExportEntry,
     ScanHistoryEntry,
 )
 from src.services.analytics_service import get_account_type, get_overview
@@ -163,6 +164,57 @@ def personal_analytics_history(
     if not _user_can_read_history(db, user, owner):
         raise HTTPException(status_code=403, detail="You don't have access to this owner's scan history")
     return scan_results_repo.list_recent(db, owner=owner, limit=30)
+
+
+# ---------------------------------------------------------------------------
+# Compliance export (issue #293) -- the full scan-history rows *with* each
+# scan's per-check breakdown, over an optional [since, until] window, so an
+# auditor can pull a reporting period. Same access gating as the history
+# endpoints above; the CSV rendering itself is done client-side.
+# ---------------------------------------------------------------------------
+
+_EXPORT_MAX_ROWS = 1000
+
+
+def _export_window(since: date | None, until: date | None) -> tuple[datetime | None, datetime | None]:
+    if since is not None and until is not None and since > until:
+        raise HTTPException(status_code=422, detail="`since` must not be after `until`")
+    since_dt = datetime.combine(since, datetime.min.time(), tzinfo=timezone.utc) if since else None
+    # `until` is an inclusive calendar day: widen it to the end of that day so a
+    # scan run at 14:00 on the `until` date isn't silently dropped.
+    until_dt = (
+        datetime.combine(until, datetime.max.time(), tzinfo=timezone.utc) if until else None
+    )
+    return since_dt, until_dt
+
+
+@router.get("/orgs/{org_login}/analytics/export", response_model=list[ScanExportEntry])
+def org_analytics_export(
+    since: date | None = None,
+    until: date | None = None,
+    limit: int = Query(_EXPORT_MAX_ROWS, ge=1, le=_EXPORT_MAX_ROWS),
+    ctx: OrgContext = Depends(require_org_role(min_role="member")),
+    db: Session = Depends(get_db),
+):
+    since_dt, until_dt = _export_window(since, until)
+    return scan_results_repo.list_for_export(
+        db, owner=ctx.org.github_login, since=since_dt, until=until_dt, limit=limit
+    )
+
+
+@router.get("/me/analytics/export", response_model=list[ScanExportEntry])
+def personal_analytics_export(
+    owner: str,
+    since: date | None = None,
+    until: date | None = None,
+    limit: int = Query(_EXPORT_MAX_ROWS, ge=1, le=_EXPORT_MAX_ROWS),
+    user: UserOut = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    if not _user_can_read_history(db, user, owner):
+        raise HTTPException(status_code=403, detail="You don't have access to this owner's scan history")
+    since_dt, until_dt = _export_window(since, until)
+    return scan_results_repo.list_for_export(db, owner=owner, since=since_dt, until=until_dt, limit=limit)
 
 
 # ---------------------------------------------------------------------------

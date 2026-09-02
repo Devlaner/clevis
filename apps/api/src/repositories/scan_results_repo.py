@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -66,6 +67,37 @@ def list_recent(db: Session, owner: str, limit: int = 30) -> list[dict]:
             "total_checks": r.total_checks,
             "failed_checks": r.failed_checks,
             "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
+
+
+def list_for_export(
+    db: Session,
+    owner: str,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Scan history for a compliance/audit export (issue #293). Unlike ``list_recent``,
+    this includes each scan's full per-check breakdown (``checks``, parsed from
+    ``checks_json``) and accepts an optional ``[since, until]`` window so an auditor can
+    pull a specific reporting period. Newest first, same as ``list_recent``."""
+    query = db.query(ScanResult).filter(ScanResult.owner == owner)
+    if since is not None:
+        query = query.filter(ScanResult.created_at >= since)
+    if until is not None:
+        query = query.filter(ScanResult.created_at <= until)
+    rows = query.order_by(ScanResult.created_at.desc(), ScanResult.id.desc()).limit(limit).all()
+    return [
+        {
+            "id": r.id,
+            "owner": r.owner,
+            "score": r.score,
+            "total_checks": r.total_checks,
+            "failed_checks": r.failed_checks,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "checks": json.loads(r.checks_json) if r.checks_json else [],
         }
         for r in rows
     ]

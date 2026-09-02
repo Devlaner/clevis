@@ -52,6 +52,14 @@ class ScanHistoryEntry(BaseModel):
     created_at: datetime
 
 
+class ScanExportEntry(ScanHistoryEntry):
+    """A scan-history row plus its full per-check breakdown, for the compliance
+    export (issue #293). ``checks`` is the same ``CheckResult`` shape the live
+    overview returns, replayed from what was persisted at scan time."""
+
+    checks: list[CheckResult] = []
+
+
 class OrgEventSummary(BaseModel):
     id: str
     type: str
