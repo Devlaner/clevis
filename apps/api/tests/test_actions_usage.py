@@ -95,3 +95,31 @@ def test_no_token_available_returns_400(http, db, user):
     _admin_org(db, user)  # admin, but no installation and no client token
     resp = http.get("/orgs/acme/usage/actions")
     assert resp.status_code == 400
+
+
+def test_non_403_github_status_error_maps_to_400_without_the_permission_hint(http, db, user):
+    _admin_org(db, user)
+    err = httpx.HTTPStatusError(
+        "500", request=httpx.Request("GET", "https://api.github.com"), response=httpx.Response(500)
+    )
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = err
+        resp = http.get("/orgs/acme/usage/actions", headers={"X-GitHub-Token": "ghp_x"})
+    assert resp.status_code == 400
+    assert "Administration" not in resp.json()["detail"]
+
+
+def test_github_network_error_maps_to_503(http, db, user):
+    _admin_org(db, user)
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = httpx.ConnectError("boom")
+        resp = http.get("/orgs/acme/usage/actions", headers={"X-GitHub-Token": "ghp_x"})
+    assert resp.status_code == 503
+
+
+def test_unexpected_github_shape_is_502(http, db, user):
+    _admin_org(db, user)
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = ["not", "a", "dict"]
+        resp = http.get("/orgs/acme/usage/actions", headers={"X-GitHub-Token": "ghp_x"})
+    assert resp.status_code == 502
