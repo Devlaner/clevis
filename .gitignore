@@ -252,3 +252,6 @@ docs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local per-developer env overrides (e.g. apps/ui/.env.local)
+.env*.local
