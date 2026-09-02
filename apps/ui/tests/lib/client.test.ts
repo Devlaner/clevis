@@ -77,6 +77,24 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(JSON.parse(init.body as string)).toEqual({ token: undefined, actor: "me", dry_run: true });
   });
+
+  it("builds the analytics.exportHistory URL with only owner when no window is given", async () => {
+    stubOkJson({ truncated: false, row_count: 0, entries: [] });
+    await api.analytics.exportHistory("acme corp");
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/me/analytics/export?owner=acme+corp");
+    expect(url).not.toContain("since=");
+    expect(url).not.toContain("until=");
+  });
+
+  it("adds since/until to the analytics.exportHistory URL when provided", async () => {
+    stubOkJson({ truncated: false, row_count: 0, entries: [] });
+    await api.analytics.exportHistory("acme", "2026-01-01", "2026-03-31");
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("owner=acme");
+    expect(url).toContain("since=2026-01-01");
+    expect(url).toContain("until=2026-03-31");
+  });
 });
 
 describe("api.analytics value normalization", () => {

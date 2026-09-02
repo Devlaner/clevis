@@ -34,6 +34,7 @@ import type {
   RepoStatsResponse,
   RunsResponse,
   SavedTokenMeta,
+  ScanExportResponse,
   SecretScanningResponse,
   SecurityMatrixResponse,
   SyncInstallationsResponse,
@@ -194,6 +195,14 @@ export const api = {
     },
     history: (owner: string) =>
       get<AnalyticsHistoryResponse>(`/me/analytics/history?owner=${encodeURIComponent(owner)}`),
+    // Compliance export (issue #293): full scan history with per-check detail, for
+    // an optional [since, until] day window. The caller renders CSV from this.
+    exportHistory: (owner: string, since?: string, until?: string) => {
+      const params = new URLSearchParams({ owner })
+      if (since) params.set("since", since)
+      if (until) params.set("until", until)
+      return get<ScanExportResponse>(`/me/analytics/export?${params.toString()}`)
+    },
     // token is optional — same App-or-PAT fallback as the rest of this namespace,
     // carried via header since this is a GET (see githubTokenHeader).
     cockpit: (owner: string, token?: string) =>
