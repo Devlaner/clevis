@@ -535,3 +535,9 @@ export interface SecretScanningResponse {
   alerts: SecretAlert[]
   source: "github" | "aggregate"
 }
+
+// Issue #286: response from POST /me/repos/{owner}/{repo}/issues.
+export interface CreateIssueResponse {
+  number: number
+  html_url: string
+}

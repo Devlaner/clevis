@@ -20,6 +20,7 @@ from src.routers import (
     health,
     installations,
     invitations,
+    issues,
     jobs,
     orgs,
     repos,
@@ -87,6 +88,7 @@ app.include_router(repos.router, tags=["repos"])
 app.include_router(github.router, tags=["github"])
 app.include_router(collab.router, tags=["collab"])
 app.include_router(security.router, tags=["security"])
+app.include_router(issues.router, tags=["issues"])
 app.include_router(automation.router, tags=["automation"])
 app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])

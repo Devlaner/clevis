@@ -261,6 +261,32 @@ describe("api.security", () => {
     expect((init.headers as Record<string, string>)["X-GitHub-Token"]).toBeUndefined();
     expect(result).toEqual(body);
   });
+
+  it("POSTs /me/repos/{owner}/{repo}/issues with the title/body and token (#286)", async () => {
+    stubOkJson({ number: 3, html_url: "https://github.com/acme/.github/issues/3" });
+    const result = await api.issues.create(
+      "acme",
+      ".github",
+      { title: "MFA off", body: "turn it on" },
+      "ghp_admin",
+    );
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain("/me/repos/acme/.github/issues");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({
+      title: "MFA off",
+      body: "turn it on",
+      token: "ghp_admin",
+    });
+    expect(result).toEqual({ number: 3, html_url: "https://github.com/acme/.github/issues/3" });
+  });
+
+  it("omits the token from the issues.create body when none is supplied", async () => {
+    stubOkJson({ number: 1, html_url: "u" });
+    await api.issues.create("acme", ".github", { title: "x", body: "" });
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse(init.body as string).token).toBeUndefined();
+  });
 });
 
 describe("api.repos", () => {
