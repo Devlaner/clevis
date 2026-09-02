@@ -261,6 +261,32 @@ describe("api.security", () => {
     expect((init.headers as Record<string, string>)["X-GitHub-Token"]).toBeUndefined();
     expect(result).toEqual(body);
   });
+
+});
+
+describe("api.analytics.actionsUsage (#294)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("GETs /orgs/{org}/usage/actions with an X-GitHub-Token header when supplied", async () => {
+    const body = {
+      total_minutes_used: 10,
+      total_paid_minutes_used: 0,
+      included_minutes: 100,
+      minutes_used_breakdown: {},
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))),
+    );
+    const result = await api.analytics.actionsUsage("acme", "ghp_admin");
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain("/orgs/acme/usage/actions");
+    expect((init.headers as Record<string, string>)["X-GitHub-Token"]).toBe("ghp_admin");
+    expect(result).toEqual(body);
+  });
 });
 
 describe("api.repos", () => {

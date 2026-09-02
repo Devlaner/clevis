@@ -28,6 +28,14 @@ export interface CheckResult {
   value: CheckValue
 }
 
+// Issue #294: GET /orgs/{org}/usage/actions (GitHub Actions minutes this billing cycle).
+export interface ActionsUsageResponse {
+  total_minutes_used: number
+  total_paid_minutes_used: number
+  included_minutes: number
+  minutes_used_breakdown: Record<string, number>
+}
+
 export interface AnalyticsOverviewResponse {
   owner: string
   score: number

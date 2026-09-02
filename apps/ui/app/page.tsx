@@ -108,6 +108,18 @@ export default function OverviewPage() {
   })
   const cockpit = cockpitQuery.data
 
+  // Issue #294: Actions-minutes usage. Org-scoped + admin-only, and needs a GitHub App
+  // permission Clevis doesn't request by default -- so this is best-effort: `retry: false`
+  // and the card simply hides itself when the query errors (403 -> 400 from the API).
+  const isOrgScope = scope?.kind === "org"
+  const actionsUsageQuery = useQuery({
+    queryKey: ["analytics.actions-usage", org],
+    queryFn: () => api.analytics.actionsUsage(org, resolveQuery.data?.token),
+    enabled: isOrgScope && org.trim().length > 0 && !resolveQuery.isLoading,
+    retry: false,
+  })
+  const usage = actionsUsageQuery.data
+
   const [myViewTab, setMyViewTab] = useState<MyViewTabId>("prs")
   const myViewQuery = useQuery({
     queryKey: ["analytics.my-view", org],
@@ -221,6 +233,47 @@ export default function OverviewPage() {
             )}
           </div>
         </div>
+
+        {usage && (
+          <div className="card">
+            <div className="px-4 py-3 border-b border-border">
+              <span className="section-label">Actions Usage (this cycle)</span>
+            </div>
+            <div className="p-4 flex flex-col gap-2">
+              {(() => {
+                const included = usage.included_minutes || 0
+                const used = usage.total_minutes_used || 0
+                const pct = included > 0 ? Math.min(100, Math.round((used / included) * 100)) : 0
+                const over = included > 0 && used > included
+                return (
+                  <>
+                    <div className="flex items-baseline justify-between text-sm">
+                      <span className="tabular-nums font-medium text-foreground">
+                        {Math.round(used).toLocaleString()} min
+                      </span>
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        {included > 0 ? `of ${Math.round(included).toLocaleString()} included` : "no included minutes"}
+                      </span>
+                    </div>
+                    {included > 0 && (
+                      <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${over ? "bg-red-400" : pct >= 80 ? "bg-yellow-400" : "bg-green-400"}`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    )}
+                    {usage.total_paid_minutes_used > 0 && (
+                      <p className="text-xs text-muted-foreground tabular-nums">
+                        {Math.round(usage.total_paid_minutes_used).toLocaleString()} paid min this cycle
+                      </p>
+                    )}
+                  </>
+                )
+              })()}
+            </div>
+          </div>
+        )}
 
         <div className="card">
           <div className="px-4 py-3 border-b border-border">

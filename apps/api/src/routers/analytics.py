@@ -16,6 +16,7 @@ from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
 from src.repositories import installation_repo, job_repo, org_repo, scan_results_repo, tenant_repo
 from src.routers.github import _cached_events, _fetch_events_from_repo_events
 from src.schemas.analytics import (
+    ActionsUsageResponse,
     AnalyticsInput,
     AnalyticsResponse,
     AtRiskRepo,
@@ -152,6 +153,57 @@ def org_analytics_history(
     db: Session = Depends(get_db),
 ):
     return scan_results_repo.list_recent(db, owner=ctx.org.github_login, limit=30)
+
+
+@router.get("/orgs/{org_login}/usage/actions", response_model=ActionsUsageResponse)
+def org_actions_usage(
+    ctx: OrgContext = Depends(require_org_role(min_role="admin")),
+    db: Session = Depends(get_db),
+    x_github_token: str | None = Header(default=None),
+):
+    """GitHub Actions minutes used this billing cycle for the org (issue #294).
+
+    **Scaffold — needs a GitHub App permission Clevis does not request by default.**
+    Reading ``/orgs/{org}/settings/billing/actions`` requires the org **Administration**
+    (plan/billing) permission; billing was an explicitly deferred roadmap area. Read-only.
+    When the App lacks it GitHub returns 403, surfaced here as a 400 with a clear hint so
+    the UI can hide the card rather than error the page. No migration.
+    """
+    try:
+        token = resolve_org_token(
+            db, org_id=ctx.org.id, account_login=ctx.org.github_login, client_token=x_github_token
+        )
+    except NoGitHubTokenAvailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        data = GitHubClient(token).request(
+            "GET", f"/orgs/{ctx.org.github_login}/settings/billing/actions"
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 403:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Clevis's GitHub App can't read this org's Actions billing — grant it "
+                    "the org 'Administration' (plan) permission. See docs/self-hosting.md."
+                ),
+            ) from exc
+        raise _github_error(exc) from exc
+    except httpx.RequestError as exc:
+        raise _github_error(exc) from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="Unexpected response from GitHub billing API")
+    breakdown = data.get("minutes_used_breakdown") or {}
+    return ActionsUsageResponse(
+        total_minutes_used=data.get("total_minutes_used", 0) or 0,
+        total_paid_minutes_used=data.get("total_paid_minutes_used", 0) or 0,
+        included_minutes=data.get("included_minutes", 0) or 0,
+        minutes_used_breakdown={
+            str(k): int(v) for k, v in breakdown.items() if isinstance(v, (int, float))
+        },
+    )
 
 
 @router.get("/me/analytics/history", response_model=list[ScanHistoryEntry])

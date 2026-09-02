@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const tokensResolveMock = vi.fn();
 const cockpitMock = vi.fn();
 const myViewMock = vi.fn();
+const actionsUsageMock = vi.fn();
 
 vi.mock("@/lib/api/client", () => ({
   api: {
@@ -14,6 +15,7 @@ vi.mock("@/lib/api/client", () => ({
     analytics: {
       cockpit: (...args: unknown[]) => cockpitMock(...args),
       myView: (...args: unknown[]) => myViewMock(...args),
+      actionsUsage: (...args: unknown[]) => actionsUsageMock(...args),
     },
   },
 }));
@@ -65,7 +67,11 @@ describe("OverviewPage cockpit", () => {
     tokensResolveMock.mockReset();
     cockpitMock.mockReset();
     myViewMock.mockReset();
+    actionsUsageMock.mockReset();
     myViewMock.mockResolvedValue(EMPTY_MY_VIEW);
+    // Default: the Actions-usage query fails (App lacks the billing permission) so the
+    // card is absent -- matching the common self-hosted setup.
+    actionsUsageMock.mockRejectedValue(new Error("GitHub API error: 400"));
     localStorage.clear();
   });
 
@@ -253,6 +259,72 @@ describe("OverviewPage cockpit", () => {
       expect(screen.getByText("alice")).toBeInTheDocument();
     });
     expect(screen.getByText("pushed 3 commits to main")).toBeInTheDocument();
+  });
+
+  it("renders the Actions Usage card when the billing query succeeds, and omits it otherwise (issue #294)", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+    actionsUsageMock.mockResolvedValue({
+      total_minutes_used: 1200,
+      total_paid_minutes_used: 0,
+      included_minutes: 3000,
+      minutes_used_breakdown: { UBUNTU: 1200 },
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("Actions Usage (this cycle)")).toBeInTheDocument();
+    expect(screen.getByText(/1,200 min/)).toBeInTheDocument();
+    expect(screen.getByText(/of 3,000 included/)).toBeInTheDocument();
+  });
+
+  it("shows the over-budget state and paid minutes on the Actions Usage card", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+    actionsUsageMock.mockResolvedValue({
+      total_minutes_used: 3500,
+      total_paid_minutes_used: 500,
+      included_minutes: 3000,
+      minutes_used_breakdown: { UBUNTU: 3500 },
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/3,500 min/)).toBeInTheDocument();
+    expect(screen.getByText(/500 paid min this cycle/)).toBeInTheDocument();
+  });
+
+  it("renders the Actions Usage card with no bar when the plan has no included minutes", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+    actionsUsageMock.mockResolvedValue({
+      total_minutes_used: 42,
+      total_paid_minutes_used: 0,
+      included_minutes: 0,
+      minutes_used_breakdown: {},
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/42 min/)).toBeInTheDocument();
+    expect(screen.getByText("no included minutes")).toBeInTheDocument();
+  });
+
+  it("omits the Actions Usage card when the billing query fails (missing permission)", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+    // actionsUsageMock rejects by default (see beforeEach)
+
+    const { queryClient } = renderPage();
+
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["analytics.actions-usage", "acme"])?.status).toBe("error"),
+    );
+    expect(screen.queryByText("Actions Usage (this cycle)")).not.toBeInTheDocument();
   });
 
   it("hides the Needs Attention card when there are no at-risk repos", async () => {

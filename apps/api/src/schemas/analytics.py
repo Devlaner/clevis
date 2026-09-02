@@ -139,3 +139,14 @@ class MyIssueListResponse(BaseModel):
     total_count: int = 0
     page: int = 1
     per_page: int = 25
+
+
+class ActionsUsageResponse(BaseModel):
+    """GitHub Actions minutes for the org's current billing cycle (issue #294),
+    shaped from GET /orgs/{org}/settings/billing/actions. Seats/storage are a separate
+    endpoint and deferred."""
+
+    total_minutes_used: float = 0
+    total_paid_minutes_used: float = 0
+    included_minutes: float = 0
+    minutes_used_breakdown: dict[str, int] = {}
