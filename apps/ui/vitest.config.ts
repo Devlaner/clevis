@@ -23,6 +23,15 @@ export default defineConfig({
     // file each run, not a real bug in any one of them). 20s gives headroom without masking a
     // genuine hang; layout.test.tsx keeps its own higher override for its unusually slow import.
     testTimeout: 20000,
+    // Vitest's default is one worker fork per CPU core. On a memory-constrained dev machine
+    // (the pre-push hook is the common victim) ~45 concurrent jsdom + React environments
+    // exhaust RAM -> the OS swaps -> module-import times blow up into the minutes -> tinypool
+    // worker RPCs time out, which Vitest reports as "N errors" with zero test failures, a
+    // different set every run. Capping the pool bounds peak memory and makes local runs
+    // deterministic. CI runners are dedicated and adequately provisioned, so they keep full
+    // parallelism for speed. Raise the local cap with VITEST_MAX_WORKERS=<n> (Vitest honors
+    // that env var natively) if your machine has the headroom.
+    ...(process.env.CI ? {} : { maxWorkers: 3, minWorkers: 1 }),
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov", "json-summary"],
