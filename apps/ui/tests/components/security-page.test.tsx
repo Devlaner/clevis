@@ -287,6 +287,50 @@ describe("SecurityPage", () => {
     expect(csv).toContain("organization_members_mfa_required");
   });
 
+  it("passes the chosen date window to the export and tolerates entries without checks", async () => {
+    analyticsHistoryMock.mockResolvedValue([
+      { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+    ]);
+    analyticsExportMock.mockResolvedValue({
+      truncated: false,
+      row_count: 1,
+      entries: [
+        // no `checks` key -> the page must fall back to a single summary row
+        { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+      ],
+    });
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await screen.findByRole("button", { name: /export history/i });
+
+    fireEvent.change(screen.getByLabelText("Export from date"), { target: { value: "2026-01-01" } });
+    fireEvent.change(screen.getByLabelText("Export to date"), { target: { value: "2026-06-30" } });
+    fireEvent.click(screen.getByRole("button", { name: /export history/i }));
+
+    await waitFor(() =>
+      expect(analyticsExportMock).toHaveBeenCalledWith("acme", "2026-01-01", "2026-06-30"),
+    );
+    const [, csv] = downloadTextFileMock.mock.calls[0];
+    // One data row, all check columns empty.
+    expect(csv.trim().split("\r\n")).toHaveLength(2);
+    expect(csv).toContain("2026-07-10T00:00:00Z,acme,70,2,1,,,,");
+  });
+
+  it("shows an inline error when the export request fails", async () => {
+    analyticsHistoryMock.mockResolvedValue([
+      { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+    ]);
+    analyticsExportMock.mockRejectedValue(new Error("export blew up"));
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    fireEvent.click(await screen.findByRole("button", { name: /export history/i }));
+
+    expect(await screen.findByText("export blew up")).toBeInTheDocument();
+    expect(downloadTextFileMock).not.toHaveBeenCalled();
+  });
+
   it("warns when the export was truncated at the row cap", async () => {
     analyticsHistoryMock.mockResolvedValue([
       { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
