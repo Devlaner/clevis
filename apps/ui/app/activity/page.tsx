@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import Link from "next/link"
 import { useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
 import { ActivityList } from "@/components/activity-list"
@@ -8,15 +9,14 @@ import { EventFeed } from "@/components/event-feed"
 import { HeatmapCalendar } from "@/components/charts/heatmap-calendar"
 import { SectionError } from "@/components/section-error"
 import { EmptyStateNoAccount } from "@/components/empty-state"
+import { ArrowRight } from "@phosphor-icons/react"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import { api } from "@/lib/api/client"
 import { useActiveScope } from "@/lib/active-scope"
-import type { PullSummary } from "@/lib/api/types"
 
 const EVENTS_REFRESH_SECONDS = 30
 const HEATMAP_COLOR_SCALE = [CHART_COLORS.grid, "#1d4ed8", "#3b82f6", "#60a5fa", "#93c5fd"]
-const MAX_REPOS_FOR_PR_BOARD = 10
 
 // Isolated into its own component so the 1s tick only re-renders this small chip,
 // not the whole page (and the feed/job lists below it).
@@ -37,8 +37,6 @@ function RefreshCountdown({ resetKey, seconds }: { resetKey: number; seconds: nu
   return <span className="stat-chip">refreshes in {remaining}s</span>
 }
 
-type PrBoardTab = "feed" | "board"
-
 export default function ActivityPage() {
   // Marks all cockpit-sourced events as read so the sidebar's unread badge
   // clears once the user has actually looked at this page.
@@ -54,8 +52,6 @@ export default function ActivityPage() {
 
   const { scope } = useActiveScope()
   const org = scope?.login ?? ""
-
-  const [feedTab, setFeedTab] = useState<PrBoardTab>("feed")
 
   const resolveQuery = useQuery({
     queryKey: ["tokens.resolve", org],
@@ -111,108 +107,38 @@ export default function ActivityPage() {
     retry: false,
   })
 
-  const reposQuery = useQuery({
-    queryKey: ["repos.list", org],
-    queryFn: () => api.repos.list(org, token),
-    enabled: queriesEnabled && feedTab === "board",
-    retry: false,
-  })
-
-  const prBoardQuery = useQuery({
-    queryKey: ["repos.pulls.board", org, reposQuery.data?.repos.map((r) => r.name).join(",")],
-    queryFn: async () => {
-      const repoNames = (reposQuery.data?.repos ?? []).slice(0, MAX_REPOS_FOR_PR_BOARD).map((r) => r.name)
-      const results = await Promise.all(
-        repoNames.map((repo) =>
-          api.repos.pulls(org, org, repo, token).catch(() => ({ repository: repo, total: 0, pulls: [] })),
-        ),
-      )
-      return results.flatMap((r) => r.pulls)
-    },
-    enabled: queriesEnabled && feedTab === "board" && !!reposQuery.data,
-    retry: false,
-  })
-
-  const prsByAuthor = new Map<string, PullSummary[]>()
-  for (const pr of prBoardQuery.data ?? []) {
-    const author = pr.user ?? "unknown"
-    const existing = prsByAuthor.get(author)
-    if (existing) existing.push(pr)
-    else prsByAuthor.set(author, [pr])
-  }
-
   return (
     <>
       <PageHeader
         title="Activity"
         description="Recent GitHub activity and background jobs."
+        actions={
+          <Link
+            href="/pulls"
+            className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Open pull requests
+            <ArrowRight className="size-3.5" />
+          </Link>
+        }
       />
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2 card">
           <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => setFeedTab("feed")}
-                aria-pressed={feedTab === "feed"}
-                className={`text-xs font-medium px-2.5 py-1 rounded-md border transition-colors ${
-                  feedTab === "feed"
-                    ? "border-border bg-elevated text-foreground"
-                    : "border-transparent text-muted-foreground hover:bg-elevated"
-                }`}
-              >
-                Activity Feed
-              </button>
-              <button
-                onClick={() => setFeedTab("board")}
-                aria-pressed={feedTab === "board"}
-                className={`text-xs font-medium px-2.5 py-1 rounded-md border transition-colors ${
-                  feedTab === "board"
-                    ? "border-border bg-elevated text-foreground"
-                    : "border-transparent text-muted-foreground hover:bg-elevated"
-                }`}
-              >
-                PR Board
-              </button>
-            </div>
-            {feedTab === "feed" && hasOrg && <RefreshCountdown resetKey={lastAttemptAt} seconds={EVENTS_REFRESH_SECONDS} />}
+            <span className="section-label">Activity Feed</span>
+            {hasOrg && <RefreshCountdown resetKey={lastAttemptAt} seconds={EVENTS_REFRESH_SECONDS} />}
           </div>
           {!hasOrg ? (
             <EmptyStateNoAccount bare />
-          ) : feedTab === "feed" && eventsQuery.isError ? (
+          ) : eventsQuery.isError ? (
             <SectionError
               message={eventsQuery.error instanceof Error ? eventsQuery.error.message : "Failed to load events."}
               onRetry={() => eventsQuery.refetch()}
               retrying={eventsQuery.isFetching}
             />
-          ) : feedTab === "feed" ? (
-            <EventFeed events={eventsQuery.data?.events ?? []} isLoading={eventsQuery.isLoading} />
-          ) : prBoardQuery.isLoading || reposQuery.isLoading ? (
-            <p className="px-4 py-8 text-sm text-muted-foreground">Loading…</p>
-          ) : prsByAuthor.size === 0 ? (
-            <p className="px-4 py-8 text-sm text-muted-foreground">No open pull requests</p>
           ) : (
-            <div className="p-4 grid gap-3 sm:grid-cols-2">
-              {[...prsByAuthor.entries()].map(([author, prs]) => (
-                <div key={author} className="border border-border/60 rounded-md p-3">
-                  <p className="text-xs font-medium text-foreground mb-2">{author}</p>
-                  <ul className="flex flex-col gap-1.5">
-                    {prs.map((pr) => (
-                      <li key={pr.html_url}>
-                        <a
-                          href={pr.html_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs text-muted-foreground hover:text-foreground transition-colors truncate block"
-                        >
-                          #{pr.number} {pr.title}
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
+            <EventFeed events={eventsQuery.data?.events ?? []} isLoading={eventsQuery.isLoading} />
           )}
         </div>
 
