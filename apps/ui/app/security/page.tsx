@@ -390,7 +390,7 @@ export default function SecurityPage() {
                 </p>
               ) : (
                 filteredChecks.map((c: CheckResult) => (
-                  <CheckCard key={c.id} check={c} owner={scan.data.owner} token={token} />
+                  <CheckCard key={c.id} check={c} owner={scan.data.owner} token={token} onRemediated={() => runScan()} />
                 ))
               )}
             </div>

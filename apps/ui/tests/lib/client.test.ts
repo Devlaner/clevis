@@ -455,6 +455,37 @@ describe("api.automation", () => {
   });
 });
 
+describe("api.security.remediate (issue #287)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("POSTs to the check remediation path with token: undefined when empty", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify({ check_id: "x", repo: "api", remediated: true }), { status: 200 }))),
+    );
+    await api.security.remediate("acme corp", "api", "repository_secret_scanning_enabled", "");
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain(
+      "/me/repos/acme%20corp/api/security/checks/repository_secret_scanning_enabled/remediate",
+    );
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: undefined });
+  });
+
+  it("forwards a supplied token in the body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify({ check_id: "x", repo: "api", remediated: true }), { status: 200 }))),
+    );
+    await api.security.remediate("acme", "api", "repository_dependabot_alerts_clear", "ghp_x");
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: "ghp_x" });
+  });
+});
+
 describe("api.github", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
