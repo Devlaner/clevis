@@ -1,8 +1,19 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+const createIssueMock = vi.fn();
+vi.mock("@/lib/api/client", () => ({
+  api: { issues: { create: (...a: unknown[]) => createIssueMock(...a) } },
+}));
 
 import { CheckCard } from "@/components/check-card";
 import type { CheckResult } from "@/lib/api/types";
+
+function renderWithClient(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+}
 
 const baseCheck: CheckResult = {
   id: "mfa",
@@ -108,5 +119,56 @@ describe("CheckCard", () => {
     expect(severitySpan.className).not.toContain("text-red-400");
     expect(severitySpan.className).not.toContain("text-yellow-400");
     expect(severitySpan.className).not.toContain("text-blue-400");
+  });
+});
+
+describe("CheckCard — file as issue (#286)", () => {
+  beforeEach(() => {
+    createIssueMock.mockReset();
+  });
+  afterEach(() => {
+    cleanup();
+  });
+
+  const failing: CheckResult = { ...baseCheck, status: "fail", value: null };
+
+  it("shows no 'File as issue' action on a passing check or when owner is absent", () => {
+    renderWithClient(<CheckCard check={baseCheck} owner="acme" />);
+    expect(screen.queryByRole("button", { name: "File as issue" })).not.toBeInTheDocument();
+
+    cleanup();
+    renderWithClient(<CheckCard check={failing} />);
+    expect(screen.queryByRole("button", { name: "File as issue" })).not.toBeInTheDocument();
+  });
+
+  it("files an issue for a failing check, prefilled from the check, and links to the result", async () => {
+    createIssueMock.mockResolvedValue({ number: 7, html_url: "https://github.com/acme/.github/issues/7" });
+    renderWithClient(<CheckCard check={failing} owner="acme" token="ghp_x" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    expect((screen.getByLabelText("Repository") as HTMLInputElement).value).toBe(".github");
+    expect((screen.getByLabelText("Issue title") as HTMLInputElement).value).toBe("MFA enforced");
+
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+
+    await waitFor(() => expect(screen.getByText(/Issue #7 created/)).toBeInTheDocument());
+    const [owner, repo, body, token] = createIssueMock.mock.calls[0];
+    expect(owner).toBe("acme");
+    expect(repo).toBe(".github");
+    expect(body.title).toBe("MFA enforced");
+    expect(body.body).toContain("Require two-factor authentication");
+    expect(token).toBe("ghp_x");
+  });
+
+  it("shows a scope hint when GitHub rejects the write with a 403", async () => {
+    createIssueMock.mockRejectedValue(new Error("GitHub API error: 403"));
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/needs the 'Issues: write' permission/)).toBeInTheDocument(),
+    );
   });
 });

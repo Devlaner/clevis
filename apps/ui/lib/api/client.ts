@@ -6,6 +6,7 @@ import type {
   CacheListResponse,
   CheckValue,
   CockpitResponse,
+  CreateIssueResponse,
   DispatchResponse,
   FailedRunsResponse,
   GithubMembershipStatus,
@@ -225,6 +226,16 @@ export const api = {
       get<SecretScanningResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/secret-scanning`,
         githubTokenHeader(token),
+      ),
+  },
+  issues: {
+    // Create a GitHub issue from a Clevis finding (issue #286). Needs the resolved
+    // token (App installation or PAT) to carry `Issues: write`; a 403 from GitHub
+    // surfaces here as a 400. Admin-gated when `owner` is a connected Clevis org.
+    create: (owner: string, repo: string, body: { title: string; body: string }, token?: string) =>
+      post<CreateIssueResponse>(
+        `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
+        { ...body, token: token || undefined },
       ),
   },
   cache: {

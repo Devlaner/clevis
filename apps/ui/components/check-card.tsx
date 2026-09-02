@@ -1,8 +1,20 @@
-import { CheckCircle, MinusCircle, XCircle } from "@phosphor-icons/react"
+"use client"
+
+import { useState } from "react"
+import { useMutation } from "@tanstack/react-query"
+import { CheckCircle, MinusCircle, XCircle, ArrowSquareOut } from "@phosphor-icons/react"
+import { api } from "@/lib/api/client"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import type { CheckResult, CheckValue } from "@/lib/api/types"
 
 interface CheckCardProps {
   check: CheckResult
+  // When set, a failing check shows a "File as issue" action that opens a GitHub issue
+  // in {owner}/{repo} via POST /me/repos/{owner}/{repo}/issues (issue #286). Omitted =
+  // no action shown (e.g. a check list rendered without a scan target).
+  owner?: string
+  token?: string
 }
 
 const severityLabel: Record<string, string> = {
@@ -80,9 +92,99 @@ function CheckValueDisplay({ value }: { value: CheckValue }) {
   return null
 }
 
-export function CheckCard({ check }: CheckCardProps) {
+function FileAsIssue({ check, owner, token }: { check: CheckResult; owner: string; token?: string }) {
+  const [open, setOpen] = useState(false)
+  // Org-level checks aren't repo-specific; `.github` is GitHub's conventional home for
+  // org-wide issues. Editable so the user can target a different repo.
+  const [repo, setRepo] = useState(".github")
+  const [title, setTitle] = useState(check.title)
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      api.issues.create(
+        owner,
+        repo.trim(),
+        { title: title.trim(), body: `${check.remediation}\n\n_Filed from Clevis._` },
+        token,
+      ),
+  })
+
+  if (mutation.data) {
+    return (
+      <a
+        href={mutation.data.html_url}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-2 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+      >
+        Issue #{mutation.data.number} created <ArrowSquareOut className="size-3" />
+      </a>
+    )
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+      >
+        File as issue
+      </button>
+    )
+  }
+
+  return (
+    <div className="mt-2 flex flex-col gap-1.5 border-t border-border/40 pt-2">
+      <Input
+        value={repo}
+        onChange={(e) => setRepo(e.target.value)}
+        placeholder="repo (e.g. .github)"
+        className="h-7 text-xs"
+        aria-label="Repository"
+      />
+      <Input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Issue title"
+        className="h-7 text-xs"
+        aria-label="Issue title"
+      />
+      <div className="flex items-center gap-1.5">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 text-xs"
+          disabled={mutation.isPending || !repo.trim() || !title.trim()}
+          onClick={() => mutation.mutate()}
+        >
+          {mutation.isPending ? "Creating…" : "Create issue"}
+        </Button>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="text-xs text-muted-foreground hover:text-foreground"
+        >
+          Cancel
+        </button>
+      </div>
+      {mutation.isError && (
+        <p className="text-xs text-destructive">
+          {mutation.error instanceof Error && /403/.test(mutation.error.message)
+            ? "The connected GitHub token needs the 'Issues: write' permission."
+            : mutation.error instanceof Error
+              ? mutation.error.message
+              : "Failed to create the issue."}
+        </p>
+      )}
+    </div>
+  )
+}
+
+export function CheckCard({ check, owner, token }: CheckCardProps) {
   const pass = check.status === "pass"
   const notApplicable = check.status === "not_applicable"
+  const fail = check.status === "fail"
   return (
     <div
       className={`bg-card border rounded-md p-3.5 flex items-start gap-3 transition-colors duration-200 ease-(--ease-out) ${
@@ -113,6 +215,7 @@ export function CheckCard({ check }: CheckCardProps) {
         </div>
         <p className="text-xs text-muted-foreground leading-relaxed">{check.remediation}</p>
         <CheckValueDisplay value={check.value} />
+        {fail && owner && <FileAsIssue check={check} owner={owner} token={token} />}
       </div>
     </div>
   )
