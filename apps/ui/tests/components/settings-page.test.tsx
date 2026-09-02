@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -185,6 +185,28 @@ describe("SettingsPage", () => {
       updateGate.resolve({ worker_poll_seconds: "5", registration_enabled: "true" });
       await updateGate.promise;
     });
+  });
+
+  it("saves a chosen leadership-digest cadence", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({
+      worker_poll_seconds: "5",
+      registration_enabled: "true",
+      digest_cadence: "off",
+    });
+    configUpdateMock.mockResolvedValue({ digest_cadence: "weekly" });
+
+    renderPage();
+
+    const cadence = await screen.findByDisplayValue("Off");
+    fireEvent.change(cadence, { target: { value: "weekly" } });
+
+    const row = cadence.closest("div")!.parentElement!;
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(configUpdateMock).toHaveBeenCalledWith("digest_cadence", "weekly"));
   });
 
   it("shows a success banner and strips the query param when landing with ?installed=1", async () => {

@@ -25,6 +25,8 @@ _ACCEPTED_KEYS = {
     "gap_heal_stale_hours",
     "membership_reconcile_poll_seconds",
     "membership_reconcile_stale_hours",
+    "digest_poll_seconds",
+    "digest_cadence",
 }
 _TTL = 60.0
 _cache: dict[str, tuple[str, float]] = {}

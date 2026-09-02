@@ -541,9 +541,26 @@ function SavedTokensSection() {
 
 // ── Instance configuration section (owner only) ──────────────────────────────
 
-const CONFIG_FIELDS: { key: string; label: string; description: string; type?: string }[] = [
+const CONFIG_FIELDS: {
+  key: string
+  label: string
+  description: string
+  type?: string
+  options?: { value: string; label: string }[]
+}[] = [
   { key: "worker_poll_seconds", label: "Worker Poll Interval",    description: "Seconds between job queue polls.", type: "number" },
   { key: "registration_enabled", label: "Self-Registration",     description: "Allow anyone to create an account via /register.", type: "boolean" },
+  {
+    key: "digest_cadence",
+    label: "Leadership Digest",
+    description: "Email org admins a periodic security-score + risk summary. Requires SMTP to be configured.",
+    type: "select",
+    options: [
+      { value: "off", label: "Off" },
+      { value: "weekly", label: "Weekly" },
+      { value: "monthly", label: "Monthly" },
+    ],
+  },
 ]
 
 function InstanceConfigSection() {
@@ -615,6 +632,16 @@ function InstanceConfigSection() {
                 >
                   <option value="true">Enabled</option>
                   <option value="false">Disabled</option>
+                </select>
+              ) : field.type === "select" ? (
+                <select
+                  value={values[field.key] ?? field.options?.[0]?.value ?? ""}
+                  onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
+                  className="h-8 border border-border bg-transparent px-2 font-mono text-xs"
+                >
+                  {field.options?.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
                 </select>
               ) : (
                 <Input
