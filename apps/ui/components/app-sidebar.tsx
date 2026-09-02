@@ -1,7 +1,7 @@
 "use client"
 
 import { usePathname, useRouter } from "next/navigation"
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useQuery } from "@tanstack/react-query"
 import { GearSix, Check, SignOut, UserPlus, ArrowSquareOut, User } from "@phosphor-icons/react"
@@ -204,12 +204,16 @@ export function AppSidebar() {
   // the request when both are mounted. Only route the "Invite members" link at an
   // org where the user is actually an admin — mirrors the /collaborators fallback
   // logic (prefer the active org scope, else the first admin org, else /settings).
-  const { data: memberships = [], isLoading: membershipsLoading } = useQuery<MyOrgMembership[]>({
+  const {
+    data: memberships = [],
+    isLoading: membershipsLoading,
+    isSuccess: membershipsReady,
+  } = useQuery<MyOrgMembership[]>({
     queryKey: ["my-orgs"],
     queryFn: () => api.orgs.mine(),
   })
 
-  const { data: installs = [] } = useQuery<InstallationMeta[]>({
+  const { data: installs = [], isSuccess: installsReady } = useQuery<InstallationMeta[]>({
     queryKey: ["installations"],
     queryFn: () => api.installations.list(),
   })
@@ -217,16 +221,41 @@ export function AppSidebar() {
   const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG
   const personalInstallUrl = !personalInstall && slug ? `https://github.com/apps/${slug}/installations/new` : null
 
-  const scopeOptions: ScopeOption[] = [
-    ...(personalInstall
-      ? [{ scope: { kind: "personal", login: personalInstall.account_login } as ActiveScope, label: personalInstall.account_login, sublabel: "Personal account" }]
-      : []),
-    ...memberships.map((m) => ({
-      scope: { kind: "org", login: m.org_login } as ActiveScope,
-      label: m.org_login,
-      sublabel: `Organization · ${m.role}`,
-    })),
-  ]
+  const scopeOptions: ScopeOption[] = useMemo(
+    () => [
+      ...(personalInstall
+        ? [{ scope: { kind: "personal", login: personalInstall.account_login } as ActiveScope, label: personalInstall.account_login, sublabel: "Personal account" }]
+        : []),
+      ...memberships.map((m) => ({
+        scope: { kind: "org", login: m.org_login } as ActiveScope,
+        label: m.org_login,
+        sublabel: `Organization · ${m.role}`,
+      })),
+    ],
+    [personalInstall, memberships],
+  )
+
+  // Issue #371: when nothing is persisted yet, auto-select the first available scope (the
+  // personal install if there is one, else the first org membership) as the real active
+  // scope once the data loads -- otherwise the sidebar cosmetically shows an org under the
+  // avatar while every page still says "no account selected yet" because `scope` was never
+  // set. Only fires when nothing is persisted (`scope === null`); an explicit pick from the
+  // profile menu always persists, so it's never overridden, and a multi-scope user can
+  // still switch freely. `useRef` keeps it to a single attempt.
+  //
+  // Gate on isSuccess (not just !isLoading): a failed query also clears isLoading but
+  // leaves the `= []` fallback in place, which could make a partial/empty result look like
+  // "exactly one scope" and persist it. If a query genuinely errors we simply don't
+  // auto-select and the user picks manually -- same as the pre-#371 baseline, no regression.
+  const autoSelectedScope = useRef(false)
+  useEffect(() => {
+    if (autoSelectedScope.current || scope !== null) return
+    if (!membershipsReady || !installsReady) return
+    if (scopeOptions.length >= 1) {
+      autoSelectedScope.current = true
+      setScope(scopeOptions[0].scope)
+    }
+  }, [scope, membershipsReady, installsReady, scopeOptions, setScope])
 
   // Profile identity row reflects the active scope, falling back to real
   // membership/installation data if nothing has been picked yet.

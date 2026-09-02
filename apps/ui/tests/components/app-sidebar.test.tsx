@@ -512,4 +512,75 @@ describe("AppSidebar scope switcher", () => {
     const connectLink = await screen.findByRole("link", { name: /connect your personal github account/i });
     expect(connectLink).toHaveAttribute("href", "https://github.com/apps/clevis/installations/new");
   });
+
+  // Issue #371
+  it("auto-selects the sole org membership as the active scope when nothing is persisted", async () => {
+    orgMemberships = [{ org_login: "acme", role: "admin" }];
+    installations = [];
+    expect(localStorage.getItem("active_scope")).toBeNull();
+    renderSidebar();
+
+    await waitFor(() =>
+      expect(localStorage.getItem("active_scope")).toBe(
+        JSON.stringify({ kind: "org", login: "acme" }),
+      ),
+    );
+  });
+
+  it("auto-selects the first scope for a multi-org user, so no page shows the empty state", async () => {
+    orgMemberships = [
+      { org_login: "acme", role: "admin" },
+      { org_login: "globex", role: "member" },
+    ];
+    installations = [];
+    renderSidebar();
+
+    await waitFor(() =>
+      expect(localStorage.getItem("active_scope")).toBe(
+        JSON.stringify({ kind: "org", login: "acme" }),
+      ),
+    );
+  });
+
+  it("does not override an already-persisted explicit scope choice", async () => {
+    localStorage.setItem("active_scope", JSON.stringify({ kind: "org", login: "globex" }));
+    orgMemberships = [
+      { org_login: "acme", role: "admin" },
+      { org_login: "globex", role: "member" },
+    ];
+    installations = [];
+    renderSidebar();
+
+    // Wait until the queries have resolved and rendered their scope options (both come from
+    // the same /me/orgs response), so the auto-select effect has definitely had its chance.
+    fireEvent.click(screen.getByRole("button", { name: /user/i }));
+    await waitFor(() => expect(screen.getAllByText(/globex/i).length).toBeGreaterThan(0));
+    expect(localStorage.getItem("active_scope")).toBe(
+      JSON.stringify({ kind: "org", login: "globex" }),
+    );
+  });
+
+  it("does not auto-select when the org query fails", async () => {
+    orgMemberships = [{ org_login: "acme", role: "admin" }];
+    installations = [];
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) {
+        return Promise.resolve(
+          jsonResponse({ id: 1, email: "user@example.com", name: "User", is_workspace_admin: false }),
+        );
+      }
+      if (url.endsWith("/me/orgs")) return Promise.resolve(jsonResponse({ detail: "boom" }, 500));
+      if (url.endsWith("/me/installations")) return Promise.resolve(jsonResponse([]));
+      if (url.endsWith("/tokens/resolve")) return Promise.resolve(jsonResponse({}, 404));
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+    renderSidebar();
+
+    await screen.findByRole("button", { name: /user/i });
+    await waitFor(() =>
+      expect(globalThis.fetch).toHaveBeenCalledWith(expect.stringContaining("/me/orgs"), expect.anything()),
+    );
+    expect(localStorage.getItem("active_scope")).toBeNull();
+  });
 });
