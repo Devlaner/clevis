@@ -241,10 +241,10 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        {actionsUsageQuery.isSuccess && usage && (
+        {actionsUsageQuery.isSuccess && usage && usage.total_minutes_used > 0 && (
           <div className="card">
             <div className="px-4 py-3 border-b border-border">
-              <span className="section-label">Actions Usage (this cycle)</span>
+              <span className="section-label">Actions Usage (this month)</span>
             </div>
             <div className="p-4 flex flex-col gap-2">
               {(() => {
@@ -261,7 +261,7 @@ export default function OverviewPage() {
                       <span className="tabular-nums font-medium text-foreground">
                         {Math.round(used).toLocaleString()} min
                       </span>
-                      <span className="text-xs text-muted-foreground tabular-nums">used this cycle</span>
+                      <span className="text-xs text-muted-foreground tabular-nums">used this month</span>
                     </div>
                     {used > 0 && (
                       <div className="h-1.5 bg-muted rounded-full overflow-hidden">

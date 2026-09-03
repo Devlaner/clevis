@@ -280,7 +280,7 @@ describe("OverviewPage cockpit", () => {
 
     renderPage();
 
-    expect(await screen.findByText("Actions Usage (this cycle)")).toBeInTheDocument();
+    expect(await screen.findByText("Actions Usage (this month)")).toBeInTheDocument();
     expect(screen.getByText(/1,250 min/)).toBeInTheDocument();
     expect(screen.getByText(/900 included · 350 billable/)).toBeInTheDocument();
     expect(screen.getByText("actions_linux")).toBeInTheDocument();
@@ -304,6 +304,23 @@ describe("OverviewPage cockpit", () => {
     expect(screen.queryByText(/billable/)).not.toBeInTheDocument();
   });
 
+  it("omits the Actions Usage card when no Actions minutes were used this month", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+    actionsUsageMock.mockResolvedValue({
+      total_minutes_used: 0,
+      included_minutes_used: 0,
+      paid_minutes_used: 0,
+      minutes_used_breakdown: {},
+    });
+
+    renderPage();
+
+    await waitFor(() => expect(actionsUsageMock).toHaveBeenCalled());
+    expect(screen.queryByText("Actions Usage (this month)")).not.toBeInTheDocument();
+  });
+
   it("omits the Actions Usage card when the billing query fails (missing permission)", async () => {
     localStorage.setItem("default_org", "acme");
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
@@ -315,7 +332,7 @@ describe("OverviewPage cockpit", () => {
     await waitFor(() =>
       expect(queryClient.getQueryState(["analytics.actions-usage", "acme", 1])?.status).toBe("error"),
     );
-    expect(screen.queryByText("Actions Usage (this cycle)")).not.toBeInTheDocument();
+    expect(screen.queryByText("Actions Usage (this month)")).not.toBeInTheDocument();
   });
 
   it("does not serve one user's cached Actions usage to a different session (CWE-200)", async () => {

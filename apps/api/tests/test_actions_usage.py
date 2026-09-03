@@ -116,6 +116,21 @@ def test_admin_gets_shaped_usage_from_the_summary_endpoint(http, db, user):
     assert resp.headers["cache-control"] == "no-store"
 
 
+def test_unit_type_match_is_case_insensitive(http, db, user):
+    _admin_org(db, user)
+    payload = {
+        "usageItems": [
+            {"sku": "actions_linux", "unitType": "Minutes", "grossQuantity": 500,
+             "discountQuantity": 500, "netQuantity": 0},
+        ]
+    }
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = payload
+        resp = http.get("/orgs/acme/usage/actions", headers={"X-GitHub-Token": "ghp_x"})
+    assert resp.status_code == 200
+    assert resp.json()["total_minutes_used"] == 500
+
+
 def test_calls_the_enhanced_billing_usage_summary_endpoint_for_the_current_month(http, db, user):
     _admin_org(db, user)
     now = datetime.now(timezone.utc)

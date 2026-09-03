@@ -231,7 +231,8 @@ def org_actions_usage(
             raise HTTPException(status_code=502, detail="Unexpected response from GitHub billing API")
         # The summary is already product-filtered, but it still carries Actions
         # *storage* (unitType "GB") alongside minutes — count only the minutes.
-        if item.get("unitType") != "minutes":
+        # GitHub's casing for unit types isn't contractually fixed, so match loosely.
+        if str(item.get("unitType", "")).lower() != "minutes":
             continue
         gross = _billing_num(item.get("grossQuantity"))
         total += gross
