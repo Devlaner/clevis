@@ -231,20 +231,26 @@ def test_github_unreachable_becomes_503(client, db, user):
     assert resp.status_code == 503
 
 
-# --- _connected_tenant: audit tenant scoping ------------------------------
+# --- _audit_tenant: audit tenant scoping ----------------------------------
 
 
-def test_unconnected_owner_still_runs_and_audits_without_a_tenant(client, db, user):
+def test_unconnected_owner_audits_under_the_callers_personal_tenant(client, db, user):
+    # A bring-your-own-PAT sweep against an account with no Clevis org still needs a
+    # tenant for the audit row -- audit_logs' RLS policy rejects a NULL tenant_id.
+    from src.repositories import tenant_repo
+
     set_config("pr_nudge_mode", "comment")
     with patch("src.routers.pr_nudges.GitHubClient") as mock:
         _wire(mock, prs=[_pr(1, 10)])
         resp = client.post("/me/repos/randouser/repo/pr-nudges", json={"token": "ghp_byo"})
     assert resp.status_code == 200
     row = db.query(AuditLog).filter(AuditLog.action == "pr_nudge.sweep").one()
-    assert row.tenant_id is None
+    assert row.tenant_id == tenant_repo.ensure_personal_tenant(db, user.id).id
 
 
-def test_org_without_membership_audits_without_a_tenant(client, db, user):
+def test_org_without_membership_audits_under_the_personal_tenant(client, db, user):
+    from src.repositories import tenant_repo
+
     org_repo.get_or_create(db, github_login="acme")
     db.commit()
     set_config("pr_nudge_mode", "comment")
@@ -253,7 +259,7 @@ def test_org_without_membership_audits_without_a_tenant(client, db, user):
         resp = client.post("/me/repos/acme/api/pr-nudges", json={"token": "ghp_byo"})
     assert resp.status_code == 200
     row = db.query(AuditLog).filter(AuditLog.action == "pr_nudge.sweep").one()
-    assert row.tenant_id is None
+    assert row.tenant_id == tenant_repo.ensure_personal_tenant(db, user.id).id
 
 
 # --- org-scoped route ----------------------------------------------------
