@@ -139,6 +139,18 @@ BEGIN
 END
 $do$;
 
+-- automation_repo_settings (migration 0043, issue #288): the per-(tenant, repo, feature)
+-- automation opt-in + preset store. The API upserts (get-then-insert-or-update) and
+-- #290 will delete rows, so all four DML privileges are needed; composite PK, no
+-- sequence. Same existence guard + CI-runs-as-clevis_api reasoning as the tables above.
+DO $do$
+BEGIN
+  IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'automation_repo_settings') THEN
+    GRANT SELECT, INSERT, UPDATE, DELETE ON automation_repo_settings TO clevis_api;
+  END IF;
+END
+$do$;
+
 -- resolve_installation_tenant_id() (migration 0035) REVOKEs its default PUBLIC EXECUTE
 -- and re-GRANTs it only to clevis_api -- but that migration's own GRANT is itself
 -- conditional on clevis_api already existing, which isn't true the first time this
