@@ -63,7 +63,7 @@ const DEMO_REPO = {
 async function enterOwnerAndSelectRepo(owner: string, name: string) {
   fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: owner } });
   await waitFor(() => expect(screen.getByRole("option", { name })).toBeInTheDocument());
-  fireEvent.change(screen.getByRole("combobox"), { target: { value: name } });
+  fireEvent.change(screen.getByLabelText("Repository"), { target: { value: name } });
 }
 
 describe("AutomationPage", () => {
@@ -94,7 +94,7 @@ describe("AutomationPage", () => {
 
   it("disables the repository dropdown until an owner is entered", () => {
     renderPage();
-    expect(screen.getByRole("combobox")).toBeDisabled();
+    expect(screen.getByLabelText("Repository")).toBeDisabled();
     expect(reposListMock).not.toHaveBeenCalled();
   });
 
@@ -104,7 +104,7 @@ describe("AutomationPage", () => {
 
     await waitFor(() => expect(reposListMock).toHaveBeenCalledWith("acme", ""));
     await waitFor(() => expect(screen.getByRole("option", { name: "demo" })).toBeInTheDocument());
-    expect(screen.getByRole("combobox")).not.toBeDisabled();
+    expect(screen.getByLabelText("Repository")).not.toBeDisabled();
   });
 
   it("clears a selected repository when the owner changes, disabling Load workflows until a new one is picked", async () => {
@@ -112,11 +112,11 @@ describe("AutomationPage", () => {
     // owner must not be submittable against the new owner's dropdown options.
     renderPage();
     await enterOwnerAndSelectRepo("acme", "demo");
-    expect(screen.getByRole("combobox")).toHaveValue("demo");
+    expect(screen.getByLabelText("Repository")).toHaveValue("demo");
 
     fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "other-org" } });
 
-    await waitFor(() => expect(screen.getByRole("combobox")).toHaveValue(""));
+    await waitFor(() => expect(screen.getByLabelText("Repository")).toHaveValue(""));
     expect(screen.getByRole("button", { name: "Load workflows" })).toBeDisabled();
   });
 

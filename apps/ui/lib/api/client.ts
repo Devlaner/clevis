@@ -9,6 +9,7 @@ import type {
   CheckValue,
   CockpitResponse,
   CreateIssueResponse,
+  DependabotTriageResponse,
   DispatchResponse,
   FailedRunsResponse,
   GithubMembershipStatus,
@@ -337,6 +338,26 @@ export const api = {
       post<BranchProtectionBulkResponse>(
         `/orgs/${encodeURIComponent(org)}/branch-protection/bulk`,
         { ...body, token: body.token || undefined },
+      ),
+  },
+  dependabotTriage: {
+    // Per-repo opt-in + mode for Dependabot auto-triage (issue #290). Default off; only
+    // patch-level dependabot[bot] bumps with all checks green and no pending human
+    // review are ever acted on. approve_and_merge is the only mode that merges.
+    setRepo: (
+      org: string,
+      owner: string,
+      repo: string,
+      body: { enabled: boolean; mode: "approve_only" | "approve_and_merge"; merge_method?: string },
+    ) =>
+      put<{ enabled: boolean; mode: string; merge_method: string }>(
+        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/automation/dependabot-triage`,
+        body,
+      ),
+    run: (org: string, body: { repos?: string[]; dry_run: boolean }, token?: string) =>
+      post<DependabotTriageResponse>(
+        `/orgs/${encodeURIComponent(org)}/dependabot-triage`,
+        { ...body, token: token || undefined },
       ),
   },
   github: {
