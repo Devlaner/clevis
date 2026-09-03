@@ -19,6 +19,7 @@ from src.core.auth import UserOut, require_auth
 from src.core.db import AuditLog, User, get_db
 from src.repositories import org_membership_repo, org_repo
 from src.routers.pr_nudges import router
+from src.services import pr_nudge
 
 
 def _make_user(db, email: str) -> UserOut:
@@ -167,3 +168,163 @@ def test_org_route_requires_owner_to_match_org(client, db, user):
     _admin_org(db, user, login="acme")
     resp = client.post("/orgs/acme/repos/other/api/pr-nudges", json={"token": "ghp_admin"})
     assert resp.status_code in (400, 403)
+
+
+# --- config fallback / clamp ------------------------------------------------
+
+
+def test_non_int_stale_days_config_falls_back_to_default(client, db, user):
+    _admin_org(db, user)
+    set_config("pr_nudge_stale_days", "not-a-number")
+    set_config("pr_nudge_mode", "comment")
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        _wire(mock, prs=[_pr(1, 10)])
+        resp = client.post("/me/repos/acme/api/pr-nudges", json={"token": "ghp_admin"})
+    assert resp.status_code == 200
+    assert resp.json()["stale_days"] == pr_nudge.DEFAULT_STALE_DAYS
+
+
+def test_unknown_mode_config_falls_back_to_default(client, db, user):
+    _admin_org(db, user)
+    set_config("pr_nudge_mode", "bogus")
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        _wire(mock, prs=[_pr(1, 10)])
+        resp = client.post("/me/repos/acme/api/pr-nudges", json={"token": "ghp_admin"})
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == pr_nudge.DEFAULT_MODE
+
+
+def test_absurd_stale_days_is_clamped_to_an_upper_bound(client, db, user):
+    _admin_org(db, user)
+    set_config("pr_nudge_stale_days", "100000")
+    set_config("pr_nudge_mode", "comment")
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        _wire(mock, prs=[_pr(1, 10)])
+        resp = client.post("/me/repos/acme/api/pr-nudges", json={"token": "ghp_admin"})
+    assert resp.status_code == 200
+    assert resp.json()["stale_days"] == 365
+
+
+# --- GitHub error mapping (non-403) ---------------------------------------
+
+
+def test_non_403_github_status_error_becomes_400(client, db, user):
+    _admin_org(db, user)
+    set_config("pr_nudge_mode", "comment")
+    err = httpx.HTTPStatusError(
+        "500", request=httpx.Request("GET", "https://api.github.com"), response=httpx.Response(500)
+    )
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        mock.return_value.request_paginated.side_effect = err
+        resp = client.post("/me/repos/acme/api/pr-nudges", json={"token": "ghp_admin"})
+    assert resp.status_code == 400
+    assert "500" in resp.json()["detail"]
+
+
+def test_github_unreachable_becomes_503(client, db, user):
+    _admin_org(db, user)
+    set_config("pr_nudge_mode", "comment")
+    err = httpx.ConnectError("boom", request=httpx.Request("GET", "https://api.github.com"))
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        mock.return_value.request_paginated.side_effect = err
+        resp = client.post("/me/repos/acme/api/pr-nudges", json={"token": "ghp_admin"})
+    assert resp.status_code == 503
+
+
+# --- _connected_tenant: audit tenant scoping ------------------------------
+
+
+def test_unconnected_owner_still_runs_and_audits_without_a_tenant(client, db, user):
+    set_config("pr_nudge_mode", "comment")
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        _wire(mock, prs=[_pr(1, 10)])
+        resp = client.post("/me/repos/randouser/repo/pr-nudges", json={"token": "ghp_byo"})
+    assert resp.status_code == 200
+    row = db.query(AuditLog).filter(AuditLog.action == "pr_nudge.sweep").one()
+    assert row.tenant_id is None
+
+
+def test_org_without_membership_audits_without_a_tenant(client, db, user):
+    org_repo.get_or_create(db, github_login="acme")
+    db.commit()
+    set_config("pr_nudge_mode", "comment")
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        _wire(mock, prs=[_pr(1, 10)])
+        resp = client.post("/me/repos/acme/api/pr-nudges", json={"token": "ghp_byo"})
+    assert resp.status_code == 200
+    row = db.query(AuditLog).filter(AuditLog.action == "pr_nudge.sweep").one()
+    assert row.tenant_id is None
+
+
+# --- org-scoped route ----------------------------------------------------
+
+
+def test_org_route_nudges_and_audits(client, db, user):
+    _admin_org(db, user, login="acme")
+    set_config("pr_nudge_stale_days", "3")
+    set_config("pr_nudge_mode", "comment")
+    with patch("src.routers.pr_nudges.GitHubClient") as mock:
+        _wire(mock, prs=[_pr(1, 10)])
+        resp = client.post("/orgs/acme/repos/acme/api/pr-nudges", json={"token": "ghp_admin"})
+    assert resp.status_code == 200
+    assert [r["action"] for r in resp.json()["results"]] == ["commented"]
+    assert db.query(AuditLog).filter(AuditLog.action == "pr_nudge.sweep").count() == 1
+
+
+def test_org_route_without_a_token_returns_400(client, db, user):
+    _admin_org(db, user, login="acme")
+    resp = client.post("/orgs/acme/repos/acme/api/pr-nudges", json={})
+    assert resp.status_code == 400
+
+
+# --- service-level branches --------------------------------------------
+
+
+class _FakeClient:
+    def __init__(self, prs):
+        self._prs = prs
+        self.writes = []
+
+    def request_paginated(self, path, params=None):
+        if path.endswith("/pulls"):
+            return self._prs
+        return []
+
+    def request(self, method, path, params=None, json=None):
+        self.writes.append((method, path, json))
+        return {"id": 1}
+
+
+def test_run_nudge_sweep_rejects_an_unknown_mode():
+    with pytest.raises(ValueError):
+        pr_nudge.run_nudge_sweep(_FakeClient([]), "o", "r", stale_days=3, mode="weird")
+
+
+def test_prs_with_missing_or_unparseable_timestamps_are_not_stale():
+    prs = [
+        {"number": 1, "title": "no timestamps", "draft": False},
+        {"number": 2, "title": "bad created_at", "draft": False, "created_at": "not-a-date"},
+    ]
+    results = pr_nudge.run_nudge_sweep(_FakeClient(prs), "o", "r", stale_days=3, mode="comment")
+    assert {r.number: r.action for r in results} == {
+        1: "skipped-not-stale",
+        2: "skipped-not-stale",
+    }
+
+
+def test_per_sweep_cap_stops_acting_after_the_limit():
+    now = datetime.now(timezone.utc)
+    stale = [
+        {
+            "number": n,
+            "title": f"PR {n}",
+            "draft": False,
+            "created_at": (now - timedelta(days=30)).isoformat(),
+            "updated_at": (now - timedelta(days=30)).isoformat(),
+        }
+        for n in range(pr_nudge._MAX_PER_SWEEP + 1)
+    ]
+    fake = _FakeClient(stale)
+    results = pr_nudge.run_nudge_sweep(fake, "o", "r", stale_days=3, mode="label")
+    assert results[-1].action == "skipped-per-sweep-cap"
+    assert sum(1 for r in results if r.action == "labeled") == pr_nudge._MAX_PER_SWEEP

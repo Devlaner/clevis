@@ -246,6 +246,38 @@ describe("PullRequestsPage", () => {
     expect(prNudgesSweepMock).toHaveBeenCalledWith("acme", "acme", "web", "");
   });
 
+  it("reports partial failures instead of hiding them behind the count (issue #289)", async () => {
+    localStorage.setItem("default_org", "acme");
+    reposListMock.mockResolvedValue({
+      org: "acme",
+      total: 2,
+      repos: [
+        { name: "api", full_name: "acme/api", private: false, description: null, language: null, stargazers_count: 0, forks_count: 0, watchers_count: 0, open_issues_count: 0, pushed_at: null, default_branch: "main", html_url: "https://github.com/acme/api" },
+        { name: "web", full_name: "acme/web", private: false, description: null, language: null, stargazers_count: 0, forks_count: 0, watchers_count: 0, open_issues_count: 0, pushed_at: null, default_branch: "main", html_url: "https://github.com/acme/web" },
+      ],
+    });
+    reposPullsMock.mockResolvedValue({
+      repository: "acme/api",
+      total: 1,
+      pulls: [pull({ number: 7, title: "Waiting PR" })],
+    });
+    prNudgesSweepMock.mockImplementation((_org: string, _owner: string, repo: string) =>
+      repo === "api"
+        ? Promise.resolve({ mode: "comment", stale_days: 3, results: [{ number: 1, title: "x", action: "commented" }] })
+        : Promise.reject(new Error("GitHub API unreachable")),
+    );
+
+    renderPage();
+
+    await screen.findAllByText(/Waiting PR/);
+    fireEvent.click(screen.getByRole("button", { name: "Nudge stale PRs" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Click again to confirm" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Nudged 1 pull request\. 1 repository failed: web\./)).toBeInTheDocument(),
+    );
+  });
+
   it("shows a permission hint when every repo's nudge call fails (issue #289)", async () => {
     localStorage.setItem("default_org", "acme");
     reposListMock.mockResolvedValue({
@@ -258,7 +290,11 @@ describe("PullRequestsPage", () => {
       total: 1,
       pulls: [pull({ number: 7, title: "Waiting PR" })],
     });
-    prNudgesSweepMock.mockRejectedValue(new Error("GitHub API error: 400"));
+    prNudgesSweepMock.mockRejectedValue(
+      new Error(
+        "GitHub rejected the nudge (403). Clevis's GitHub App (or token) needs the 'Pull requests' permission at Read and write. See docs/self-hosting.md.",
+      ),
+    );
 
     renderPage();
 

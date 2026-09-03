@@ -61,7 +61,10 @@ def _settings() -> tuple[int, str]:
     mode = get_config(pr_nudge.MODE_KEY, pr_nudge.DEFAULT_MODE)
     if mode not in pr_nudge.MODES:
         mode = pr_nudge.DEFAULT_MODE
-    return max(1, stale_days), mode
+    # Clamp: the value is DB-editable (Settings page) and only the PUT route bounds it
+    # below at 1 — an absurd upper value would make every PR "not stale" and waste a
+    # full paginated PR crawl. 365d is well past any real review-SLA threshold.
+    return min(365, max(1, stale_days)), mode
 
 
 def _run(client: GitHubClient, owner: str, repo: str) -> NudgeResponse:

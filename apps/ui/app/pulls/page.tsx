@@ -88,7 +88,8 @@ export default function PullRequestsPage() {
   const nudge = useMutation({
     mutationFn: async () => {
       let nudged = 0
-      let errors = 0
+      const failed: string[] = []
+      let sawPermissionError = false
       for (let i = 0; i < repoNames.length; i += REPO_BATCH_SIZE) {
         const batch = repoNames.slice(i, i + REPO_BATCH_SIZE)
         const counts = await Promise.all(
@@ -96,22 +97,31 @@ export default function PullRequestsPage() {
             api.prNudges
               .sweep(org, org, repo, token)
               .then((r) => r.results.filter((x) => x.action === "commented" || x.action === "labeled").length)
-              .catch(() => {
-                errors += 1
+              .catch((e: unknown) => {
+                failed.push(repo)
+                const msg = e instanceof Error ? e.message : ""
+                if (/pull requests|permission/i.test(msg)) sawPermissionError = true
                 return 0
               }),
           ),
         )
         nudged += counts.reduce((a, b) => a + b, 0)
       }
-      if (errors > 0 && nudged === 0) {
+      if (failed.length === repoNames.length && repoNames.length > 0) {
+        // Every repo failed — lead with the most likely cause when it's a permission
+        // error, otherwise report the failure plainly rather than guessing.
         throw new Error(
-          "Couldn't nudge any repository — the GitHub App may be missing the 'Pull requests: write' permission. See docs/self-hosting.md.",
+          sawPermissionError
+            ? "Couldn't nudge any repository — the GitHub App may be missing the 'Pull requests: write' permission. See docs/self-hosting.md."
+            : `Couldn't nudge any repository (${failed.length} failed).`,
         )
       }
-      return nudged
+      return { nudged, failed }
     },
-    onSuccess: (n) => setNudgeMsg(`Nudged ${n} pull request${n === 1 ? "" : "s"}.`),
+    onSuccess: ({ nudged, failed }) => {
+      const base = `Nudged ${nudged} pull request${nudged === 1 ? "" : "s"}.`
+      setNudgeMsg(failed.length > 0 ? `${base} ${failed.length} repositor${failed.length === 1 ? "y" : "ies"} failed: ${failed.join(", ")}.` : base)
+    },
     onError: (e) => setNudgeMsg(e instanceof Error ? e.message : "Nudge failed."),
   })
 
