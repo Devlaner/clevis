@@ -69,6 +69,13 @@ export function BranchProtectionCard({ org, token, repos }: Props) {
       }),
   })
 
+  // A preview is only valid for the exact repos + knobs it ran against. Apply is
+  // blocked until the current selection/knobs match what was previewed, so a bulk
+  // rewrite can't hit repos the admin never saw a diff for.
+  const previewSig = [...selected].sort().join(",") + `|${reviewCount}|${enforceAdmins}|${blockForcePush}`
+  const [previewedSig, setPreviewedSig] = useState<string | null>(null)
+  const previewStale = !preview.isSuccess || previewedSig !== previewSig
+
   const errText = (e: unknown) => (e instanceof Error ? e.message : null)
   let message: string | null = errText(apply.error) ?? errText(preview.error)
   if (!message && apply.data) {
@@ -155,6 +162,7 @@ export function BranchProtectionCard({ org, token, repos }: Props) {
                 onClick={() => {
                   setApplyArmed(false)
                   apply.reset()
+                  setPreviewedSig(previewSig)
                   preview.mutate()
                 }}
               >
@@ -162,7 +170,7 @@ export function BranchProtectionCard({ org, token, repos }: Props) {
               </Button>
               <Button
                 size="sm"
-                disabled={!canSubmit || diffs.length === 0}
+                disabled={!canSubmit || previewStale}
                 onClick={() => {
                   if (applyArmed) {
                     setApplyArmed(false)

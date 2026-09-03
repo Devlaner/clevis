@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import get_db
-from src.core.rbac import OrgContext, require_org_role, set_tenant_session_context
+from src.core.rbac import OrgContext, require_org_role
 from src.repositories import audit_repo, automation_settings_repo
 from src.services import branch_protection_bulk
 from src.services.github_client import GitHubClient
@@ -30,8 +30,10 @@ router = APIRouter()
 
 _FEATURE = "branch_protection"
 _PERMISSION_HINT = (
-    "GitHub rejected the branch-protection change (403). Clevis's GitHub App (or token) "
-    "needs the repository 'Administration' permission at Read and write. See docs/self-hosting.md."
+    "GitHub returned 403 for every repo. The most likely cause is a missing scope — "
+    "reading and writing branch protection needs the repository 'Administration' "
+    "permission at Read and write on Clevis's GitHub App (or the pasted token). If the "
+    "App already has it, re-approve the installation. See docs/self-hosting.md."
 )
 
 
@@ -82,7 +84,7 @@ def bulk_branch_protection(
     db: Session = Depends(get_db),
     x_github_token: str | None = Header(default=None),
 ):
-    set_tenant_session_context(db, ctx.org.tenant_id, user.id)
+    # require_org_role already ran set_tenant_session_context for this org's tenant.
     try:
         token = resolve_org_token(
             db,

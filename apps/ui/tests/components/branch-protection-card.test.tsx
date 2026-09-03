@@ -83,6 +83,23 @@ describe("BranchProtectionCard", () => {
     expect(mockBulk).toHaveBeenLastCalledWith("acme", expect.objectContaining({ dry_run: false }))
   })
 
+  it("disables Apply after the selection changes until a fresh preview runs", async () => {
+    mockBulk.mockResolvedValue(DRY_RUN_RESP)
+    renderCard()
+
+    fireEvent.click(screen.getByLabelText("api"))
+    fireEvent.click(screen.getByRole("button", { name: /Preview changes \(1\)/ }))
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply to 1 repo" })).toBeEnabled())
+
+    // add another repo -> the previous preview no longer covers the selection
+    fireEvent.click(screen.getByLabelText("web"))
+    expect(screen.getByRole("button", { name: "Apply to 2 repos" })).toBeDisabled()
+
+    // re-preview -> Apply is available again
+    fireEvent.click(screen.getByRole("button", { name: /Preview changes \(2\)/ }))
+    await waitFor(() => expect(screen.getByRole("button", { name: "Apply to 2 repos" })).toBeEnabled())
+  })
+
   it("says so when every selected repo already matches the preset, and edits the preset", async () => {
     mockBulk.mockResolvedValueOnce({
       dry_run: true,
