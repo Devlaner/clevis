@@ -37,6 +37,17 @@ describe("EventFeed", () => {
     expect(screen.getByText(/opened PR #42: Fix cache timeout/)).toBeInTheDocument();
   });
 
+  it("marks avatars as decorative while keeping the actor name as visible text", () => {
+    const { container } = render(<EventFeed events={events} isLoading={false} />);
+
+    const avatars = container.querySelectorAll("img");
+    expect(avatars).toHaveLength(2);
+    avatars.forEach((img) => expect(img).toHaveAttribute("alt", ""));
+    // The accessible identifier for each row is the adjacent login text, not the image.
+    expect(screen.getByText("alice")).toBeInTheDocument();
+    expect(screen.getByText("bob")).toBeInTheDocument();
+  });
+
   it("shows an empty state when there are no events", () => {
     render(<EventFeed events={[]} isLoading={false} />);
 

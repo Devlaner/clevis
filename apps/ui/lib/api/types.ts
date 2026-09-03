@@ -48,6 +48,25 @@ export interface ScanHistoryEntry {
 
 export type AnalyticsHistoryResponse = ScanHistoryEntry[]
 
+export interface ScanExportCheck {
+  id: string
+  title: string
+  severity: string
+  status: "pass" | "fail" | "error" | "not_applicable"
+}
+
+export interface ScanExportEntry extends ScanHistoryEntry {
+  // Permissive on purpose: replays historical audit data that older runner
+  // revisions may have stored with a slightly different shape.
+  checks: Partial<ScanExportCheck>[]
+}
+
+export interface ScanExportResponse {
+  truncated: boolean
+  row_count: number
+  entries: ScanExportEntry[]
+}
+
 export interface CacheEntry {
   id: number
   ref: string

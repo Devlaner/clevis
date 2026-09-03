@@ -77,6 +77,24 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(JSON.parse(init.body as string)).toEqual({ token: undefined, actor: "me", dry_run: true });
   });
+
+  it("builds the analytics.exportHistory URL with only owner when no window is given", async () => {
+    stubOkJson({ truncated: false, row_count: 0, entries: [] });
+    await api.analytics.exportHistory("acme corp");
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/me/analytics/export?owner=acme+corp");
+    expect(url).not.toContain("since=");
+    expect(url).not.toContain("until=");
+  });
+
+  it("adds since/until to the analytics.exportHistory URL when provided", async () => {
+    stubOkJson({ truncated: false, row_count: 0, entries: [] });
+    await api.analytics.exportHistory("acme", "2026-01-01", "2026-03-31");
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("owner=acme");
+    expect(url).toContain("since=2026-01-01");
+    expect(url).toContain("until=2026-03-31");
+  });
 });
 
 describe("api.analytics value normalization", () => {
@@ -452,6 +470,38 @@ describe("api.automation", () => {
     expect(String(url)).toContain("/me/repos/acme/demo/workflows/1/dispatch");
     expect(JSON.parse(init.body as string)).toEqual({ token: undefined, ref: "main" });
     expect(result).toEqual({ dispatched: true, message: "Workflow dispatched." });
+  });
+});
+
+describe("api.security.remediate (issue #287)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("POSTs to the check remediation path with token: undefined when empty", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify({ check_id: "x", repo: "api", remediated: true }), { status: 200 }))),
+    );
+    await api.security.remediate("acme corp", "api", "repository_secret_scanning_enabled", "");
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain(
+      "/me/repos/acme%20corp/api/security/checks/repository_secret_scanning_enabled/remediate",
+    );
+    expect((init as RequestInit).method).toBe("POST");
+    // JSON.stringify drops the undefined token, so the wire body is an empty object.
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({});
+  });
+
+  it("forwards a supplied token in the body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify({ check_id: "x", repo: "api", remediated: true }), { status: 200 }))),
+    );
+    await api.security.remediate("acme", "api", "repository_dependabot_alerts_clear", "ghp_x");
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: "ghp_x" });
   });
 });
 

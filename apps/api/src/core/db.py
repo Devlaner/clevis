@@ -464,6 +464,19 @@ class Membership(Base):
 
 class Invitation(Base):
     __tablename__ = "invitations"
+    __table_args__ = (
+        # Issue #270: makes a concurrent double-insert of the same pending invite fail
+        # (one side gets IntegrityError) instead of both succeeding. Partial + on
+        # lower(email) to match the router's case-insensitive duplicate check. Added by
+        # migration 0042; kept here so the test schema (create_all) enforces it too.
+        Index(
+            "uq_invitations_org_email_pending",
+            "org_id",
+            text("lower(email)"),
+            unique=True,
+            postgresql_where="status = 'pending'",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), nullable=False)

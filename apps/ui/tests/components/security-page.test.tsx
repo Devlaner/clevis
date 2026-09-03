@@ -7,8 +7,15 @@ const tokensResolveMock = vi.fn();
 const tokensUpsertMock = vi.fn();
 const analyticsOverviewMock = vi.fn();
 const analyticsHistoryMock = vi.fn();
+const analyticsExportMock = vi.fn();
+const downloadTextFileMock = vi.fn();
+
+vi.mock("@/lib/download", () => ({
+  downloadTextFile: (...args: unknown[]) => downloadTextFileMock(...args),
+}));
 const securityMatrixMock = vi.fn();
 const secretScanningMock = vi.fn();
+const remediateMock = vi.fn();
 const installationsListMock = vi.fn();
 const installationsListForOrgMock = vi.fn();
 
@@ -43,10 +50,12 @@ vi.mock("@/lib/api/client", () => ({
     analytics: {
       overview: (...args: unknown[]) => analyticsOverviewMock(...args),
       history: (...args: unknown[]) => analyticsHistoryMock(...args),
+      exportHistory: (...args: unknown[]) => analyticsExportMock(...args),
     },
     security: {
       matrix: (...args: unknown[]) => securityMatrixMock(...args),
       secretScanning: (...args: unknown[]) => secretScanningMock(...args),
+      remediate: (...args: unknown[]) => remediateMock(...args),
     },
     installations: {
       list: (...args: unknown[]) => installationsListMock(...args),
@@ -76,7 +85,10 @@ describe("SecurityPage", () => {
     analyticsHistoryMock.mockReset();
     securityMatrixMock.mockReset();
     secretScanningMock.mockReset();
+    remediateMock.mockReset();
     routerReplaceMock.mockClear();
+    analyticsExportMock.mockReset();
+    downloadTextFileMock.mockReset();
     tokensResolveMock.mockRejectedValue(new Error("no saved token"));
     analyticsHistoryMock.mockResolvedValue([]);
     securityMatrixMock.mockResolvedValue({
@@ -233,6 +245,108 @@ describe("SecurityPage", () => {
     await waitFor(() => expect(screen.getByText(/Score trend \(last 2 scans\)/)).toBeInTheDocument());
   });
 
+  it("only offers the CSV export once scan history exists", async () => {
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    // History mock defaults to [] -> no export button.
+    await waitFor(() => expect(analyticsHistoryMock).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: /export history/i })).not.toBeInTheDocument();
+  });
+
+  it("downloads a CSV built from the export endpoint", async () => {
+    analyticsHistoryMock.mockResolvedValue([
+      { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+    ]);
+    analyticsExportMock.mockResolvedValue({
+      truncated: false,
+      row_count: 1,
+      entries: [
+        {
+          id: 1,
+          owner: "acme",
+          score: 70,
+          total_checks: 2,
+          failed_checks: 1,
+          created_at: "2026-07-10T00:00:00Z",
+          checks: [
+            { id: "organization_members_mfa_required", title: "Org 2FA", severity: "high", status: "fail" },
+          ],
+        },
+      ],
+    });
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+
+    const exportButton = await screen.findByRole("button", { name: /export history/i });
+    fireEvent.click(exportButton);
+
+    await waitFor(() => expect(analyticsExportMock).toHaveBeenCalledWith("acme", undefined, undefined));
+    await waitFor(() => expect(downloadTextFileMock).toHaveBeenCalled());
+    const [filename, csv, mime] = downloadTextFileMock.mock.calls[0];
+    expect(filename).toMatch(/^clevis-scan-history-acme-\d{4}-\d{2}-\d{2}\.csv$/);
+    expect(mime).toBe("text/csv");
+    expect(csv).toContain("scanned_at,owner,score,total_checks,failed_checks,check_id,check_title,severity,status");
+    expect(csv).toContain("organization_members_mfa_required");
+  });
+
+  it("passes the chosen date window to the export and tolerates entries without checks", async () => {
+    analyticsHistoryMock.mockResolvedValue([
+      { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+    ]);
+    analyticsExportMock.mockResolvedValue({
+      truncated: false,
+      row_count: 1,
+      entries: [
+        // no `checks` key -> the page must fall back to a single summary row
+        { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+      ],
+    });
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await screen.findByRole("button", { name: /export history/i });
+
+    fireEvent.change(screen.getByLabelText("Export from date"), { target: { value: "2026-01-01" } });
+    fireEvent.change(screen.getByLabelText("Export to date"), { target: { value: "2026-06-30" } });
+    fireEvent.click(screen.getByRole("button", { name: /export history/i }));
+
+    await waitFor(() =>
+      expect(analyticsExportMock).toHaveBeenCalledWith("acme", "2026-01-01", "2026-06-30"),
+    );
+    const [, csv] = downloadTextFileMock.mock.calls[0];
+    // One data row, all check columns empty.
+    expect(csv.trim().split("\r\n")).toHaveLength(2);
+    expect(csv).toContain("2026-07-10T00:00:00Z,acme,70,2,1,,,,");
+  });
+
+  it("shows an inline error when the export request fails", async () => {
+    analyticsHistoryMock.mockResolvedValue([
+      { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+    ]);
+    analyticsExportMock.mockRejectedValue(new Error("export blew up"));
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    fireEvent.click(await screen.findByRole("button", { name: /export history/i }));
+
+    expect(await screen.findByText("export blew up")).toBeInTheDocument();
+    expect(downloadTextFileMock).not.toHaveBeenCalled();
+  });
+
+  it("warns when the export was truncated at the row cap", async () => {
+    analyticsHistoryMock.mockResolvedValue([
+      { id: 1, owner: "acme", score: 70, total_checks: 2, failed_checks: 1, created_at: "2026-07-10T00:00:00Z" },
+    ]);
+    analyticsExportMock.mockResolvedValue({ truncated: true, row_count: 5000, entries: [] });
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    fireEvent.click(await screen.findByRole("button", { name: /export history/i }));
+
+    expect(await screen.findByText(/capped at 5000 scans/i)).toBeInTheDocument();
+  });
+
   it("filters checks down to failed only via the Failed tab", async () => {
     analyticsOverviewMock.mockResolvedValue({
       owner: "acme",
@@ -274,6 +388,46 @@ describe("SecurityPage", () => {
 
     await waitFor(() => expect(screen.queryByText("Passing check")).not.toBeInTheDocument());
     expect(screen.getByText("Failing check")).toBeInTheDocument();
+  });
+
+  it("applies a 'Fix this' remediation from a failing check and re-runs the scan", async () => {
+    analyticsOverviewMock.mockResolvedValue({
+      owner: "acme",
+      score: 40,
+      total_checks: 1,
+      failed_checks: 1,
+      repo_count: 1,
+      checks: [
+        {
+          id: "repository_secret_scanning_enabled",
+          title: "Secret scanning enabled",
+          severity: "high",
+          remediation: "Enable secret scanning.",
+          status: "fail",
+          value: null,
+        },
+      ],
+    });
+    remediateMock.mockResolvedValue({ check_id: "repository_secret_scanning_enabled", repo: "api", remediated: true });
+
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    const scanButton = screen.getByRole("button", { name: /run scan/i });
+    await waitFor(() => expect(scanButton).not.toBeDisabled());
+    fireEvent.click(scanButton);
+
+    await waitFor(() => expect(screen.getByText("Secret scanning enabled")).toBeInTheDocument());
+    expect(analyticsOverviewMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText("Repository to fix"), { target: { value: "api" } });
+    fireEvent.click(screen.getByRole("button", { name: /fix this/i }));
+    fireEvent.click(screen.getByRole("button", { name: /confirm — apply the fix/i }));
+
+    await waitFor(() =>
+      expect(remediateMock).toHaveBeenCalledWith("acme", "api", "repository_secret_scanning_enabled", ""),
+    );
+    // onRemediated -> runScan() fires a fresh scan.
+    await waitFor(() => expect(analyticsOverviewMock).toHaveBeenCalledTimes(2));
   });
 
   it("narrows to a single severity via the By Severity tab's inline select", async () => {

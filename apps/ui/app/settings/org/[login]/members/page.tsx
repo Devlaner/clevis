@@ -194,6 +194,8 @@ function GithubRoster({ orgLogin }: { orgLogin: string }) {
                     <tr key={m.login}>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-2">
+                          {/* Decorative: the member login is the adjacent link text, so an
+                              empty alt avoids a duplicate screen-reader announcement. */}
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img src={m.avatar_url} alt="" className="size-5 rounded-full" />
                           <a
@@ -245,6 +247,8 @@ function GithubRoster({ orgLogin }: { orgLogin: string }) {
                     <tr key={c.login}>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-2">
+                          {/* Decorative: the collaborator login is the adjacent text, so an
+                              empty alt avoids a duplicate screen-reader announcement. */}
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img src={c.avatar_url} alt="" className="size-5 rounded-full" />
                           <span className="text-foreground/80">{c.login}</span>
