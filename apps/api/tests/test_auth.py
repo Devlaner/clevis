@@ -771,6 +771,28 @@ def test_update_config_valid_bool(config_client_owner):
     mock_set.assert_called_once_with("registration_enabled", "false")
 
 
+@pytest.mark.parametrize("value", ["weekly", "yes", ""])
+def test_update_config_invalid_pr_nudge_mode(config_client_owner, value):
+    resp = config_client_owner.put("/config/pr_nudge_mode", json={"value": value})
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("value", ["off", "comment", "label"])
+def test_update_config_valid_pr_nudge_mode(config_client_owner, value):
+    with (
+        patch("src.routers.config.set_config") as mock_set,
+        patch("src.routers.config.read_all", return_value={**_MOCK_CONFIG, "pr_nudge_mode": value}),
+    ):
+        resp = config_client_owner.put("/config/pr_nudge_mode", json={"value": value})
+    assert resp.status_code == 200
+    mock_set.assert_called_once_with("pr_nudge_mode", value)
+
+
+def test_update_config_pr_nudge_stale_days_is_int_validated(config_client_owner):
+    resp = config_client_owner.put("/config/pr_nudge_stale_days", json={"value": "0"})
+    assert resp.status_code == 422
+
+
 def test_update_config_success(config_client_owner):
     with (
         patch("src.routers.config.set_config") as mock_set,

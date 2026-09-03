@@ -27,6 +27,7 @@ import type {
   OrgEventsResponse,
   PendingInvitationSummary,
   PermissionAuditResponse,
+  PrNudgeResponse,
   ReleaseTimelineResponse,
   RepoListResponse,
   RepoPullsResponse,
@@ -254,6 +255,15 @@ export const api = {
       post<CreateIssueResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
         { ...body, token: token || undefined },
+      ),
+  },
+  prNudges: {
+    // Nudge stale PRs in {owner}/{repo} (issue #289). Needs `Pull requests: write`
+    // on the App/PAT; a 403 from GitHub surfaces here as a 400. Org-admin gated.
+    sweep: (org: string, owner: string, repo: string, token?: string) =>
+      post<PrNudgeResponse>(
+        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pr-nudges`,
+        { token: token || undefined },
       ),
   },
   cache: {

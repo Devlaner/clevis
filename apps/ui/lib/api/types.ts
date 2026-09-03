@@ -28,6 +28,19 @@ export interface CheckResult {
   value: CheckValue
 }
 
+// Issue #289: POST /orgs/{org}/repos/{owner}/{repo}/pr-nudges
+export interface PrNudgeResult {
+  number: number
+  title: string
+  action: string
+}
+
+export interface PrNudgeResponse {
+  mode: string
+  stale_days: number
+  results: PrNudgeResult[]
+}
+
 export interface AnalyticsOverviewResponse {
   owner: string
   score: number

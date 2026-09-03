@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const tokensResolveMock = vi.fn();
 const reposListMock = vi.fn();
 const reposPullsMock = vi.fn();
+const prNudgesSweepMock = vi.fn();
 
 vi.mock("@/lib/api/client", () => ({
   api: {
@@ -14,6 +15,9 @@ vi.mock("@/lib/api/client", () => ({
     repos: {
       list: (...args: unknown[]) => reposListMock(...args),
       pulls: (...args: unknown[]) => reposPullsMock(...args),
+    },
+    prNudges: {
+      sweep: (...args: unknown[]) => prNudgesSweepMock(...args),
     },
   },
 }));
@@ -48,9 +52,11 @@ describe("PullRequestsPage", () => {
     tokensResolveMock.mockReset();
     reposListMock.mockReset();
     reposPullsMock.mockReset();
+    prNudgesSweepMock.mockReset();
     tokensResolveMock.mockRejectedValue(new Error("no saved token"));
     reposListMock.mockResolvedValue({ org: "acme", total: 0, repos: [] });
     reposPullsMock.mockResolvedValue({ repository: "acme/demo", total: 0, pulls: [] });
+    prNudgesSweepMock.mockResolvedValue({ mode: "comment", stale_days: 3, results: [] });
   });
 
   afterEach(() => {
@@ -202,5 +208,63 @@ describe("PullRequestsPage", () => {
     renderPage();
 
     expect(await screen.findByText("unknown")).toBeInTheDocument();
+  });
+
+  it("nudges stale PRs across every repo and reports the count (issue #289)", async () => {
+    localStorage.setItem("default_org", "acme");
+    reposListMock.mockResolvedValue({
+      org: "acme",
+      total: 2,
+      repos: [
+        { name: "api", full_name: "acme/api", private: false, description: null, language: null, stargazers_count: 0, forks_count: 0, watchers_count: 0, open_issues_count: 0, pushed_at: null, default_branch: "main", html_url: "https://github.com/acme/api" },
+        { name: "web", full_name: "acme/web", private: false, description: null, language: null, stargazers_count: 0, forks_count: 0, watchers_count: 0, open_issues_count: 0, pushed_at: null, default_branch: "main", html_url: "https://github.com/acme/web" },
+      ],
+    });
+    reposPullsMock.mockResolvedValue({
+      repository: "acme/api",
+      total: 1,
+      pulls: [pull({ number: 7, title: "Waiting PR" })],
+    });
+    prNudgesSweepMock.mockImplementation((_org: string, _owner: string, repo: string) =>
+      Promise.resolve({
+        mode: "comment",
+        stale_days: 3,
+        results: repo === "api" ? [{ number: 1, title: "x", action: "commented" }] : [],
+      }),
+    );
+
+    renderPage();
+
+    // Wait for the PR list to load so the button is enabled.
+    await screen.findAllByText(/Waiting PR/);
+    fireEvent.click(screen.getByRole("button", { name: "Nudge stale PRs" }));
+
+    await waitFor(() => expect(screen.getByText("Nudged 1 pull request.")).toBeInTheDocument());
+    expect(prNudgesSweepMock).toHaveBeenCalledWith("acme", "acme", "api", "");
+    expect(prNudgesSweepMock).toHaveBeenCalledWith("acme", "acme", "web", "");
+  });
+
+  it("shows a permission hint when every repo's nudge call fails (issue #289)", async () => {
+    localStorage.setItem("default_org", "acme");
+    reposListMock.mockResolvedValue({
+      org: "acme",
+      total: 1,
+      repos: [{ name: "api", full_name: "acme/api", private: false, description: null, language: null, stargazers_count: 0, forks_count: 0, watchers_count: 0, open_issues_count: 0, pushed_at: null, default_branch: "main", html_url: "https://github.com/acme/api" }],
+    });
+    reposPullsMock.mockResolvedValue({
+      repository: "acme/api",
+      total: 1,
+      pulls: [pull({ number: 7, title: "Waiting PR" })],
+    });
+    prNudgesSweepMock.mockRejectedValue(new Error("GitHub API error: 400"));
+
+    renderPage();
+
+    await screen.findAllByText(/Waiting PR/);
+    fireEvent.click(screen.getByRole("button", { name: "Nudge stale PRs" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Pull requests: write/)).toBeInTheDocument(),
+    );
   });
 });

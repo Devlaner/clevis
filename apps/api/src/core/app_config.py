@@ -25,6 +25,9 @@ _ACCEPTED_KEYS = {
     "gap_heal_stale_hours",
     "membership_reconcile_poll_seconds",
     "membership_reconcile_stale_hours",
+    # Issue #289: stale-PR nudges (on-demand sweep)
+    "pr_nudge_stale_days",
+    "pr_nudge_mode",
 }
 _TTL = 60.0
 _cache: dict[str, tuple[str, float]] = {}

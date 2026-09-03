@@ -1,8 +1,9 @@
 "use client"
 
 import { useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
+import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { SectionError } from "@/components/section-error"
 import { EmptyStateNoAccount } from "@/components/empty-state"
@@ -79,6 +80,38 @@ export default function PullRequestsPage() {
   const pulls = pullsQuery.data ?? []
   const isLoading = reposQuery.isLoading || (reposQuery.isSuccess && pullsQuery.isLoading)
 
+  // Issue #289: on-demand "nudge stale PRs" sweep, fanned out over the org's repos.
+  const [nudgeMsg, setNudgeMsg] = useState<string | null>(null)
+  const nudge = useMutation({
+    mutationFn: async () => {
+      let nudged = 0
+      let errors = 0
+      for (let i = 0; i < repoNames.length; i += REPO_BATCH_SIZE) {
+        const batch = repoNames.slice(i, i + REPO_BATCH_SIZE)
+        const counts = await Promise.all(
+          batch.map((repo) =>
+            api.prNudges
+              .sweep(org, org, repo, token)
+              .then((r) => r.results.filter((x) => x.action === "commented" || x.action === "labeled").length)
+              .catch(() => {
+                errors += 1
+                return 0
+              }),
+          ),
+        )
+        nudged += counts.reduce((a, b) => a + b, 0)
+      }
+      if (errors > 0 && nudged === 0) {
+        throw new Error(
+          "Couldn't nudge any repository — the GitHub App may be missing the 'Pull requests: write' permission. See docs/self-hosting.md.",
+        )
+      }
+      return nudged
+    },
+    onSuccess: (n) => setNudgeMsg(`Nudged ${n} pull request${n === 1 ? "" : "s"}.`),
+    onError: (e) => setNudgeMsg(e instanceof Error ? e.message : "Nudge failed."),
+  })
+
   const byAuthor = new Map<string, PullRow[]>()
   for (const p of pulls) {
     const author = p.user ?? "unknown"
@@ -95,6 +128,17 @@ export default function PullRequestsPage() {
           <span className="section-title">Open Pull Requests</span>
           <div className="flex items-center gap-3">
             {pulls.length > 0 && <span className="stat-chip">{pulls.length} total</span>}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pulls.length === 0 || nudge.isPending}
+              onClick={() => {
+                setNudgeMsg(null)
+                nudge.mutate()
+              }}
+            >
+              {nudge.isPending ? "Nudging…" : "Nudge stale PRs"}
+            </Button>
             <div className="flex items-center gap-1.5" role="group" aria-label="Group pull requests by">
               {(["repo", "author"] as const).map((g) => (
                 <button
@@ -114,6 +158,9 @@ export default function PullRequestsPage() {
             </div>
           </div>
         </div>
+        {nudgeMsg && (
+          <p className="px-4 py-2 text-xs text-muted-foreground border-b border-border">{nudgeMsg}</p>
+        )}
         {!hasOrg ? (
           <EmptyStateNoAccount bare />
         ) : reposQuery.isError ? (

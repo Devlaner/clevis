@@ -16,8 +16,14 @@ from src.core.auth import UserOut, require_workspace_admin
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_INT_KEYS = {"worker_poll_seconds", "gap_heal_poll_seconds", "gap_heal_stale_hours"}
+_INT_KEYS = {
+    "worker_poll_seconds",
+    "gap_heal_poll_seconds",
+    "gap_heal_stale_hours",
+    "pr_nudge_stale_days",
+}
 _BOOL_KEYS = {"registration_enabled"}
+_PR_NUDGE_MODES = ("off", "comment", "label")  # issue #289
 
 
 class ConfigValue(BaseModel):
@@ -51,6 +57,11 @@ def update_config(
 
     if key in _BOOL_KEYS and body.value not in ("true", "false"):
         raise HTTPException(status_code=422, detail=f"{key} must be 'true' or 'false'")
+
+    if key == "pr_nudge_mode" and body.value not in _PR_NUDGE_MODES:
+        raise HTTPException(
+            status_code=422, detail="pr_nudge_mode must be one of: off, comment, label"
+        )
 
     try:
         set_config(key, body.value)
