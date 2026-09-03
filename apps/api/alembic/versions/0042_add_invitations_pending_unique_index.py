@@ -31,6 +31,12 @@ INDEX_NAME = "uq_invitations_org_email_pending"
 
 def upgrade() -> None:
     conn = op.get_bind()
+    # Hold a write lock on invitations for the whole migration transaction. Without it
+    # a concurrent INSERT can land after the duplicate scan below but before
+    # create_index() takes its own lock, so the index build fails with a generic
+    # duplicate-key error instead of the explicit listing this migration produces.
+    # SHARE ROW EXCLUSIVE conflicts with INSERT/UPDATE but not with reads.
+    conn.execute(sa.text("LOCK TABLE invitations IN SHARE ROW EXCLUSIVE MODE"))
     conn.execute(
         sa.text(
             "UPDATE invitations SET status = 'expired' "
