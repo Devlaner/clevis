@@ -1,4 +1,5 @@
 import type {
+  ActionsUsageResponse,
   AnalyticsHistoryResponse,
   AnalyticsOverviewResponse,
   AuditLogOut,
@@ -195,6 +196,14 @@ export const api = {
     },
     history: (owner: string) =>
       get<AnalyticsHistoryResponse>(`/me/analytics/history?owner=${encodeURIComponent(owner)}`),
+    // Issue #294: GitHub Actions minutes for the org's billing cycle. Org-scoped +
+    // admin-only; needs an App permission Clevis doesn't request by default, so a
+    // missing-permission 403 comes back as a 400 (the Overview card hides itself on error).
+    actionsUsage: (org: string, token?: string) =>
+      get<ActionsUsageResponse>(
+        `/orgs/${encodeURIComponent(org)}/usage/actions`,
+        githubTokenHeader(token),
+      ),
     // Compliance export (issue #293): full scan history with per-check detail, for
     // an optional [since, until] day window. The caller renders CSV from this.
     exportHistory: (owner: string, since?: string, until?: string) => {

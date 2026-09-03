@@ -182,3 +182,25 @@ class MyIssueListResponse(BaseModel):
     total_count: int = 0
     page: int = 1
     per_page: int = 25
+
+
+class ActionsUsageResponse(BaseModel):
+    """GitHub Actions minutes for the org's current billing month (issue #294),
+    shaped from ``GET /organizations/{org}/settings/billing/usage/summary?product=actions``
+    (GitHub's enhanced-billing usage API — the older ``/settings/billing/actions``
+    endpoint this used to call was retired on 2025-09-26).
+
+    Only ``minutes`` line items are counted; Actions **storage** (GB) is a separate
+    line and out of scope here. The usage API reports *consumption*, not the plan's
+    monthly allowance, so we surface what it can tell us:
+
+    - ``total_minutes_used``   — all Actions minutes consumed this month
+    - ``included_minutes_used`` — the slice covered by the plan's included allowance
+      (GitHub's ``discountQuantity``)
+    - ``paid_minutes_used``    — the slice billed on top (GitHub's ``netQuantity``)
+    """
+
+    total_minutes_used: float = 0
+    included_minutes_used: float = 0
+    paid_minutes_used: float = 0
+    minutes_used_breakdown: dict[str, float] = {}
