@@ -389,9 +389,7 @@ describe("AppSidebar coming-soon badges", () => {
     "Collaborators",
     "Automation",
     "Audit Log",
-    "My PRs",
-    "My Reviews",
-    "My Issues",
+    "My Work",
   ])(
     "shows no 'Soon' badge on the shipped '%s' nav item",
     async (title) => {

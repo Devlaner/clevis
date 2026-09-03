@@ -71,6 +71,8 @@ export function EventFeed({ events, isLoading }: EventFeedProps) {
               className="stagger-item px-4 py-3 flex items-start gap-3 hover:bg-elevated transition-colors duration-150 ease-(--ease-out)"
               style={{ animationDelay: `${Math.min(i, 6) * 45}ms` }}
             >
+              {/* Decorative: the actor login is rendered as adjacent visible text below,
+                  so an empty alt keeps screen readers from announcing the avatar twice. */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={event.actor_avatar} alt="" className="h-6 w-6 shrink-0 mt-0.5" />
               <div className="min-w-0 flex-1">

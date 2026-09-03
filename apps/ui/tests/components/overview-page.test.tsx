@@ -7,6 +7,11 @@ const cockpitMock = vi.fn();
 const myViewMock = vi.fn();
 const actionsUsageMock = vi.fn();
 
+let authUser: { id: number } | null = { id: 1 };
+vi.mock("@/lib/auth-context", () => ({
+  useAuth: () => ({ user: authUser }),
+}));
+
 vi.mock("@/lib/api/client", () => ({
   api: {
     tokens: {
@@ -72,6 +77,7 @@ describe("OverviewPage cockpit", () => {
     // Default: the Actions-usage query fails (App lacks the billing permission) so the
     // card is absent -- matching the common self-hosted setup.
     actionsUsageMock.mockRejectedValue(new Error("GitHub API error: 400"));
+    authUser = { id: 1 };
     localStorage.clear();
   });
 
@@ -261,56 +267,41 @@ describe("OverviewPage cockpit", () => {
     expect(screen.getByText("pushed 3 commits to main")).toBeInTheDocument();
   });
 
-  it("renders the Actions Usage card when the billing query succeeds, and omits it otherwise (issue #294)", async () => {
+  it("renders the Actions Usage card from the billing usage summary (issue #294)", async () => {
     localStorage.setItem("default_org", "acme");
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
     cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
     actionsUsageMock.mockResolvedValue({
-      total_minutes_used: 1200,
-      total_paid_minutes_used: 0,
-      included_minutes: 3000,
-      minutes_used_breakdown: { UBUNTU: 1200 },
+      total_minutes_used: 1250,
+      included_minutes_used: 900,
+      paid_minutes_used: 350,
+      minutes_used_breakdown: { actions_linux: 1000, actions_macos: 250 },
     });
 
     renderPage();
 
     expect(await screen.findByText("Actions Usage (this cycle)")).toBeInTheDocument();
-    expect(screen.getByText(/1,200 min/)).toBeInTheDocument();
-    expect(screen.getByText(/of 3,000 included/)).toBeInTheDocument();
+    expect(screen.getByText(/1,250 min/)).toBeInTheDocument();
+    expect(screen.getByText(/900 included · 350 billable/)).toBeInTheDocument();
+    expect(screen.getByText("actions_linux")).toBeInTheDocument();
   });
 
-  it("shows the over-budget state and paid minutes on the Actions Usage card", async () => {
-    localStorage.setItem("default_org", "acme");
-    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
-    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
-    actionsUsageMock.mockResolvedValue({
-      total_minutes_used: 3500,
-      total_paid_minutes_used: 500,
-      included_minutes: 3000,
-      minutes_used_breakdown: { UBUNTU: 3500 },
-    });
-
-    renderPage();
-
-    expect(await screen.findByText(/3,500 min/)).toBeInTheDocument();
-    expect(screen.getByText(/500 paid min this cycle/)).toBeInTheDocument();
-  });
-
-  it("renders the Actions Usage card with no bar when the plan has no included minutes", async () => {
+  it("omits the billable clause when nothing was billed on top of the allowance", async () => {
     localStorage.setItem("default_org", "acme");
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
     cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
     actionsUsageMock.mockResolvedValue({
       total_minutes_used: 42,
-      total_paid_minutes_used: 0,
-      included_minutes: 0,
+      included_minutes_used: 42,
+      paid_minutes_used: 0,
       minutes_used_breakdown: {},
     });
 
     renderPage();
 
     expect(await screen.findByText(/42 min/)).toBeInTheDocument();
-    expect(screen.getByText("no included minutes")).toBeInTheDocument();
+    expect(screen.getByText("42 included")).toBeInTheDocument();
+    expect(screen.queryByText(/billable/)).not.toBeInTheDocument();
   });
 
   it("omits the Actions Usage card when the billing query fails (missing permission)", async () => {
@@ -322,9 +313,54 @@ describe("OverviewPage cockpit", () => {
     const { queryClient } = renderPage();
 
     await waitFor(() =>
-      expect(queryClient.getQueryState(["analytics.actions-usage", "acme"])?.status).toBe("error"),
+      expect(queryClient.getQueryState(["analytics.actions-usage", "acme", 1])?.status).toBe("error"),
     );
     expect(screen.queryByText("Actions Usage (this cycle)")).not.toBeInTheDocument();
+  });
+
+  it("does not serve one user's cached Actions usage to a different session (CWE-200)", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+    actionsUsageMock.mockResolvedValue({
+      total_minutes_used: 999,
+      included_minutes_used: 999,
+      paid_minutes_used: 0,
+      minutes_used_breakdown: {},
+    });
+
+    // Admin (id 1) loads the page and the usage lands in the shared QueryClient.
+    const { queryClient, unmount } = renderPage();
+    expect(await screen.findByText(/999 min/)).toBeInTheDocument();
+    unmount();
+
+    // A member (id 2) signs in on the same tab. Their query key differs, so the
+    // admin's cached row can't satisfy it; with billing now 403-ing the card is gone.
+    authUser = { id: 2 };
+    actionsUsageMock.mockRejectedValue(new Error("GitHub API error: 400"));
+    render(
+      <QueryClientProvider client={queryClient}>
+        <OverviewPage />
+      </QueryClientProvider>,
+    );
+
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["analytics.actions-usage", "acme", 2])?.status).toBe("error"),
+    );
+    expect(screen.queryByText(/999 min/)).not.toBeInTheDocument();
+  });
+
+  it("titles the card 'Recent Highlights' and links to the full activity feed (issue #285)", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue({ ...EMPTY_COCKPIT });
+
+    renderPage();
+
+    expect(await screen.findByText("Recent Highlights")).toBeInTheDocument();
+    expect(screen.queryByText("Recent Activity")).not.toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /view full activity feed/i });
+    expect(link).toHaveAttribute("href", "/activity");
   });
 
   it("hides the Needs Attention card when there are no at-risk repos", async () => {

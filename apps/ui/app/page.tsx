@@ -11,6 +11,7 @@ import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { ArrowRight, Warning } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
 import { useActiveScope } from "@/lib/active-scope"
+import { useAuth } from "@/lib/auth-context"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import { SectionError } from "@/components/section-error"
@@ -77,6 +78,7 @@ function LiveStatCard({ label, loading, configured, value, trend }: {
 
 export default function OverviewPage() {
   const { scope } = useActiveScope()
+  const { user } = useAuth()
   const org = scope?.login ?? ""
   const [orgChecked, setOrgChecked] = useState(false)
   useEffect(() => {
@@ -110,12 +112,17 @@ export default function OverviewPage() {
 
   // Issue #294: Actions-minutes usage. Org-scoped + admin-only, and needs a GitHub App
   // permission Clevis doesn't request by default -- so this is best-effort: `retry: false`
-  // and the card simply hides itself when the query errors (403 -> 400 from the API).
+  // and the card only renders on a *successful* query (never on stale data).
+  //
+  // The query key is partitioned by the signed-in user: this is org billing data, and
+  // the QueryClient outlives a logout/login on the same tab, so keying on `org` alone
+  // would let a member inherit an admin's cached usage (CWE-200). Gate on
+  // `resolveQuery.isFetched` so the request always carries the resolved token.
   const isOrgScope = scope?.kind === "org"
   const actionsUsageQuery = useQuery({
-    queryKey: ["analytics.actions-usage", org],
+    queryKey: ["analytics.actions-usage", org, user?.id ?? "anon"],
     queryFn: () => api.analytics.actionsUsage(org, resolveQuery.data?.token),
-    enabled: isOrgScope && org.trim().length > 0 && !resolveQuery.isLoading,
+    enabled: isOrgScope && org.trim().length > 0 && resolveQuery.isFetched,
     retry: false,
   })
   const usage = actionsUsageQuery.data
@@ -234,39 +241,49 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        {usage && (
+        {actionsUsageQuery.isSuccess && usage && (
           <div className="card">
             <div className="px-4 py-3 border-b border-border">
               <span className="section-label">Actions Usage (this cycle)</span>
             </div>
             <div className="p-4 flex flex-col gap-2">
               {(() => {
-                const included = usage.included_minutes || 0
                 const used = usage.total_minutes_used || 0
-                const pct = included > 0 ? Math.min(100, Math.round((used / included) * 100)) : 0
-                const over = included > 0 && used > included
+                const included = usage.included_minutes_used || 0
+                const paid = usage.paid_minutes_used || 0
+                // GitHub's usage API reports consumption, not the plan's monthly
+                // allowance — so the bar splits what was used into included vs billed,
+                // it isn't a "% of quota" gauge.
+                const paidPct = used > 0 ? Math.min(100, Math.round((paid / used) * 100)) : 0
                 return (
                   <>
                     <div className="flex items-baseline justify-between text-sm">
                       <span className="tabular-nums font-medium text-foreground">
                         {Math.round(used).toLocaleString()} min
                       </span>
-                      <span className="text-xs text-muted-foreground tabular-nums">
-                        {included > 0 ? `of ${Math.round(included).toLocaleString()} included` : "no included minutes"}
-                      </span>
+                      <span className="text-xs text-muted-foreground tabular-nums">used this cycle</span>
                     </div>
-                    {included > 0 && (
+                    {used > 0 && (
                       <div className="h-1.5 bg-muted rounded-full overflow-hidden">
                         <div
-                          className={`h-full rounded-full ${over ? "bg-red-400" : pct >= 80 ? "bg-yellow-400" : "bg-green-400"}`}
-                          style={{ width: `${pct}%` }}
+                          className={`h-full rounded-full ${paidPct >= 20 ? "bg-yellow-400" : "bg-green-400"}`}
+                          style={{ width: `${100 - paidPct}%` }}
                         />
                       </div>
                     )}
-                    {usage.total_paid_minutes_used > 0 && (
-                      <p className="text-xs text-muted-foreground tabular-nums">
-                        {Math.round(usage.total_paid_minutes_used).toLocaleString()} paid min this cycle
-                      </p>
+                    <p className="text-xs text-muted-foreground tabular-nums">
+                      {Math.round(included).toLocaleString()} included
+                      {paid > 0 && ` · ${Math.round(paid).toLocaleString()} billable`}
+                    </p>
+                    {Object.keys(usage.minutes_used_breakdown).length > 0 && (
+                      <ul className="mt-1 flex flex-col gap-0.5 text-xs text-muted-foreground">
+                        {Object.entries(usage.minutes_used_breakdown).map(([sku, mins]) => (
+                          <li key={sku} className="flex justify-between tabular-nums">
+                            <span>{sku}</span>
+                            <span>{Math.round(mins).toLocaleString()}</span>
+                          </li>
+                        ))}
+                      </ul>
                     )}
                   </>
                 )
@@ -308,9 +325,9 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        <div className="card">
+        <div className="card flex flex-col">
           <div className="px-4 py-3 border-b border-border flex items-center gap-2">
-            <span className="section-label">Recent Activity</span>
+            <span className="section-label">Recent Highlights</span>
             {cockpit?.recent_events_stale && (
               <span
                 className="text-[0.6875rem] text-warning"
@@ -325,6 +342,13 @@ export default function OverviewPage() {
             isLoading={cockpitQuery.isLoading}
             limit={5}
           />
+          <Link
+            href="/activity"
+            className="group mt-auto flex items-center justify-center gap-1 border-t border-border px-4 py-2.5 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+          >
+            View full activity feed
+            <ArrowRight className="size-3.5 shrink-0 transition-transform group-hover:translate-x-0.5" />
+          </Link>
         </div>
       </div>
 

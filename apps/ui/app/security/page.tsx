@@ -8,8 +8,10 @@ import { CheckCard } from "@/components/check-card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
-import { Warning, Key, ShieldWarning } from "@phosphor-icons/react"
+import { Warning, Key, ShieldWarning, DownloadSimple } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
+import { toCsv } from "@/lib/csv"
+import { downloadTextFile } from "@/lib/download"
 import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { DonutChart } from "@/components/charts/donut-chart"
@@ -81,6 +83,8 @@ export default function SecurityPage() {
   const [owner, setOwner] = useState("")
   const [token, setToken] = useState("")
   const [tokenSaved, setTokenSaved] = useState(false)
+  const [exportSince, setExportSince] = useState("")
+  const [exportUntil, setExportUntil] = useState("")
 
   const tab = (searchParams.get("tab") ?? "all") as TabId
   const severityFilter = (searchParams.get("severity") ?? "all") as "all" | "high" | "medium" | "low"
@@ -157,6 +161,32 @@ export default function SecurityPage() {
     mutationFn: () => api.analytics.overview(owner, token),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["analytics.history", owner] })
+    },
+  })
+
+  // Compliance export (issue #293): pull the full scan history with per-check
+  // detail and hand the auditor a CSV. One row per check per scan (long format);
+  // scans that stored no per-check breakdown still contribute one summary row.
+  const exportCsv = useMutation({
+    mutationFn: () => api.analytics.exportHistory(owner.trim(), exportSince || undefined, exportUntil || undefined),
+    onSuccess: (res) => {
+      const flat = res.entries.flatMap((scanRow) => {
+        const checks = scanRow.checks ?? []
+        return (checks.length ? checks : [null]).map((check) => ({ scanRow, check }))
+      })
+      const csv = toCsv(flat, [
+        { header: "scanned_at", value: ({ scanRow }) => scanRow.created_at },
+        { header: "owner", value: ({ scanRow }) => scanRow.owner },
+        { header: "score", value: ({ scanRow }) => scanRow.score },
+        { header: "total_checks", value: ({ scanRow }) => scanRow.total_checks },
+        { header: "failed_checks", value: ({ scanRow }) => scanRow.failed_checks },
+        { header: "check_id", value: ({ check }) => check?.id ?? "" },
+        { header: "check_title", value: ({ check }) => check?.title ?? "" },
+        { header: "severity", value: ({ check }) => check?.severity ?? "" },
+        { header: "status", value: ({ check }) => check?.status ?? "" },
+      ])
+      const stamp = new Date().toISOString().slice(0, 10)
+      downloadTextFile(`clevis-scan-history-${owner.trim()}-${stamp}.csv`, csv, "text/csv")
     },
   })
 
@@ -290,6 +320,50 @@ export default function SecurityPage() {
                 {scan.error.message}
               </div>
             )}
+            {(historyQuery.data?.length ?? 0) > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <input
+                    type="date"
+                    aria-label="Export from date"
+                    value={exportSince}
+                    max={exportUntil || undefined}
+                    onChange={(e) => setExportSince(e.target.value)}
+                    className="card px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <span>–</span>
+                  <input
+                    type="date"
+                    aria-label="Export to date"
+                    value={exportUntil}
+                    min={exportSince || undefined}
+                    onChange={(e) => setExportUntil(e.target.value)}
+                    className="card px-1.5 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  onClick={() => exportCsv.mutate()}
+                  disabled={exportCsv.isPending}
+                >
+                  <DownloadSimple className="size-3.5" />
+                  {exportCsv.isPending ? "Exporting…" : "Export history (CSV)"}
+                </Button>
+              </div>
+            )}
+            {exportCsv.isError && (
+              <div className="flex items-start gap-2 text-xs text-destructive">
+                <Warning className="size-3.5 mt-0.5 shrink-0" />
+                {exportCsv.error.message}
+              </div>
+            )}
+            {exportCsv.data?.truncated && (
+              <div className="flex items-start gap-2 text-xs text-amber-500">
+                <Warning className="size-3.5 mt-0.5 shrink-0" />
+                Export capped at {exportCsv.data.row_count} scans — narrow the date range for a complete
+                period.
+              </div>
+            )}
           </div>
         </div>
 
@@ -390,7 +464,7 @@ export default function SecurityPage() {
                 </p>
               ) : (
                 filteredChecks.map((c: CheckResult) => (
-                  <CheckCard key={c.id} check={c} />
+                  <CheckCard key={c.id} check={c} owner={scan.data.owner} token={token} onRemediated={() => runScan()} />
                 ))
               )}
             </div>

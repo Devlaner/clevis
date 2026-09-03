@@ -62,7 +62,12 @@ def create_invitation(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"A pending invitation already exists for {body.email} in this organization",
         )
-    invitation = invitation_repo.create(db, org_id=ctx.org.id, email=body.email, invited_by_user_id=user.id)
+    try:
+        invitation = invitation_repo.create(db, org_id=ctx.org.id, email=body.email, invited_by_user_id=user.id)
+    except invitation_repo.DuplicatePendingInvitation as exc:
+        # A concurrent request won the race between the pre-check above and its own
+        # insert; the DB constraint rejected this one.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {
         "invitation": invitation,
         "invite_link": f"{_ui_base()}/invite/{invitation.token}",

@@ -220,39 +220,19 @@ describe("ActivityPage", () => {
     expect(await screen.findByText("(estimated)")).toBeInTheDocument();
   });
 
-  it("groups open PRs by author under the PR Board tab", async () => {
+  // Issue #284: the "PR Board" tab is gone from Activity -- that view (open PRs grouped
+  // by author) is now a toggle on /pulls. Activity just links there.
+  it("has no PR Board tab and links to the Pull Requests page instead", async () => {
     localStorage.setItem("default_org", "acme");
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
     githubEventsMock.mockResolvedValue({ org: "acme", events: [] });
-    reposListMock.mockResolvedValue({ org: "acme", total: 1, repos: [{ name: "api" }] });
-    reposPullsMock.mockResolvedValue({
-      repository: "acme/api",
-      total: 1,
-      pulls: [{ number: 5, title: "Fix bug", user: "alice", created_at: new Date().toISOString(), html_url: "https://github.com/acme/api/pull/5" }],
-    });
 
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: "PR Board" }));
-
-    await waitFor(() => expect(reposPullsMock).toHaveBeenCalledWith("acme", "acme", "api", "ghp_test"));
-    expect(await screen.findByText("alice")).toBeInTheDocument();
-    expect(screen.getByText("#5 Fix bug")).toBeInTheDocument();
-  });
-
-  it("shows an empty state under the PR Board tab when there are no open pull requests", async () => {
-    localStorage.setItem("default_org", "acme");
-    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
-    githubEventsMock.mockResolvedValue({ org: "acme", events: [] });
-    reposListMock.mockResolvedValue({ org: "acme", total: 1, repos: [{ name: "api" }] });
-    reposPullsMock.mockResolvedValue({ repository: "acme/api", total: 0, pulls: [] });
-
-    renderPage();
-
-    fireEvent.click(await screen.findByRole("button", { name: "PR Board" }));
-
-    await waitFor(() => expect(reposPullsMock).toHaveBeenCalledWith("acme", "acme", "api", "ghp_test"));
-    expect(await screen.findByText("No open pull requests")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "PR Board" })).not.toBeInTheDocument();
+    const link = await screen.findByRole("link", { name: /open pull requests/i });
+    expect(link).toHaveAttribute("href", "/pulls");
+    expect(reposPullsMock).not.toHaveBeenCalled();
   });
 
   it("marks a pre-release in the release timeline", async () => {

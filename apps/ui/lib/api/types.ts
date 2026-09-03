@@ -28,11 +28,13 @@ export interface CheckResult {
   value: CheckValue
 }
 
-// Issue #294: GET /orgs/{org}/usage/actions (GitHub Actions minutes this billing cycle).
+// Issue #294: GET /orgs/{org}/usage/actions (GitHub Actions minutes this billing month,
+// from GitHub's enhanced-billing usage summary API). `included_minutes_used` is the
+// slice covered by the plan's allowance; `paid_minutes_used` is what was billed on top.
 export interface ActionsUsageResponse {
   total_minutes_used: number
-  total_paid_minutes_used: number
-  included_minutes: number
+  included_minutes_used: number
+  paid_minutes_used: number
   minutes_used_breakdown: Record<string, number>
 }
 
@@ -55,6 +57,25 @@ export interface ScanHistoryEntry {
 }
 
 export type AnalyticsHistoryResponse = ScanHistoryEntry[]
+
+export interface ScanExportCheck {
+  id: string
+  title: string
+  severity: string
+  status: "pass" | "fail" | "error" | "not_applicable"
+}
+
+export interface ScanExportEntry extends ScanHistoryEntry {
+  // Permissive on purpose: replays historical audit data that older runner
+  // revisions may have stored with a slightly different shape.
+  checks: Partial<ScanExportCheck>[]
+}
+
+export interface ScanExportResponse {
+  truncated: boolean
+  row_count: number
+  entries: ScanExportEntry[]
+}
 
 export interface CacheEntry {
   id: number
@@ -542,4 +563,10 @@ export interface SecretScanningResponse {
   repository: string
   alerts: SecretAlert[]
   source: "github" | "aggregate"
+}
+
+// Issue #286: response from POST /me/repos/{owner}/{repo}/issues.
+export interface CreateIssueResponse {
+  number: number
+  html_url: string
 }

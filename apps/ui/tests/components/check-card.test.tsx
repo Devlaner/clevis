@@ -1,8 +1,23 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+const createIssueMock = vi.fn();
+const remediateMock = vi.fn();
+vi.mock("@/lib/api/client", () => ({
+  api: {
+    issues: { create: (...a: unknown[]) => createIssueMock(...a) },
+    security: { remediate: (...a: unknown[]) => remediateMock(...a) },
+  },
+}));
 
 import { CheckCard } from "@/components/check-card";
 import type { CheckResult } from "@/lib/api/types";
+
+function renderWithClient(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+}
 
 const baseCheck: CheckResult = {
   id: "mfa",
@@ -108,5 +123,142 @@ describe("CheckCard", () => {
     expect(severitySpan.className).not.toContain("text-red-400");
     expect(severitySpan.className).not.toContain("text-yellow-400");
     expect(severitySpan.className).not.toContain("text-blue-400");
+  });
+});
+
+describe("CheckCard — file as issue (#286)", () => {
+  beforeEach(() => {
+    createIssueMock.mockReset();
+  });
+  afterEach(() => {
+    cleanup();
+  });
+
+  const failing: CheckResult = { ...baseCheck, status: "fail", value: null };
+
+  it("shows no 'File as issue' action on a passing check or when owner is absent", () => {
+    renderWithClient(<CheckCard check={baseCheck} owner="acme" />);
+    expect(screen.queryByRole("button", { name: "File as issue" })).not.toBeInTheDocument();
+
+    cleanup();
+    renderWithClient(<CheckCard check={failing} />);
+    expect(screen.queryByRole("button", { name: "File as issue" })).not.toBeInTheDocument();
+  });
+
+  it("files an issue with the user's edited repo and title, and links to the result", async () => {
+    createIssueMock.mockResolvedValue({ number: 7, html_url: "https://github.com/acme/api/issues/7" });
+    renderWithClient(<CheckCard check={failing} owner="acme" token="ghp_x" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    expect((screen.getByLabelText("Repository") as HTMLInputElement).value).toBe(".github");
+    expect((screen.getByLabelText("Issue title") as HTMLInputElement).value).toBe("MFA enforced");
+
+    fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "api" } });
+    fireEvent.change(screen.getByLabelText("Issue title"), { target: { value: "Turn on org MFA" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+
+    await waitFor(() => expect(screen.getByText(/Issue #7 created/)).toBeInTheDocument());
+    const [owner, repo, body, token] = createIssueMock.mock.calls[0];
+    expect(owner).toBe("acme");
+    expect(repo).toBe("api");
+    expect(body.title).toBe("Turn on org MFA");
+    expect(body.body).toContain("Require two-factor authentication");
+    expect(token).toBe("ghp_x");
+  });
+
+  it("closes the form on Cancel without calling the API", () => {
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    expect(screen.getByLabelText("Repository")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByLabelText("Repository")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "File as issue" })).toBeInTheDocument();
+    expect(createIssueMock).not.toHaveBeenCalled();
+  });
+
+  it("shows a scope hint when GitHub rejects the write with a 403", async () => {
+    createIssueMock.mockRejectedValue(new Error("GitHub API error: 403"));
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/needs the 'Issues: write' permission/)).toBeInTheDocument(),
+    );
+  });
+
+  it("shows the raw error message for a non-403 failure, and a generic message otherwise", async () => {
+    createIssueMock.mockRejectedValue(new Error("GitHub API error: 422"));
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.getByText("GitHub API error: 422")).toBeInTheDocument());
+
+    cleanup();
+    createIssueMock.mockReset();
+    createIssueMock.mockRejectedValue("plain string, not an Error");
+    renderWithClient(<CheckCard check={failing} owner="acme" />);
+    fireEvent.click(screen.getByRole("button", { name: "File as issue" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create issue" }));
+    await waitFor(() => expect(screen.getByText("Failed to create the issue.")).toBeInTheDocument());
+  });
+});
+
+describe("CheckCard — fix this (#287)", () => {
+  beforeEach(() => {
+    remediateMock.mockReset();
+  });
+  afterEach(() => {
+    cleanup();
+  });
+
+  const remediable: CheckResult = {
+    ...baseCheck,
+    id: "repository_secret_scanning_enabled",
+    status: "fail",
+    value: null,
+  };
+
+  it("only offers 'Fix this' for a failing, auto-remediable check with an owner", () => {
+    renderWithClient(<CheckCard check={{ ...remediable, status: "pass" }} owner="acme" />);
+    expect(screen.queryByRole("button", { name: /fix this/i })).not.toBeInTheDocument();
+
+    cleanup();
+    renderWithClient(<CheckCard check={{ ...baseCheck, id: "mfa", status: "fail" }} owner="acme" />);
+    expect(screen.queryByRole("button", { name: /fix this/i })).not.toBeInTheDocument();
+
+    cleanup();
+    renderWithClient(<CheckCard check={remediable} owner="acme" />);
+    expect(screen.getByRole("button", { name: /fix this/i })).toBeInTheDocument();
+  });
+
+  it("requires a confirm click, then applies the fix and asks the page to re-scan", async () => {
+    remediateMock.mockResolvedValue({ check_id: remediable.id, repo: "api", remediated: true });
+    const onRemediated = vi.fn();
+    renderWithClient(<CheckCard check={remediable} owner="acme" token="ghp_x" onRemediated={onRemediated} />);
+
+    fireEvent.change(screen.getByLabelText("Repository to fix"), { target: { value: "api" } });
+    fireEvent.click(screen.getByRole("button", { name: /fix this/i }));
+    expect(remediateMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /confirm — apply the fix/i }));
+    await waitFor(() => expect(remediateMock).toHaveBeenCalledWith("acme", "api", remediable.id, "ghp_x"));
+    await waitFor(() => expect(screen.getByText(/Applied — re-run the scan/)).toBeInTheDocument());
+    expect(onRemediated).toHaveBeenCalled();
+  });
+
+  it("disarms on Cancel and surfaces a failed fix", async () => {
+    renderWithClient(<CheckCard check={remediable} owner="acme" />);
+    fireEvent.change(screen.getByLabelText("Repository to fix"), { target: { value: "api" } });
+    fireEvent.click(screen.getByRole("button", { name: /fix this/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: /fix this/i })).toBeInTheDocument();
+
+    remediateMock.mockRejectedValue(new Error("GitHub rejected the change (403)."));
+    fireEvent.click(screen.getByRole("button", { name: /fix this/i }));
+    fireEvent.click(screen.getByRole("button", { name: /confirm/i }));
+    await waitFor(() => expect(screen.getByText("GitHub rejected the change (403).")).toBeInTheDocument());
   });
 });

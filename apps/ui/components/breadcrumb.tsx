@@ -13,9 +13,7 @@ const ROUTE_LABELS: Record<string, string> = {
   "/releases":      "releases",
   "/audit":         "audit log",
   "/settings":      "settings",
-  "/my/prs":        "my prs",
-  "/my/reviews":    "my reviews",
-  "/my/issues":     "my issues",
+  "/my":            "my work",
 }
 
 function segmentsFrom(pathname: string): string[] {

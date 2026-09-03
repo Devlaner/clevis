@@ -11,13 +11,36 @@ class AnalyticsInput(BaseModel):
     token: SecretStr | None = None
 
 
+class CheckResult(BaseModel):
+    """One security-check result as produced by ``checks.runner.run_all_checks``.
+
+    Typed so a shape drift in ``packages/checks`` fails fast at the API boundary with a
+    clear validation error instead of silently reaching the UI and crashing a render
+    (issue #370). ``value`` is deliberately a union of every shape the six checks and the
+    runner's error paths emit: a bare bool (MFA), a ``{str: int}`` counts dict (all the
+    repo-level checks), or a plain string (runner-level failure messages).
+
+    ``severity`` stays a free ``str`` on purpose: it's the source-of-truth
+    ``CheckMetadata.severity`` (unconstrained), it's only a cosmetic chip in the UI, and
+    ``github_checks.py`` already uses a wider vocabulary ("critical") elsewhere -- pinning
+    it here would turn a new check's severity label into a 500 on the whole overview.
+    """
+
+    id: str
+    title: str
+    severity: str
+    remediation: str
+    status: Literal["pass", "fail", "error", "not_applicable"]
+    value: bool | str | dict[str, int] | None = None
+
+
 class AnalyticsResponse(BaseModel):
     owner: str
     score: int
     total_checks: int
     failed_checks: int
     repo_count: int
-    checks: list[dict]
+    checks: list[CheckResult]
 
 
 class ScanHistoryEntry(BaseModel):
@@ -27,6 +50,26 @@ class ScanHistoryEntry(BaseModel):
     total_checks: int
     failed_checks: int
     created_at: datetime
+
+
+class ScanExportEntry(ScanHistoryEntry):
+    """A scan-history row plus its full per-check breakdown, for the compliance
+    export (issue #293). ``checks`` is left as a permissive ``list[dict]`` on
+    purpose: this replays historical audit data, and a row persisted by an older
+    revision of the runner must not fail response validation and 500 the whole
+    export. New scans store the ``CheckResult`` shape (id/title/severity/status/
+    remediation/value)."""
+
+    checks: list[dict] = []
+
+
+class ScanExportResponse(BaseModel):
+    """Wraps the export rows with a ``truncated`` flag so a windowed audit export
+    that hit the row cap is never silently partial."""
+
+    truncated: bool = False
+    row_count: int = 0
+    entries: list[ScanExportEntry] = []
 
 
 class OrgEventSummary(BaseModel):
@@ -142,11 +185,22 @@ class MyIssueListResponse(BaseModel):
 
 
 class ActionsUsageResponse(BaseModel):
-    """GitHub Actions minutes for the org's current billing cycle (issue #294),
-    shaped from GET /orgs/{org}/settings/billing/actions. Seats/storage are a separate
-    endpoint and deferred."""
+    """GitHub Actions minutes for the org's current billing month (issue #294),
+    shaped from ``GET /organizations/{org}/settings/billing/usage/summary?product=actions``
+    (GitHub's enhanced-billing usage API — the older ``/settings/billing/actions``
+    endpoint this used to call was retired on 2025-09-26).
+
+    Only ``minutes`` line items are counted; Actions **storage** (GB) is a separate
+    line and out of scope here. The usage API reports *consumption*, not the plan's
+    monthly allowance, so we surface what it can tell us:
+
+    - ``total_minutes_used``   — all Actions minutes consumed this month
+    - ``included_minutes_used`` — the slice covered by the plan's included allowance
+      (GitHub's ``discountQuantity``)
+    - ``paid_minutes_used``    — the slice billed on top (GitHub's ``netQuantity``)
+    """
 
     total_minutes_used: float = 0
-    total_paid_minutes_used: float = 0
-    included_minutes: float = 0
-    minutes_used_breakdown: dict[str, int] = {}
+    included_minutes_used: float = 0
+    paid_minutes_used: float = 0
+    minutes_used_breakdown: dict[str, float] = {}

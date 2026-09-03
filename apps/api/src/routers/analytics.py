@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import anyio
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
@@ -31,6 +31,7 @@ from src.schemas.analytics import (
     PrCycleTimeWeek,
     PrWeekBucket,
     RunSummaryLite,
+    ScanExportResponse,
     ScanHistoryEntry,
 )
 from src.services.analytics_service import get_account_type, get_overview
@@ -81,22 +82,33 @@ def _persist_scan(db: Session, result: dict, tenant_id: int | None, scanned_by_u
     )
 
 
-def _user_can_read_history(db: Session, user: UserOut, owner: str) -> bool:
-    """Scan history isn't gated by GitHub-side authorization the way a live scan is
-    (GitHub itself rejects a bad token/owner combo) -- it's a local DB read, so it
-    needs its own access check. A user may read `owner`'s history if they're a
-    member of the matching workspace Org, they personally have a GitHub App
-    installation connected for that account login, or they're the one who ran a
-    personal scan against that owner before (scanned_by_user_id, for owners with
-    no workspace Org/membership at all -- the raw-PAT-paste flow)."""
+def _user_history_scope(db: Session, user: UserOut, owner: str) -> str | None:
+    """How much of `owner`'s scan history this user may read. Scan history isn't
+    gated by GitHub-side authorization the way a live scan is -- it's a local DB
+    read, so it needs its own check. Returns:
+
+    - ``"all"``  -- the user is a member of the matching workspace Org, or has a
+      personal GitHub App installation for that account login: they see every
+      scan of that owner.
+    - ``"own"``  -- the user's only claim is a personal (BYO-PAT) scan they ran
+      themselves against a login with no workspace Org/membership: they see only
+      their own scans (`scanned_by_user_id`).
+    - ``None``   -- no access.
+    """
     org = org_repo.get_by_login(db, owner)
     if org is not None:
         org = org_repo.ensure_tenant_linked(db, org)
         if tenant_repo.get_membership(db, org.tenant_id, user.id) is not None:
-            return True
+            return "all"
     if installation_repo.get_for_user(db, owner_user_id=user.id, account_login=owner) is not None:
-        return True
-    return scan_results_repo.exists_for_user(db, owner=owner, user_id=user.id)
+        return "all"
+    if scan_results_repo.exists_for_user(db, owner=owner, user_id=user.id):
+        return "own"
+    return None
+
+
+def _user_can_read_history(db: Session, user: UserOut, owner: str) -> bool:
+    return _user_history_scope(db, user, owner) is not None
 
 
 @router.post("/orgs/{org_login}/analytics/overview", response_model=AnalyticsResponse)
@@ -155,19 +167,32 @@ def org_analytics_history(
     return scan_results_repo.list_recent(db, owner=ctx.org.github_login, limit=30)
 
 
+def _billing_num(value: object) -> float:
+    """Coerce a GitHub billing quantity to a float, defaulting a missing / non-numeric
+    field to 0.0 rather than raising (the usage API's numeric fields are documented as
+    required, but we don't want a shape drift to 500 the whole Overview)."""
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
 @router.get("/orgs/{org_login}/usage/actions", response_model=ActionsUsageResponse)
 def org_actions_usage(
+    response: Response,
     ctx: OrgContext = Depends(require_org_role(min_role="admin")),
     db: Session = Depends(get_db),
     x_github_token: str | None = Header(default=None),
 ):
-    """GitHub Actions minutes used this billing cycle for the org (issue #294).
+    """GitHub Actions minutes used this billing month for the org (issue #294).
 
-    **Scaffold — needs a GitHub App permission Clevis does not request by default.**
-    Reading ``/orgs/{org}/settings/billing/actions`` requires the org **Administration**
-    (plan/billing) permission; billing was an explicitly deferred roadmap area. Read-only.
-    When the App lacks it GitHub returns 403, surfaced here as a 400 with a clear hint so
-    the UI can hide the card rather than error the page. No migration.
+    **Needs a GitHub App permission Clevis does not request by default.** Reading
+    ``GET /organizations/{org}/settings/billing/usage/summary`` requires the org
+    **Administration** permission (read); billing was an explicitly deferred roadmap
+    area. Read-only. When the App lacks it GitHub returns 403, surfaced here as a 400
+    with a clear hint so the UI can hide the card rather than error the page.
+
+    This replaces the retired ``/orgs/{org}/settings/billing/actions`` endpoint
+    (GitHub shut it down on 2025-09-26). The response is billing data, so it's served
+    ``Cache-Control: no-store`` — it must never sit in a shared/browser cache where a
+    later, lower-privilege session could read it (CWE-525). No migration.
     """
     try:
         token = resolve_org_token(
@@ -176,9 +201,12 @@ def org_actions_usage(
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    now = datetime.now(timezone.utc)
     try:
         data = GitHubClient(token).request(
-            "GET", f"/orgs/{ctx.org.github_login}/settings/billing/actions"
+            "GET",
+            f"/organizations/{ctx.org.github_login}/settings/billing/usage/summary",
+            params={"year": now.year, "month": now.month, "product": "actions"},
         )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 403:
@@ -193,16 +221,31 @@ def org_actions_usage(
     except httpx.RequestError as exc:
         raise _github_error(exc) from exc
 
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or not isinstance(data.get("usageItems"), list):
         raise HTTPException(status_code=502, detail="Unexpected response from GitHub billing API")
-    breakdown = data.get("minutes_used_breakdown") or {}
+
+    total = included = paid = 0.0
+    breakdown: dict[str, float] = {}
+    for item in data["usageItems"]:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=502, detail="Unexpected response from GitHub billing API")
+        # The summary is already product-filtered, but it still carries Actions
+        # *storage* (unitType "GB") alongside minutes — count only the minutes.
+        if item.get("unitType") != "minutes":
+            continue
+        gross = _billing_num(item.get("grossQuantity"))
+        total += gross
+        included += _billing_num(item.get("discountQuantity"))
+        paid += _billing_num(item.get("netQuantity"))
+        sku = str(item.get("sku") or "actions")
+        breakdown[sku] = breakdown.get(sku, 0.0) + gross
+
+    response.headers["Cache-Control"] = "no-store"
     return ActionsUsageResponse(
-        total_minutes_used=data.get("total_minutes_used", 0) or 0,
-        total_paid_minutes_used=data.get("total_paid_minutes_used", 0) or 0,
-        included_minutes=data.get("included_minutes", 0) or 0,
-        minutes_used_breakdown={
-            str(k): int(v) for k, v in breakdown.items() if isinstance(v, (int, float))
-        },
+        total_minutes_used=total,
+        included_minutes_used=included,
+        paid_minutes_used=paid,
+        minutes_used_breakdown=breakdown,
     )
 
 
@@ -215,6 +258,77 @@ def personal_analytics_history(
     if not _user_can_read_history(db, user, owner):
         raise HTTPException(status_code=403, detail="You don't have access to this owner's scan history")
     return scan_results_repo.list_recent(db, owner=owner, limit=30)
+
+
+# ---------------------------------------------------------------------------
+# Compliance export (issue #293) -- the full scan-history rows *with* each
+# scan's per-check breakdown, over an optional [since, until] window, so an
+# auditor can pull a reporting period. Same access gating as the history
+# endpoints above; the CSV rendering itself is done client-side.
+# ---------------------------------------------------------------------------
+
+_EXPORT_MAX_ROWS = 5000
+
+
+def _export_window(since: date | None, until: date | None) -> tuple[datetime | None, datetime | None]:
+    if since is not None and until is not None and since > until:
+        raise HTTPException(status_code=422, detail="`since` must not be after `until`")
+    since_dt = datetime.combine(since, datetime.min.time(), tzinfo=timezone.utc) if since else None
+    # `until` is an inclusive calendar day: widen it to the end of that day so a
+    # scan run at 14:00 on the `until` date isn't silently dropped.
+    until_dt = (
+        datetime.combine(until, datetime.max.time(), tzinfo=timezone.utc) if until else None
+    )
+    return since_dt, until_dt
+
+
+def _build_export_response(rows: list[dict], limit: int) -> ScanExportResponse:
+    # list_for_export fetches limit+1 so a full page is distinguishable from a
+    # truncated one -- a compliance export must never be silently partial.
+    truncated = len(rows) > limit
+    entries = rows[:limit]
+    return ScanExportResponse(truncated=truncated, row_count=len(entries), entries=entries)
+
+
+@router.get("/orgs/{org_login}/analytics/export", response_model=ScanExportResponse)
+def org_analytics_export(
+    since: date | None = None,
+    until: date | None = None,
+    limit: int = Query(_EXPORT_MAX_ROWS, ge=1, le=_EXPORT_MAX_ROWS),
+    ctx: OrgContext = Depends(require_org_role(min_role="member")),
+    db: Session = Depends(get_db),
+):
+    since_dt, until_dt = _export_window(since, until)
+    rows = scan_results_repo.list_for_export(
+        db, owner=ctx.org.github_login, since=since_dt, until=until_dt, limit=limit
+    )
+    return _build_export_response(rows, limit)
+
+
+@router.get("/me/analytics/export", response_model=ScanExportResponse)
+def personal_analytics_export(
+    owner: str,
+    since: date | None = None,
+    until: date | None = None,
+    limit: int = Query(_EXPORT_MAX_ROWS, ge=1, le=_EXPORT_MAX_ROWS),
+    user: UserOut = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    scope = _user_history_scope(db, user, owner)
+    if scope is None:
+        raise HTTPException(status_code=403, detail="You don't have access to this owner's scan history")
+    since_dt, until_dt = _export_window(since, until)
+    rows = scan_results_repo.list_for_export(
+        db,
+        owner=owner,
+        since=since_dt,
+        until=until_dt,
+        limit=limit,
+        # "own" scope: the caller only ever ran a personal BYO-PAT scan of this
+        # login -- don't hand them scans other users ran (or an org's own rows).
+        scanned_by_user_id=user.id if scope == "own" else None,
+    )
+    return _build_export_response(rows, limit)
 
 
 # ---------------------------------------------------------------------------

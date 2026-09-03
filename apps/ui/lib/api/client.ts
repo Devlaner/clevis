@@ -7,6 +7,7 @@ import type {
   CacheListResponse,
   CheckValue,
   CockpitResponse,
+  CreateIssueResponse,
   DispatchResponse,
   FailedRunsResponse,
   GithubMembershipStatus,
@@ -34,6 +35,7 @@ import type {
   RepoStatsResponse,
   RunsResponse,
   SavedTokenMeta,
+  ScanExportResponse,
   SecretScanningResponse,
   SecurityMatrixResponse,
   SyncInstallationsResponse,
@@ -202,6 +204,14 @@ export const api = {
         `/orgs/${encodeURIComponent(org)}/usage/actions`,
         githubTokenHeader(token),
       ),
+    // Compliance export (issue #293): full scan history with per-check detail, for
+    // an optional [since, until] day window. The caller renders CSV from this.
+    exportHistory: (owner: string, since?: string, until?: string) => {
+      const params = new URLSearchParams({ owner })
+      if (since) params.set("since", since)
+      if (until) params.set("until", until)
+      return get<ScanExportResponse>(`/me/analytics/export?${params.toString()}`)
+    },
     // token is optional — same App-or-PAT fallback as the rest of this namespace,
     // carried via header since this is a GET (see githubTokenHeader).
     cockpit: (owner: string, token?: string) =>
@@ -234,6 +244,25 @@ export const api = {
       get<SecretScanningResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/secret-scanning`,
         githubTokenHeader(token),
+      ),
+    // "Fix this" (issue #287): apply the automated fix for a failing check in
+    // {owner}/{repo}. Needs the resolved token to carry the relevant write scope;
+    // a 403 from GitHub comes back as a 400 with a permission hint. Admin-gated
+    // when `owner` is a connected Clevis org.
+    remediate: (owner: string, repo: string, checkId: string, token?: string) =>
+      post<{ check_id: string; repo: string; remediated: boolean }>(
+        `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/security/checks/${encodeURIComponent(checkId)}/remediate`,
+        { token: token || undefined },
+      ),
+  },
+  issues: {
+    // Create a GitHub issue from a Clevis finding (issue #286). Needs the resolved
+    // token (App installation or PAT) to carry `Issues: write`; a 403 from GitHub
+    // surfaces here as a 400. Admin-gated when `owner` is a connected Clevis org.
+    create: (owner: string, repo: string, body: { title: string; body: string }, token?: string) =>
+      post<CreateIssueResponse>(
+        `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues`,
+        { ...body, token: token || undefined },
       ),
   },
   cache: {
