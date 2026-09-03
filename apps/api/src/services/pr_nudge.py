@@ -65,9 +65,9 @@ def _is_stale(pr: dict, cutoff: datetime) -> bool:
 
 
 def _already_nudged(client: GitHubClient, owner: str, repo: str, number: int) -> bool:
-    comments = client.request(
-        "GET", f"/repos/{owner}/{repo}/issues/{number}/comments", params={"per_page": 100}
-    )
+    # Paginate: on a heavily-commented PR the marker would be past the first page
+    # and we'd post a duplicate nudge.
+    comments = client.request_paginated(f"/repos/{owner}/{repo}/issues/{number}/comments")
     return any(_NUDGE_MARKER in (c.get("body") or "") for c in comments)
 
 
@@ -95,10 +95,11 @@ def run_nudge_sweep(
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(days=stale_days)
 
-    prs = client.request(
-        "GET",
+    # Paginate: a repo with >100 open PRs is exactly the stale-backlog case this
+    # feature targets — a single page would silently ignore the rest.
+    prs = client.request_paginated(
         f"/repos/{owner}/{repo}/pulls",
-        params={"state": "open", "sort": "created", "direction": "asc", "per_page": 100},
+        params={"state": "open", "sort": "created", "direction": "asc"},
     )
 
     results: list[NudgeResult] = []

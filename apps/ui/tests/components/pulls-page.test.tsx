@@ -238,6 +238,8 @@ describe("PullRequestsPage", () => {
     // Wait for the PR list to load so the button is enabled.
     await screen.findAllByText(/Waiting PR/);
     fireEvent.click(screen.getByRole("button", { name: "Nudge stale PRs" }));
+    // Two-step confirm.
+    fireEvent.click(await screen.findByRole("button", { name: "Click again to confirm" }));
 
     await waitFor(() => expect(screen.getByText("Nudged 1 pull request.")).toBeInTheDocument());
     expect(prNudgesSweepMock).toHaveBeenCalledWith("acme", "acme", "api", "");
@@ -262,6 +264,7 @@ describe("PullRequestsPage", () => {
 
     await screen.findAllByText(/Waiting PR/);
     fireEvent.click(screen.getByRole("button", { name: "Nudge stale PRs" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Click again to confirm" }));
 
     await waitFor(() =>
       expect(screen.getByText(/Pull requests: write/)).toBeInTheDocument(),

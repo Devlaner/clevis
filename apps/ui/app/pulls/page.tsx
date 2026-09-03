@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
 import { Button } from "@/components/ui/button"
@@ -81,7 +81,10 @@ export default function PullRequestsPage() {
   const isLoading = reposQuery.isLoading || (reposQuery.isSuccess && pullsQuery.isLoading)
 
   // Issue #289: on-demand "nudge stale PRs" sweep, fanned out over the org's repos.
+  // Two-step confirm (like the cache-clear / "Fix this" buttons) so a misclick can't
+  // fan public nudge comments across every repo at once.
   const [nudgeMsg, setNudgeMsg] = useState<string | null>(null)
+  const [nudgeArmed, setNudgeArmed] = useState(false)
   const nudge = useMutation({
     mutationFn: async () => {
       let nudged = 0
@@ -112,6 +115,12 @@ export default function PullRequestsPage() {
     onError: (e) => setNudgeMsg(e instanceof Error ? e.message : "Nudge failed."),
   })
 
+  useEffect(() => {
+    if (!nudgeArmed) return
+    const t = setTimeout(() => setNudgeArmed(false), 4000)
+    return () => clearTimeout(t)
+  }, [nudgeArmed])
+
   const byAuthor = new Map<string, PullRow[]>()
   for (const p of pulls) {
     const author = p.user ?? "unknown"
@@ -133,11 +142,16 @@ export default function PullRequestsPage() {
               variant="outline"
               disabled={pulls.length === 0 || nudge.isPending}
               onClick={() => {
-                setNudgeMsg(null)
-                nudge.mutate()
+                if (nudgeArmed) {
+                  setNudgeArmed(false)
+                  setNudgeMsg(null)
+                  nudge.mutate()
+                } else {
+                  setNudgeArmed(true)
+                }
               }}
             >
-              {nudge.isPending ? "Nudging…" : "Nudge stale PRs"}
+              {nudge.isPending ? "Nudging…" : nudgeArmed ? "Click again to confirm" : "Nudge stale PRs"}
             </Button>
             <div className="flex items-center gap-1.5" role="group" aria-label="Group pull requests by">
               {(["repo", "author"] as const).map((g) => (
