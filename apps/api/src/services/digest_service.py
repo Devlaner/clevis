@@ -73,13 +73,16 @@ def build_digest(db: Session, *, tenant_id: int, org_login: str, period_label: s
                 if isinstance(c, dict) and c.get("status") in ("fail", "error")
             ][:_MAX_RISK_ITEMS]
 
-    since = datetime.now(timezone.utc) - timedelta(days=_ACTIVITY_WINDOW_DAYS)
+    # Inclusive lower bound: the window is _ACTIVITY_WINDOW_DAYS calendar days
+    # counting today, i.e. today and the six days before it -- subtracting the full
+    # 7 would span 8 daily buckets and overreport.
+    since = (datetime.now(timezone.utc) - timedelta(days=_ACTIVITY_WINDOW_DAYS - 1)).date()
     push_count = db.execute(
         text(
             "SELECT COALESCE(SUM(count), 0) FROM repo_event_daily_counts "
             "WHERE tenant_id = :t AND event_type = 'push' AND day >= :since"
         ),
-        {"t": tenant_id, "since": since.date()},
+        {"t": tenant_id, "since": since},
     ).scalar()
 
     return DigestContent(

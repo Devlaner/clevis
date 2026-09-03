@@ -227,6 +227,26 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(configUpdateMock).toHaveBeenCalledWith("digest_cadence", "off"));
   });
 
+  it("renders a persisted non-default cadence and associates the label with the select", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({
+      worker_poll_seconds: "5",
+      registration_enabled: "true",
+      digest_cadence: "monthly",
+    });
+
+    renderPage();
+
+    // The label is programmatically tied to the control (htmlFor / id), so
+    // getByLabelText resolves it, and the persisted value is what shows.
+    const cadence = (await screen.findByLabelText("Leadership Digest")) as HTMLSelectElement;
+    expect(cadence.tagName).toBe("SELECT");
+    expect(cadence.value).toBe("monthly");
+    expect(screen.getByDisplayValue("Monthly")).toBe(cadence);
+  });
+
   it("shows a success banner and strips the query param when landing with ?installed=1", async () => {
     searchParams = new URLSearchParams({ installed: "1" });
     orgsMineMock.mockResolvedValue([]);

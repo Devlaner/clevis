@@ -1,5 +1,6 @@
 """Tests for src.services.email (issue #217)."""
 
+import ssl
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -71,6 +72,11 @@ def test_sends_via_smtp_with_starttls_and_login(monkeypatch):
 
     mock_cls.assert_called_once_with("smtp.example.com", 587, timeout=10)
     mock_smtp.starttls.assert_called_once()
+    # STARTTLS must be given a verifying SSL context (cert + hostname checks).
+    tls_context = mock_smtp.starttls.call_args.kwargs.get("context")
+    assert isinstance(tls_context, ssl.SSLContext)
+    assert tls_context.verify_mode == ssl.CERT_REQUIRED
+    assert tls_context.check_hostname is True
     mock_smtp.login.assert_called_once_with("smtp-user", "smtp-pass")
     mock_smtp.send_message.assert_called_once()
     sent_message = mock_smtp.send_message.call_args[0][0]

@@ -619,13 +619,15 @@ function InstanceConfigSection() {
         {CONFIG_FIELDS.map((field) => {
           const isSavingField = saving === field.key
           const saveContent: React.ReactNode = isSavingField ? <CircleNotch className="size-3 animate-spin" /> : "Save"
+          const fieldId = `cfg-${field.key}`
 
           return (
           <div key={field.key} className="p-4 max-w-lg">
-            <label className="text-xs font-medium text-foreground block mb-1">{field.label}</label>
+            <label htmlFor={fieldId} className="text-xs font-medium text-foreground block mb-1">{field.label}</label>
             <div className="flex items-center gap-2">
               {field.type === "boolean" ? (
                 <select
+                  id={fieldId}
                   value={values[field.key] ?? "true"}
                   onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
                   className="h-8 border border-border bg-transparent px-2 font-mono text-xs"
@@ -635,6 +637,7 @@ function InstanceConfigSection() {
                 </select>
               ) : field.type === "select" ? (
                 <select
+                  id={fieldId}
                   value={values[field.key] ?? field.options?.[0]?.value ?? ""}
                   onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
                   className="h-8 border border-border bg-transparent px-2 font-mono text-xs"
@@ -645,6 +648,7 @@ function InstanceConfigSection() {
                 </select>
               ) : (
                 <Input
+                  id={fieldId}
                   value={values[field.key] ?? ""}
                   onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
                   type={field.type === "number" ? "number" : "text"}

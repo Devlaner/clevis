@@ -82,6 +82,26 @@ def test_build_digest_tolerates_malformed_checks_json(db):
     assert content.failing_checks == []
 
 
+def test_activity_window_is_seven_inclusive_days(db):
+    # The window is today + the six days before it. An event 6 days old counts;
+    # one 7 days old (the 8th bucket) does not.
+    org = org_repo.get_or_create(db, github_login="digest-window-edge")
+    scan_results_repo.insert(db, owner="digest-window-edge", score=90, total_checks=1, failed_checks=0, checks=[], tenant_id=org.tenant_id)
+    _set_tenant(db, org.tenant_id)
+    today = datetime.now(timezone.utc).date()
+    db.execute(
+        text(
+            "INSERT INTO repo_event_daily_counts (tenant_id, repo, event_type, day, count) VALUES "
+            "(:t, 'r/x', 'push', :d6, 6), (:t, 'r/x', 'push', :d7, 7)"
+        ),
+        {"t": org.tenant_id, "d6": today - timedelta(days=6), "d7": today - timedelta(days=7)},
+    )
+    db.commit()
+    _set_tenant(db, org.tenant_id)
+    content = digest_service.build_digest(db, tenant_id=org.tenant_id, org_login="digest-window-edge", period_label="weekly")
+    assert content.push_events_7d == 6
+
+
 def test_old_push_events_are_outside_the_activity_window(db):
     org = org_repo.get_or_create(db, github_login="digest-stale-activity")
     scan_results_repo.insert(db, owner="digest-stale-activity", score=90, total_checks=1, failed_checks=0, checks=[], tenant_id=org.tenant_id)

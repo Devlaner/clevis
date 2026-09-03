@@ -72,6 +72,14 @@ def run_digest_sweep(db: Session) -> None:
     for tenant_id, org_login in tenants:
         try:
             set_session_tenant(db, tenant_id)
+
+            # Serialise the check-then-send window across replicas (see sweep_lock.py).
+            if not try_acquire_sweep_slot(db, _SWEEP_KEY, tenant_id):
+                continue
+
+            # Read the last-sent marker *after* taking the slot. Another replica may
+            # have sent and committed its digest.sent row between this tick's tenant
+            # query and now; checking before the lock lets both replicas past.
             last_sent = _last_sent_at(db, tenant_id)
             if last_sent is not None:
                 if last_sent.tzinfo is None:
@@ -79,11 +87,8 @@ def run_digest_sweep(db: Session) -> None:
                 # 12h grace so the digest doesn't drift a poll-interval later every
                 # period (timedelta.days floors; the send only lands on a poll tick).
                 if now - last_sent < timedelta(days=interval_days, hours=-12):
+                    db.commit()  # release the advisory slot; not due yet
                     continue
-
-            # Serialise the check-then-send window across replicas (see sweep_lock.py).
-            if not try_acquire_sweep_slot(db, _SWEEP_KEY, tenant_id):
-                continue
 
             recipients = _recipients(db, tenant_id)
             if not recipients:

@@ -94,6 +94,40 @@ def test_recently_sent_org_is_skipped(db):
     send.assert_not_called()
 
 
+def test_due_state_is_rechecked_after_acquiring_the_slot(db):
+    # Another replica sends (and commits its digest.sent row) in the window between
+    # this sweep's tenant query and its slot acquisition. The recheck *after*
+    # try_acquire_sweep_slot must catch that and not send a duplicate.
+    org = _seed_org_with_scan(db, "digest-sweep-race")
+    _admin(db, org.tenant_id, "race-admin@e.com")
+
+    real_acquire = digest_sweep.try_acquire_sweep_slot
+
+    def acquire_then_simulate_peer(session, key, tenant_id):
+        got = real_acquire(session, key, tenant_id)
+        if got:
+            session.execute(text(f"SET app.tenant_id = {int(tenant_id)}"))
+            session.execute(
+                text(
+                    "INSERT INTO audit_logs (actor, action, target, payload, tenant_id, created_at) "
+                    "VALUES ('system:digest', 'digest.sent', 'peer', '{}', :t, now())"
+                ),
+                {"t": tenant_id},
+            )
+        return got
+
+    with (
+        patch("src.services.digest_sweep.get_config", return_value="weekly"),
+        patch("src.services.digest_sweep.email.is_configured", return_value=True),
+        patch("src.services.digest_sweep.email.send_email") as send,
+        patch("src.services.digest_sweep.try_acquire_sweep_slot", side_effect=acquire_then_simulate_peer),
+    ):
+        run_digest_sweep(db)
+
+    send.assert_not_called()
+    assert _audit_rows(db, org.tenant_id) == 1  # only the peer's row, no second send
+
+
 def test_org_with_no_verified_admin_is_skipped(db):
     org = _seed_org_with_scan(db, "digest-sweep-noadmin")
     _admin(db, org.tenant_id, "noadmin-unverified@e.com", verified=False)
