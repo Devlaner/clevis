@@ -236,6 +236,15 @@ export const api = {
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/secret-scanning`,
         githubTokenHeader(token),
       ),
+    // "Fix this" (issue #287): apply the automated fix for a failing check in
+    // {owner}/{repo}. Needs the resolved token to carry the relevant write scope;
+    // a 403 from GitHub comes back as a 400 with a permission hint. Admin-gated
+    // when `owner` is a connected Clevis org.
+    remediate: (owner: string, repo: string, checkId: string, token?: string) =>
+      post<{ check_id: string; repo: string; remediated: boolean }>(
+        `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/security/checks/${encodeURIComponent(checkId)}/remediate`,
+        { token: token || undefined },
+      ),
   },
   issues: {
     // Create a GitHub issue from a Clevis finding (issue #286). Needs the resolved
