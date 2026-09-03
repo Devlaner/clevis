@@ -472,7 +472,8 @@ describe("api.security.remediate (issue #287)", () => {
       "/me/repos/acme%20corp/api/security/checks/repository_secret_scanning_enabled/remediate",
     );
     expect((init as RequestInit).method).toBe("POST");
-    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: undefined });
+    // JSON.stringify drops the undefined token, so the wire body is an empty object.
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({});
   });
 
   it("forwards a supplied token in the body", async () => {

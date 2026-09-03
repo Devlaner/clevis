@@ -18,11 +18,21 @@ settings + branch protection) and ``security_events:write`` /
 from GitHub is surfaced to the caller as a clear 400.
 """
 
+from urllib.parse import quote
+
+import httpx
+
 from src.services.github_client import GitHubClient
 
 
 class RemediationNotSupported(Exception):
     """The given check_id has no automated fix (see the module docstring)."""
+
+
+class RemediationConflict(Exception):
+    """The fix would have to overwrite existing configuration that can't be
+    faithfully reconstructed through the API (see _protect_default_branch).
+    Surfaced to the caller as a 409 rather than silently clobbering it."""
 
 
 # A deliberately conservative default for a branch that has no protection at all:
@@ -56,11 +66,83 @@ def _enable_dependabot_alerts(client: GitHubClient, owner: str, repo: str) -> No
 def _protect_default_branch(client: GitHubClient, owner: str, repo: str) -> None:
     info = client.request("GET", f"/repos/{owner}/{repo}")
     branch = info.get("default_branch", "main") if isinstance(info, dict) else "main"
-    client.request(
-        "PUT",
-        f"/repos/{owner}/{repo}/branches/{branch}/protection",
-        json=_DEFAULT_BRANCH_PROTECTION,
-    )
+    # A branch name can contain slashes ("release/1.x"); keep it one path segment.
+    path = f"/repos/{owner}/{repo}/branches/{quote(branch, safe='')}/protection"
+
+    current = _get_branch_protection(client, path)
+    if not current:
+        # No protection at all -> apply the conservative default.
+        client.request("PUT", path, json=_DEFAULT_BRANCH_PROTECTION)
+        return
+
+    # Protection already exists (the "allows force pushes" check): carry every rule
+    # that's already configured across unchanged and only turn force-pushes off.
+    # Re-sending _DEFAULT_BRANCH_PROTECTION would silently drop required status
+    # checks, stricter review rules, linear-history, etc.
+    body = _preserving_put_body(current)
+    body["allow_force_pushes"] = False
+    client.request("PUT", path, json=body)
+
+
+def _get_branch_protection(client: GitHubClient, path: str) -> dict | None:
+    """Current branch protection, or None when the branch has none (GitHub 404s)."""
+    try:
+        result = client.request("GET", path)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return None
+        raise
+    return result if isinstance(result, dict) and result else None
+
+
+def _preserving_put_body(current: dict) -> dict:
+    """Translate GitHub's *GET* branch-protection response into the *PUT* body
+    shape, keeping every currently-enabled rule."""
+    if isinstance(current.get("restrictions"), dict):
+        # PUT wants restrictions as {users:[login], teams:[slug], apps:[slug]}, but
+        # GET returns full objects and the field only works on org-owned repos.
+        # Getting this wrong could lock maintainers out -- refuse instead.
+        raise RemediationConflict(
+            "This branch's protection restricts who can push (specific users, teams "
+            "or apps). Clevis can't rewrite that safely through the API -- turn off "
+            "\"Allow force pushes\" for the default branch manually."
+        )
+
+    def _enabled(key: str) -> bool:
+        value = current.get(key)
+        return bool(value.get("enabled")) if isinstance(value, dict) else bool(value)
+
+    status_checks = current.get("required_status_checks")
+    if isinstance(status_checks, dict):
+        status_checks = {
+            "strict": bool(status_checks.get("strict")),
+            "contexts": list(status_checks.get("contexts") or []),
+        }
+    else:
+        status_checks = None
+
+    reviews = current.get("required_pull_request_reviews")
+    if isinstance(reviews, dict):
+        reviews = {
+            "dismiss_stale_reviews": bool(reviews.get("dismiss_stale_reviews")),
+            "require_code_owner_reviews": bool(reviews.get("require_code_owner_reviews")),
+            "required_approving_review_count": int(
+                reviews.get("required_approving_review_count", 1)
+            ),
+        }
+    else:
+        reviews = None
+
+    return {
+        "required_status_checks": status_checks,
+        "enforce_admins": _enabled("enforce_admins"),
+        "required_pull_request_reviews": reviews,
+        "restrictions": None,
+        "required_linear_history": _enabled("required_linear_history"),
+        "allow_deletions": _enabled("allow_deletions"),
+        "block_creations": _enabled("block_creations"),
+        "required_conversation_resolution": _enabled("required_conversation_resolution"),
+    }
 
 
 _REMEDIATIONS = {

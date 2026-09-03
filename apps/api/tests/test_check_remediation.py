@@ -88,11 +88,18 @@ def test_admin_enables_secret_scanning_and_audits(client, db, user):
     assert log.target == "acme/api"
 
 
-def test_admin_applies_branch_protection_using_the_default_branch(client, db, user):
+def _not_found() -> httpx.HTTPStatusError:
+    return httpx.HTTPStatusError(
+        "404", request=httpx.Request("GET", "https://api.github.com"), response=httpx.Response(404)
+    )
+
+
+def test_admin_applies_default_branch_protection_when_the_branch_has_none(client, db, user):
     _admin_org(db, user)
     with patch("src.routers.remediation.GitHubClient") as mock_client:
         mock_client.return_value.request.side_effect = [
             {"default_branch": "trunk"},  # GET /repos/acme/api
+            _not_found(),                  # GET protection -> branch is unprotected
             {},                            # PUT protection
         ]
         resp = client.post(_url(BP), json={"token": "ghp_admin"})
@@ -100,8 +107,70 @@ def test_admin_applies_branch_protection_using_the_default_branch(client, db, us
     assert resp.status_code == 200
     calls = mock_client.return_value.request.call_args_list
     assert calls[0][0][:2] == ("GET", "/repos/acme/api")
-    assert calls[1][0][:2] == ("PUT", "/repos/acme/api/branches/trunk/protection")
-    assert calls[1].kwargs["json"]["allow_force_pushes"] is False
+    assert calls[1][0][:2] == ("GET", "/repos/acme/api/branches/trunk/protection")
+    assert calls[2][0][:2] == ("PUT", "/repos/acme/api/branches/trunk/protection")
+    assert calls[2].kwargs["json"]["allow_force_pushes"] is False
+
+
+def test_branch_with_a_slash_is_encoded_as_one_path_segment(client, db, user):
+    _admin_org(db, user)
+    with patch("src.routers.remediation.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = [
+            {"default_branch": "release/1.x"},
+            _not_found(),
+            {},
+        ]
+        resp = client.post(_url(BP), json={"token": "ghp_admin"})
+
+    assert resp.status_code == 200
+    calls = mock_client.return_value.request.call_args_list
+    assert calls[2][0][1] == "/repos/acme/api/branches/release%2F1.x/protection"
+
+
+def test_existing_branch_protection_is_preserved_and_only_force_pushes_flipped(client, db, user):
+    _admin_org(db, user)
+    existing = {
+        "required_status_checks": {"strict": True, "contexts": ["ci/build"]},
+        "enforce_admins": {"enabled": True},
+        "required_pull_request_reviews": {"required_approving_review_count": 2},
+        "required_linear_history": {"enabled": True},
+        "allow_force_pushes": {"enabled": True},
+        "allow_deletions": {"enabled": False},
+    }
+    with patch("src.routers.remediation.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = [
+            {"default_branch": "main"},
+            existing,
+            {},
+        ]
+        resp = client.post(_url("repository_default_branch_no_force_push"), json={"token": "ghp_admin"})
+
+    assert resp.status_code == 200
+    put_body = mock_client.return_value.request.call_args_list[2].kwargs["json"]
+    assert put_body["allow_force_pushes"] is False
+    assert put_body["required_status_checks"] == {"strict": True, "contexts": ["ci/build"]}
+    assert put_body["required_pull_request_reviews"]["required_approving_review_count"] == 2
+    assert put_body["enforce_admins"] is True
+    assert put_body["required_linear_history"] is True
+
+
+def test_branch_protection_with_push_restrictions_is_rejected_with_409(client, db, user):
+    _admin_org(db, user)
+    existing = {
+        "allow_force_pushes": {"enabled": True},
+        "restrictions": {"users": [{"login": "octocat"}], "teams": [], "apps": []},
+    }
+    with patch("src.routers.remediation.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = [
+            {"default_branch": "main"},
+            existing,
+        ]
+        resp = client.post(_url("repository_default_branch_no_force_push"), json={"token": "ghp_admin"})
+
+    assert resp.status_code == 409
+    assert "restrict" in resp.json()["detail"].lower()
+    # The write was refused before any PUT went out.
+    assert [c[0][0] for c in mock_client.return_value.request.call_args_list] == ["GET", "GET"]
 
 
 def test_github_403_maps_to_400_with_permission_hint_and_still_audits(client, db, user):

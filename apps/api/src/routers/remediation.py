@@ -97,6 +97,8 @@ def remediate_check(
         check_remediation.remediate(GitHubClient(token), check_id, owner, repo)
     except check_remediation.RemediationNotSupported:
         raise HTTPException(status_code=404, detail=f"No automated fix for check {check_id!r}")
+    except check_remediation.RemediationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 403:
             raise HTTPException(
