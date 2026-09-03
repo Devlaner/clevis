@@ -620,6 +620,9 @@ function InstanceConfigSection() {
           const isSavingField = saving === field.key
           const saveContent: React.ReactNode = isSavingField ? <CircleNotch className="size-3 animate-spin" /> : "Save"
           const fieldId = `cfg-${field.key}`
+          // The value a select shows before the user touches it / before the key
+          // is persisted server-side: its first option ("" for non-select fields).
+          const firstOption = field.options?.[0]?.value ?? ""
 
           return (
           <div key={field.key} className="p-4 max-w-lg">
@@ -638,7 +641,7 @@ function InstanceConfigSection() {
               ) : field.type === "select" ? (
                 <select
                   id={fieldId}
-                  value={values[field.key] ?? field.options?.[0]?.value ?? ""}
+                  value={values[field.key] ?? firstOption}
                   onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
                   className="h-8 border border-border bg-transparent px-2 font-mono text-xs"
                 >
@@ -664,7 +667,7 @@ function InstanceConfigSection() {
                     // A select with no persisted value shows its first option but has
                     // no entry in `values` yet -- save that visible value, not "".
                     field.type === "select"
-                      ? (values[field.key] ?? field.options?.[0]?.value ?? "")
+                      ? (values[field.key] ?? firstOption)
                       : undefined,
                   )
                 }

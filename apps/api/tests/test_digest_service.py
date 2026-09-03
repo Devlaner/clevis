@@ -82,13 +82,26 @@ def test_build_digest_tolerates_malformed_checks_json(db):
     assert content.failing_checks == []
 
 
-def test_activity_window_is_seven_inclusive_days(db):
+def test_activity_window_is_seven_inclusive_days(db, monkeypatch):
     # The window is today + the six days before it. An event 6 days old counts;
     # one 7 days old (the 8th bucket) does not.
+    #
+    # Freeze the UTC clock: build_digest reads datetime.now(timezone.utc) itself,
+    # so without this a UTC-midnight rollover between here and the service call
+    # would shift the "6 days old" row to 7 days old and fail the test.
+    fixed_now = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(digest_service, "datetime", _FrozenDatetime)
+
     org = org_repo.get_or_create(db, github_login="digest-window-edge")
     scan_results_repo.insert(db, owner="digest-window-edge", score=90, total_checks=1, failed_checks=0, checks=[], tenant_id=org.tenant_id)
     _set_tenant(db, org.tenant_id)
-    today = datetime.now(timezone.utc).date()
+    today = fixed_now.date()
     db.execute(
         text(
             "INSERT INTO repo_event_daily_counts (tenant_id, repo, event_type, day, count) VALUES "
