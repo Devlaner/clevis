@@ -55,4 +55,34 @@ describe("WorkflowLintCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Lint workflows" }))
     await waitFor(() => expect(screen.getByText("No policy issues found.")).toBeInTheDocument())
   })
+
+  it("shows a scanning state while the request is in flight", async () => {
+    let finish: (v: unknown) => void = () => {}
+    mockScan.mockReturnValueOnce(new Promise((res) => { finish = res }))
+    renderCard()
+    fireEvent.click(screen.getByRole("button", { name: "Lint workflows" }))
+    expect(await screen.findByRole("button", { name: "Scanning…" })).toBeInTheDocument()
+    finish({ findings: [], fixable: false, pr_url: null })
+    await waitFor(() => expect(screen.getByText("No policy issues found.")).toBeInTheDocument())
+  })
+
+  it("surfaces an error message from the API and renders an unknown severity plainly", async () => {
+    mockScan.mockResolvedValueOnce({
+      findings: [{ path: ".github/workflows/x.yml", rule: "r", severity: "info", message: "fyi" }],
+      fixable: false,
+      pr_url: null,
+    })
+    const { rerender } = renderCard()
+    fireEvent.click(screen.getByRole("button", { name: "Lint workflows" }))
+    await waitFor(() => expect(screen.getByText("info")).toBeInTheDocument())
+
+    mockScan.mockRejectedValueOnce(new Error("needs Contents / Pull requests / Workflows write"))
+    rerender(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { mutations: { retry: false } } })}>
+        <WorkflowLintCard owner="acme" repo="api" token="" />
+      </QueryClientProvider>,
+    )
+    fireEvent.click(screen.getByRole("button", { name: "Lint workflows" }))
+    await waitFor(() => expect(screen.getByText(/Workflows write/)).toBeInTheDocument())
+  })
 })
