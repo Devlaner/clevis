@@ -12,6 +12,7 @@ import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { CHART_COLORS } from "@/lib/charts/theme"
+import { WorkflowLintCard } from "@/components/automation/workflow-lint-card"
 import { relativeTime } from "@/lib/format"
 import type { InstallationMeta, RunSummary, WorkflowSummary } from "@/lib/api/types"
 
@@ -379,6 +380,10 @@ export default function AutomationPage() {
             </>
           </div>
         )}
+      </div>
+
+      <div className="mt-4">
+        <WorkflowLintCard owner={owner} repo={repo} token={token} />
       </div>
     </>
   )

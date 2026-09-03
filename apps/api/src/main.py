@@ -28,6 +28,7 @@ from src.routers import (
     security,
     tokens,
     webhooks,
+    workflow_lint,
 )
 from src.services.gap_heal_loop import gap_heal_loop
 from src.services.membership_reconcile_loop import membership_reconcile_loop
@@ -92,6 +93,7 @@ app.include_router(security.router, tags=["security"])
 app.include_router(issues.router, tags=["issues"])
 app.include_router(remediation.router, tags=["security"])
 app.include_router(automation.router, tags=["automation"])
+app.include_router(workflow_lint.router, tags=["automation"])
 app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(tokens.router, prefix="/tokens", tags=["tokens"])

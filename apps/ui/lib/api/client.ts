@@ -38,6 +38,7 @@ import type {
   SecretScanningResponse,
   SecurityMatrixResponse,
   SyncInstallationsResponse,
+  WorkflowLintResponse,
   WorkflowsResponse,
 } from "./types"
 
@@ -316,6 +317,22 @@ export const api = {
       post<DispatchResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflows/${workflowId}/dispatch`,
         { ...body, token: body.token || undefined },
+      ),
+  },
+  workflowLint: {
+    // Lint {owner}/{repo}'s .github/workflows (issue #291). open_pr: true opens a fix
+    // PR (org-admin only, needs Contents/Pull requests/Workflows write) and returns its
+    // URL. A 400 with a docs pointer means the App is missing a scope.
+    scan: (
+      org: string,
+      owner: string,
+      repo: string,
+      body: { open_pr: boolean },
+      token?: string,
+    ) =>
+      post<WorkflowLintResponse>(
+        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflow-lint`,
+        { ...body, token: token || undefined },
       ),
   },
   github: {
