@@ -505,6 +505,37 @@ describe("api.security.remediate (issue #287)", () => {
   });
 });
 
+describe("api.prNudges.sweep (issue #289)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("POSTs the org-scoped nudge path and forwards a supplied token", async () => {
+    const body = { mode: "comment", stale_days: 3, results: [] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))),
+    );
+    const result = await api.prNudges.sweep("acme", "acme", "api", "ghp_admin");
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain("/orgs/acme/repos/acme/api/pr-nudges");
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: "ghp_admin" });
+    expect(result).toEqual(body);
+  });
+
+  it("omits the token when none is supplied", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify({ mode: "off", stale_days: 3, results: [] }), { status: 200 }))),
+    );
+    await api.prNudges.sweep("acme", "acme", "api");
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({});
+  });
+});
+
 describe("api.github", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

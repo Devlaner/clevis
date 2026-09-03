@@ -1,8 +1,9 @@
 "use client"
 
-import { useState } from "react"
-import { useQuery } from "@tanstack/react-query"
+import { useEffect, useState } from "react"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
+import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { SectionError } from "@/components/section-error"
 import { EmptyStateNoAccount } from "@/components/empty-state"
@@ -79,6 +80,57 @@ export default function PullRequestsPage() {
   const pulls = pullsQuery.data ?? []
   const isLoading = reposQuery.isLoading || (reposQuery.isSuccess && pullsQuery.isLoading)
 
+  // Issue #289: on-demand "nudge stale PRs" sweep, fanned out over the org's repos.
+  // Two-step confirm (like the cache-clear / "Fix this" buttons) so a misclick can't
+  // fan public nudge comments across every repo at once.
+  const [nudgeMsg, setNudgeMsg] = useState<string | null>(null)
+  const [nudgeArmed, setNudgeArmed] = useState(false)
+  const nudge = useMutation({
+    mutationFn: async () => {
+      let nudged = 0
+      const failed: string[] = []
+      let sawPermissionError = false
+      for (let i = 0; i < repoNames.length; i += REPO_BATCH_SIZE) {
+        const batch = repoNames.slice(i, i + REPO_BATCH_SIZE)
+        const counts = await Promise.all(
+          batch.map((repo) =>
+            api.prNudges
+              .sweep(org, org, repo, token)
+              .then((r) => r.results.filter((x) => x.action === "commented" || x.action === "labeled").length)
+              .catch((e: unknown) => {
+                failed.push(repo)
+                const msg = e instanceof Error ? e.message : ""
+                if (/pull requests|permission/i.test(msg)) sawPermissionError = true
+                return 0
+              }),
+          ),
+        )
+        nudged += counts.reduce((a, b) => a + b, 0)
+      }
+      if (failed.length === repoNames.length && repoNames.length > 0) {
+        // Every repo failed — lead with the most likely cause when it's a permission
+        // error, otherwise report the failure plainly rather than guessing.
+        throw new Error(
+          sawPermissionError
+            ? "Couldn't nudge any repository — the GitHub App may be missing the 'Pull requests: write' permission. See docs/self-hosting.md."
+            : `Couldn't nudge any repository (${failed.length} failed).`,
+        )
+      }
+      return { nudged, failed }
+    },
+    onSuccess: ({ nudged, failed }) => {
+      const base = `Nudged ${nudged} pull request${nudged === 1 ? "" : "s"}.`
+      setNudgeMsg(failed.length > 0 ? `${base} ${failed.length} repositor${failed.length === 1 ? "y" : "ies"} failed: ${failed.join(", ")}.` : base)
+    },
+    onError: (e) => setNudgeMsg(e instanceof Error ? e.message : "Nudge failed."),
+  })
+
+  useEffect(() => {
+    if (!nudgeArmed) return
+    const t = setTimeout(() => setNudgeArmed(false), 4000)
+    return () => clearTimeout(t)
+  }, [nudgeArmed])
+
   const byAuthor = new Map<string, PullRow[]>()
   for (const p of pulls) {
     const author = p.user ?? "unknown"
@@ -95,6 +147,22 @@ export default function PullRequestsPage() {
           <span className="section-title">Open Pull Requests</span>
           <div className="flex items-center gap-3">
             {pulls.length > 0 && <span className="stat-chip">{pulls.length} total</span>}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={pulls.length === 0 || nudge.isPending}
+              onClick={() => {
+                if (nudgeArmed) {
+                  setNudgeArmed(false)
+                  setNudgeMsg(null)
+                  nudge.mutate()
+                } else {
+                  setNudgeArmed(true)
+                }
+              }}
+            >
+              {nudge.isPending ? "Nudging…" : nudgeArmed ? "Click again to confirm" : "Nudge stale PRs"}
+            </Button>
             <div className="flex items-center gap-1.5" role="group" aria-label="Group pull requests by">
               {(["repo", "author"] as const).map((g) => (
                 <button
@@ -114,6 +182,9 @@ export default function PullRequestsPage() {
             </div>
           </div>
         </div>
+        {nudgeMsg && (
+          <p className="px-4 py-2 text-xs text-muted-foreground border-b border-border">{nudgeMsg}</p>
+        )}
         {!hasOrg ? (
           <EmptyStateNoAccount bare />
         ) : reposQuery.isError ? (
