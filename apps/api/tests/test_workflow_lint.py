@@ -74,6 +74,24 @@ def test_does_not_auto_fix_when_the_workflow_uses_secrets():
     assert result.findings and not result.fixable
 
 
+def test_does_not_auto_fix_when_secrets_use_the_bracket_index_form():
+    text = _BAD_PRT.replace("npm test", "deploy ${{ secrets['DEPLOY_KEY'] }}")
+    result = lint(WorkflowFile("w.yml", text, "sha1"))
+    assert result.findings and not result.fixable
+
+
+def test_does_not_auto_fix_when_pull_request_is_already_a_trigger():
+    text = _BAD_PRT.replace("on: pull_request_target", "on: [pull_request, pull_request_target]")
+    result = lint(WorkflowFile("w.yml", text, "sha1"))
+    assert result.findings and not result.fixable  # a blind replace would duplicate the trigger
+
+
+def test_does_not_auto_fix_when_pull_request_target_appears_more_than_once():
+    text = _BAD_PRT + "\n# note: pull_request_target is dangerous\n"
+    result = lint(WorkflowFile("w.yml", text, "sha1"))
+    assert result.findings and not result.fixable  # the 2nd occurrence is in a comment
+
+
 def test_flags_untrusted_input_interpolated_into_run():
     result = lint(WorkflowFile("w.yml", _INJECTION, "sha1"))
     assert [f.rule for f in result.findings] == ["untrusted_input_in_run"]
@@ -149,8 +167,9 @@ def _blob(text):
     return {"content": base64.b64encode(text.encode()).decode(), "sha": "blobsha"}
 
 
-def _github(mock, *, workflows: dict[str, str], open_pr_ok=True):
-    """workflows: {filename: yaml text}."""
+def _github(mock, *, workflows: dict[str, str], existing_pr_url: str | None = None):
+    """workflows: {filename: yaml text}. existing_pr_url: if set, GET .../pulls returns
+    an open fix PR (the idempotent path)."""
     inst = mock.return_value
     calls = {"refs": [], "puts": [], "pulls": []}
 
@@ -166,10 +185,12 @@ def _github(mock, *, workflows: dict[str, str], open_pr_ok=True):
             return {"default_branch": "main"}
         if "/git/ref/heads/" in path:
             return {"object": {"sha": "basesha"}}
+        if method == "GET" and path.endswith("/pulls"):
+            return [{"html_url": existing_pr_url}] if existing_pr_url else []
         if method == "POST" and path.endswith("/git/refs"):
             calls["refs"].append(json)
             return {}
-        if path.endswith("/contents/.github/workflows/bad.yml") or "/contents/.github/workflows/" in path:
+        if "/contents/.github/workflows/" in path:
             if method == "PUT":
                 calls["puts"].append(json)
                 return {}
@@ -357,6 +378,53 @@ def test_open_pr_resets_an_existing_fix_branch(client, db, user):
             json={"token": "ghp_admin", "open_pr": True},
         )
     assert resp.status_code == 200 and seen["patched"] is True
+
+
+def test_open_pr_surfaces_a_non_422_branch_create_error(client, db, user):
+    _admin_org(db, user)
+
+    def request(method, path, params=None, json=None):
+        if path.endswith("/contents/.github/workflows"):
+            return [{"name": "bad.yml", "path": ".github/workflows/bad.yml", "url": "blob:bad"}]
+        if path == "blob:bad":
+            return _blob(_BAD_PRT)
+        if path.endswith("/repos/acme/api"):
+            return {"default_branch": "main"}
+        if "/git/ref/heads/" in path:
+            return {"object": {"sha": "basesha"}}
+        if method == "GET" and path.endswith("/pulls"):
+            return []
+        if method == "POST" and path.endswith("/git/refs"):
+            raise httpx.HTTPStatusError(
+                "500", request=httpx.Request("POST", "https://api.github.com"), response=httpx.Response(500)
+            )
+        return {}
+
+    with patch("src.routers.workflow_lint.GitHubClient") as mock:
+        mock.return_value.request.side_effect = request
+        resp = client.post(
+            "/orgs/acme/repos/acme/api/workflow-lint",
+            json={"token": "ghp_admin", "open_pr": True},
+        )
+    assert resp.status_code >= 400 and "Workflows" not in resp.json()["detail"]
+
+
+def test_open_pr_is_idempotent_when_a_fix_pr_is_already_open(client, db, user):
+    _admin_org(db, user)
+    with patch("src.routers.workflow_lint.GitHubClient") as mock:
+        _inst, calls = _github(
+            mock,
+            workflows={"bad.yml": _BAD_PRT},
+            existing_pr_url="https://github.com/acme/api/pull/7",
+        )
+        resp = client.post(
+            "/orgs/acme/repos/acme/api/workflow-lint",
+            json={"token": "ghp_admin", "open_pr": True},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["pr_url"] == "https://github.com/acme/api/pull/7"
+    # the branch isn't reset and no new PR is opened — the files are just refreshed
+    assert not calls["refs"] and not calls["pulls"] and calls["puts"]
 
 
 def test_personal_open_pr_requires_admin_of_a_connected_org(client, db, user):

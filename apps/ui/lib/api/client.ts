@@ -320,18 +320,14 @@ export const api = {
       ),
   },
   workflowLint: {
-    // Lint {owner}/{repo}'s .github/workflows (issue #291). open_pr: true opens a fix
-    // PR (org-admin only, needs Contents/Pull requests/Workflows write) and returns its
-    // URL. A 400 with a docs pointer means the App is missing a scope.
-    scan: (
-      org: string,
-      owner: string,
-      repo: string,
-      body: { open_pr: boolean },
-      token?: string,
-    ) =>
+    // Lint {owner}/{repo}'s .github/workflows (issue #291). Personal route, matching the
+    // rest of the Automation page: an arbitrary free-text owner via App-or-PAT. A scan
+    // needs only membership (or a PAT); open_pr: true needs org-admin when owner is a
+    // connected Clevis org, and opens a fix PR (returns its URL). A 400 with a docs
+    // pointer means the App is missing a write scope.
+    scan: (owner: string, repo: string, body: { open_pr: boolean }, token?: string) =>
       post<WorkflowLintResponse>(
-        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflow-lint`,
+        `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflow-lint`,
         { ...body, token: token || undefined },
       ),
   },

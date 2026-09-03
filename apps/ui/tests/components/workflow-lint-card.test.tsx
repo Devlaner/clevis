@@ -41,12 +41,12 @@ describe("WorkflowLintCard", () => {
 
     await waitFor(() => expect(screen.getByText(/runs untrusted PR code/)).toBeInTheDocument())
     expect(screen.getByText("critical")).toBeInTheDocument()
-    expect(mockScan).toHaveBeenCalledWith("acme", "acme", "api", { open_pr: false }, "")
+    expect(mockScan).toHaveBeenCalledWith("acme", "api", { open_pr: false }, "")
 
     mockScan.mockResolvedValueOnce({ findings: [], fixable: false, pr_url: "https://github.com/acme/api/pull/5" })
     fireEvent.click(screen.getByRole("button", { name: "Open fix PR" }))
     await waitFor(() => expect(screen.getByText(/pull\/5/)).toBeInTheDocument())
-    expect(mockScan).toHaveBeenLastCalledWith("acme", "acme", "api", { open_pr: true }, "")
+    expect(mockScan).toHaveBeenLastCalledWith("acme", "api", { open_pr: true }, "")
   })
 
   it("says so when a clean repo has no findings", async () => {

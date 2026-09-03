@@ -25,7 +25,7 @@ const SEVERITY_STYLE: Record<string, string> = {
 export function WorkflowLintCard({ owner, repo, token }: Props) {
   const scan = useMutation({
     mutationFn: (openPr: boolean) =>
-      api.workflowLint.scan(owner.trim(), owner.trim(), repo.trim(), { open_pr: openPr }, token),
+      api.workflowLint.scan(owner.trim(), repo.trim(), { open_pr: openPr }, token),
   })
 
   const data = scan.data as WorkflowLintResponse | undefined
