@@ -13,6 +13,7 @@ from src.routers import (
     audit,
     auth,
     automation,
+    branch_protection,
     collab,
     config,
     github,
@@ -92,6 +93,7 @@ app.include_router(security.router, tags=["security"])
 app.include_router(issues.router, tags=["issues"])
 app.include_router(remediation.router, tags=["security"])
 app.include_router(automation.router, tags=["automation"])
+app.include_router(branch_protection.router, tags=["automation"])
 app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(tokens.router, prefix="/tokens", tags=["tokens"])

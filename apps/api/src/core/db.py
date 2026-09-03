@@ -522,6 +522,28 @@ class AppConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class AutomationRepoSetting(Base):
+    """Per-(tenant, repo, feature) opt-in switch + saved options for write automations
+    (issue #288 bulk branch protection, issue #290 Dependabot triage). RLS-scoped by
+    ``tenant_id`` (migration 0043). ``enabled`` defaults False — an automation touches
+    a repo only once an admin turns it on there. ``mode`` is feature-specific; ``extra``
+    holds the branch-protection preset or other per-feature JSON."""
+
+    __tablename__ = "automation_repo_settings"
+    __table_args__ = (Index("ix_automation_repo_settings_tenant_feature", "tenant_id", "feature"),)
+
+    tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    repo: Mapped[str] = mapped_column(String, primary_key=True)
+    feature: Mapped[str] = mapped_column(String, primary_key=True)
+    mode: Mapped[str | None] = mapped_column(String, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    extra: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 engine = create_engine(settings.database_url.get_secret_value())
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
