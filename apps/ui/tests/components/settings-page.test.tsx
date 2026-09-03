@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -185,6 +185,66 @@ describe("SettingsPage", () => {
       updateGate.resolve({ worker_poll_seconds: "5", registration_enabled: "true" });
       await updateGate.promise;
     });
+  });
+
+  it("saves a chosen leadership-digest cadence", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({
+      worker_poll_seconds: "5",
+      registration_enabled: "true",
+      digest_cadence: "off",
+    });
+    configUpdateMock.mockResolvedValue({ digest_cadence: "weekly" });
+
+    renderPage();
+
+    const cadence = await screen.findByDisplayValue("Off");
+    fireEvent.change(cadence, { target: { value: "weekly" } });
+
+    const row = cadence.closest("div")!.parentElement!;
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(configUpdateMock).toHaveBeenCalledWith("digest_cadence", "weekly"));
+  });
+
+  it("saves the visible cadence value even when it was never in the server config", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    // digest_cadence absent from read_all() -> select shows "Off" but has no state entry.
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+    configUpdateMock.mockResolvedValue({ digest_cadence: "off" });
+
+    renderPage();
+
+    const cadence = await screen.findByDisplayValue("Off");
+    const row = cadence.closest("div")!.parentElement!;
+    fireEvent.click(within(row).getByRole("button", { name: "Save" }));
+
+    // Must send "off", not "" (which _ENUM_KEYS would 422).
+    await waitFor(() => expect(configUpdateMock).toHaveBeenCalledWith("digest_cadence", "off"));
+  });
+
+  it("renders a persisted non-default cadence and associates the label with the select", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({
+      worker_poll_seconds: "5",
+      registration_enabled: "true",
+      digest_cadence: "monthly",
+    });
+
+    renderPage();
+
+    // The label is programmatically tied to the control (htmlFor / id), so
+    // getByLabelText resolves it, and the persisted value is what shows.
+    const cadence = (await screen.findByLabelText("Leadership Digest")) as HTMLSelectElement;
+    expect(cadence.tagName).toBe("SELECT");
+    expect(cadence.value).toBe("monthly");
+    expect(screen.getByDisplayValue("Monthly")).toBe(cadence);
   });
 
   it("shows a success banner and strips the query param when landing with ?installed=1", async () => {

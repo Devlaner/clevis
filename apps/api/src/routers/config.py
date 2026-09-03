@@ -16,8 +16,10 @@ from src.core.auth import UserOut, require_workspace_admin
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_INT_KEYS = {"worker_poll_seconds", "gap_heal_poll_seconds", "gap_heal_stale_hours"}
+_INT_KEYS = {"worker_poll_seconds", "gap_heal_poll_seconds", "gap_heal_stale_hours", "digest_poll_seconds"}
 _BOOL_KEYS = {"registration_enabled"}
+# key -> allowed values, for small closed-vocabulary settings (issue #292).
+_ENUM_KEYS = {"digest_cadence": {"off", "weekly", "monthly"}}
 
 
 class ConfigValue(BaseModel):
@@ -51,6 +53,10 @@ def update_config(
 
     if key in _BOOL_KEYS and body.value not in ("true", "false"):
         raise HTTPException(status_code=422, detail=f"{key} must be 'true' or 'false'")
+
+    if key in _ENUM_KEYS and body.value not in _ENUM_KEYS[key]:
+        allowed = ", ".join(sorted(_ENUM_KEYS[key]))
+        raise HTTPException(status_code=422, detail=f"{key} must be one of: {allowed}")
 
     try:
         set_config(key, body.value)

@@ -89,6 +89,19 @@ This is the infrastructure/ops guide — getting the Clevis stack itself running
 
    Then open the UI and continue with the [Get started](../README.md#get-started) flow in the README.
 
+## Leadership digest (optional, issue #292)
+
+Clevis can email each org's admins a periodic summary (security score movement, current
+open risk items, recent push activity). It is **off by default** and uses only data
+Clevis already stores — no additional GitHub App permission.
+
+- Requires SMTP (the same `SMTP_*` block as email verification above).
+- Enable it in **Settings → Instance Configuration → Leadership Digest** (`weekly` or
+  `monthly`), or set the `digest_cadence` app-config key directly.
+- `digest_poll_seconds` (default `3600`, clamped `[300, 86400]`) controls how often the
+  API's background sweep checks whether a digest is due; a tenant is emailed at most once
+  per cadence interval, tracked via a `digest.sent` audit-log entry.
+
 ## Security notes
 
 - Sign-in uses a JWT held in an httpOnly session cookie, not a trusted request header — set `session_cookie_secure=false` only for local HTTP dev, never in production.
