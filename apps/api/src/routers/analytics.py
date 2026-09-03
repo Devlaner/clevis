@@ -168,10 +168,15 @@ def org_analytics_history(
 
 
 def _billing_num(value: object) -> float:
-    """Coerce a GitHub billing quantity to a float, defaulting a missing / non-numeric
-    field to 0.0 rather than raising (the usage API's numeric fields are documented as
-    required, but we don't want a shape drift to 500 the whole Overview)."""
-    return float(value) if isinstance(value, (int, float)) else 0.0
+    """Coerce a GitHub billing quantity to a float. A missing field (``None``) is
+    treated as 0.0, but a *present* value that isn't a real number is a shape drift
+    we must not silently paper over — returning 0.0 there would understate real
+    usage. ``bool`` is rejected too (``isinstance(True, int)`` is ``True``)."""
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HTTPException(status_code=502, detail="Unexpected response from GitHub billing API")
+    return float(value)
 
 
 @router.get("/orgs/{org_login}/usage/actions", response_model=ActionsUsageResponse)

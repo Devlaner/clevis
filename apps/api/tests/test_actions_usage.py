@@ -133,16 +133,48 @@ def test_unit_type_match_is_case_insensitive(http, db, user):
 
 def test_calls_the_enhanced_billing_usage_summary_endpoint_for_the_current_month(http, db, user):
     _admin_org(db, user)
-    now = datetime.now(timezone.utc)
-    with patch("src.routers.analytics.GitHubClient") as mock_client:
+    # Freeze the clock: the route reads datetime.now() again during handling, so a real
+    # clock could straddle a UTC month boundary between here and the assertion below.
+    frozen = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+    with patch("src.routers.analytics.GitHubClient") as mock_client, patch(
+        "src.routers.analytics.datetime"
+    ) as mock_dt:
+        mock_dt.now.return_value = frozen
         mock_client.return_value.request.return_value = _USAGE_SUMMARY
         http.get("/orgs/acme/usage/actions", headers={"X-GitHub-Token": "ghp_admin"})
 
     mock_client.return_value.request.assert_called_once_with(
         "GET",
         "/organizations/acme/settings/billing/usage/summary",
-        params={"year": now.year, "month": now.month, "product": "actions"},
+        params={"year": 2026, "month": 9, "product": "actions"},
     )
+
+
+def test_present_but_non_numeric_billing_quantity_is_502(http, db, user):
+    _admin_org(db, user)
+    payload = {
+        "usageItems": [
+            {"sku": "actions_linux", "unitType": "minutes", "grossQuantity": "lots",
+             "discountQuantity": 0, "netQuantity": 0},
+        ]
+    }
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = payload
+        resp = http.get("/orgs/acme/usage/actions", headers={"X-GitHub-Token": "ghp_x"})
+    assert resp.status_code == 502
+
+
+def test_a_missing_billing_quantity_is_treated_as_zero(http, db, user):
+    _admin_org(db, user)
+    payload = {"usageItems": [{"sku": "actions_linux", "unitType": "minutes", "grossQuantity": 42}]}
+    with patch("src.routers.analytics.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = payload
+        resp = http.get("/orgs/acme/usage/actions", headers={"X-GitHub-Token": "ghp_x"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total_minutes_used"] == 42
+    assert body["included_minutes_used"] == 0
+    assert body["paid_minutes_used"] == 0
 
 
 def test_github_403_becomes_400_with_permission_hint(http, db, user):
