@@ -98,6 +98,28 @@ def _post(client, body):
     return client.post("/orgs/acme/branch-protection/bulk", json={"token": "ghp_admin", **body})
 
 
+# --- preset validation ---------------------------------------------------
+
+
+def test_out_of_range_approval_count_is_a_422(db, acme):
+    client = _client(db, acme["admin"].id)
+    resp = _post(
+        client,
+        {
+            "repos": ["api"],
+            "dry_run": True,
+            "preset": {"required_pull_request_reviews": {"required_approving_review_count": 99}},
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_string_boolean_knob_is_a_422(db, acme):
+    client = _client(db, acme["admin"].id)
+    resp = _post(client, {"repos": ["api"], "dry_run": True, "preset": {"enforce_admins": "true"}})
+    assert resp.status_code == 422
+
+
 # --- dry run --------------------------------------------------------------
 
 

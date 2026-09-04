@@ -8,7 +8,8 @@ RLS scopes every row by ``tenant_id``; callers must have set the tenant session 
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.core.db import AutomationRepoSetting
@@ -47,13 +48,32 @@ def upsert(
     mode: str | None = None,
     extra: dict | None = None,
 ) -> AutomationRepoSetting:
-    row = get(db, tenant_id, repo, feature)
-    if row is None:
-        row = AutomationRepoSetting(tenant_id=tenant_id, repo=repo, feature=feature)
-        db.add(row)
-    row.enabled = enabled
-    row.mode = mode
+    # Single-statement upsert on the (tenant_id, repo, feature) composite PK — avoids the
+    # get-then-add race where two concurrent callers both miss the row and one INSERT
+    # then fails on the PK. `extra` is only overwritten when a value is supplied, so
+    # passing `extra=None` retains whatever is already stored.
+    values = {
+        "tenant_id": tenant_id,
+        "repo": repo,
+        "feature": feature,
+        "enabled": enabled,
+        "mode": mode,
+    }
+    # Core on_conflict_do_update bypasses the ORM, so `updated_at`'s `onupdate` won't
+    # fire — bump it explicitly.
+    set_ = {"enabled": enabled, "mode": mode, "updated_at": func.now()}
     if extra is not None:
-        row.extra = extra
-    db.flush()
+        values["extra"] = extra
+        set_["extra"] = extra
+    stmt = (
+        pg_insert(AutomationRepoSetting)
+        .values(**values)
+        .on_conflict_do_update(
+            index_elements=["tenant_id", "repo", "feature"], set_=set_
+        )
+    )
+    db.execute(stmt)
+    row = get(db, tenant_id, repo, feature)
+    assert row is not None
+    db.refresh(row)  # core upsert bypasses the identity map — pull fresh column values
     return row

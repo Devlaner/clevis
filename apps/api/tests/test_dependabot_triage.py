@@ -76,11 +76,12 @@ class _FakeClient:
     """Endpoint-aware fake. Order of the checks below matters — the more specific
     suffixes are tested before ``/pulls``."""
 
-    def __init__(self, *, prs, check_runs=_GREEN_RUNS, status=_GREEN_STATUS, reviews=None):
+    def __init__(self, *, prs, check_runs=_GREEN_RUNS, status=_GREEN_STATUS, reviews=None, merge_status=None):
         self.prs = prs
         self.check_runs = check_runs
         self.status = status
         self.reviews = reviews or []
+        self.merge_status = merge_status
         self.calls = []
 
     def request(self, method, path, params=None, json=None):
@@ -92,6 +93,12 @@ class _FakeClient:
         if path.endswith("/reviews"):
             return {"id": 1} if method == "POST" else self.reviews
         if path.endswith("/merge"):
+            if self.merge_status is not None:
+                raise httpx.HTTPStatusError(
+                    str(self.merge_status),
+                    request=httpx.Request("PUT", "https://api.github.com"),
+                    response=httpx.Response(self.merge_status),
+                )
             return {"merged": True}
         if path.endswith("/pulls"):
             return self.prs
@@ -156,6 +163,20 @@ def test_prerelease_target_version_is_skipped():
 def test_four_part_target_version_is_skipped():
     _c, decisions = _run([_pr(body="Bumps foo from 1.2.3 to 1.2.3.4")])
     assert "could not determine" in decisions[0].reason
+
+
+def test_patch_line_bundled_with_an_unparseable_line_is_rejected():
+    # one clean patch bump + one pre-release target that _BUMP_RE can't classify:
+    # the PR must not ride along on the patch line.
+    body = "Updates `braces` from 3.0.2 to 3.0.3\nUpdates `foo` from 1.0.0-rc1 to 1.0.0-rc2\n"
+    _c, decisions = _run([_pr(body=body)])
+    assert decisions[0].reason == "not a patch-level bump"
+
+
+def test_bare_action_version_bump_bundled_with_a_patch_line_is_rejected():
+    body = "Bumps foo from 1.2.3 to 1.2.4.\nUpdates `actions/checkout` from 3 to 4\n"
+    _c, decisions = _run([_pr(body=body)])
+    assert decisions[0].reason == "not a patch-level bump"
 
 
 def test_draft_pr_is_skipped():
@@ -239,6 +260,15 @@ def test_approve_and_merge_approves_then_merges():
     review_i = next(i for i, c in enumerate(client.calls) if "/reviews" in c[1] and c[0] == "POST")
     merge_i = next(i for i, c in enumerate(client.calls) if "/merge" in c[1])
     assert review_i < merge_i
+
+
+def test_merge_failure_keeps_the_approval_as_its_own_decision():
+    client = _FakeClient(prs=[_pr(1)], merge_status=500)
+    decisions = triage(client, "acme", "api", enabled=True, mode="approve_and_merge")
+    actions = [d.action for d in decisions]
+    assert "approved" in actions and "merge_failed" in actions
+    assert not any(d.action == "merged" for d in decisions)
+    assert any("/reviews" in c[1] and c[0] == "POST" for c in client.calls)
 
 
 def test_dry_run_makes_no_write_calls():
@@ -485,6 +515,55 @@ def test_run_network_error_becomes_a_per_repo_error_decision(db, acme):
         resp = client.post("/orgs/acme/dependabot-triage", json={"token": "ghp_x", "repos": ["acme/api"]})
     assert resp.status_code == 200
     assert resp.json()["decisions"][0]["reason"] == "GitHub API unreachable"
+
+
+def test_run_with_an_explicit_empty_repos_list_triages_nothing(db, acme):
+    client = _client(db, acme["admin"].id)
+    automation_settings_repo.upsert(
+        db, acme["org"].tenant_id, "acme/api", "dependabot_triage", enabled=True, mode="approve_only"
+    )
+    db.commit()
+    with patch("src.routers.dependabot_triage.GitHubClient") as mock:
+        _inst, calls = _wire(mock, prs=[_pr(1)])
+        resp = client.post(
+            "/orgs/acme/dependabot-triage", json={"token": "ghp_admin", "repos": []}
+        )
+    assert resp.status_code == 200
+    assert resp.json()["decisions"] == []
+    assert not calls["reviews_posted"]
+
+
+def test_run_merge_failure_audits_both_the_approval_and_the_failure(db, acme):
+    client = _client(db, acme["admin"].id)
+    automation_settings_repo.upsert(
+        db, acme["org"].tenant_id, "acme/api", "dependabot_triage", enabled=True,
+        mode="approve_and_merge", extra={"merge_method": "squash"},
+    )
+    db.commit()
+
+    def request(method, path, params=None, json=None):
+        if path.endswith("/check-runs"):
+            return {"check_runs": [{"status": "completed", "conclusion": "success"}], "total_count": 1}
+        if path.endswith("/status"):
+            return {"state": "success", "statuses": []}
+        if path.endswith("/merge") and method == "PUT":
+            raise httpx.HTTPStatusError(
+                "405", request=httpx.Request("PUT", "https://api.github.com"), response=httpx.Response(405)
+            )
+        return {"id": 1}
+
+    with patch("src.routers.dependabot_triage.GitHubClient") as mock:
+        inst = mock.return_value
+        inst.request.side_effect = request
+        inst.request_paginated.side_effect = lambda p, params=None: [_pr(1)] if p.endswith("/pulls") else []
+        resp = client.post(
+            "/orgs/acme/dependabot-triage", json={"token": "ghp_admin", "repos": ["acme/api"]}
+        )
+    assert resp.status_code == 200
+    actions = [d["action"] for d in resp.json()["decisions"]]
+    assert "approved" in actions and "merge_failed" in actions
+    assert db.query(AuditLog).filter(AuditLog.action == "dependabot_triage.approved").count() == 1
+    assert db.query(AuditLog).filter(AuditLog.action == "dependabot_triage.merge_failed").count() == 1
 
 
 def test_run_dry_run_writes_no_reviews(db, acme):

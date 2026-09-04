@@ -131,6 +131,29 @@ def test_trigger_as_a_bare_string_without_checkout_is_clean():
     assert lint(WorkflowFile("w.yml", "on: pull_request_target\njobs:\n  a:\n    steps: []", "sha1")).findings == []
 
 
+def test_mapping_inside_a_trigger_list_yields_a_warning_not_a_typeerror():
+    text = "name: x\non: [{ pull_request_target: null }]\njobs:\n  a:\n    steps: []"
+    result = lint(WorkflowFile("w.yml", text, "sha1"))
+    assert [f.rule for f in result.findings] == ["unparseable"]
+
+
+def test_list_valued_jobs_yields_a_warning_not_an_attributeerror():
+    result = lint(WorkflowFile("w.yml", "name: x\non: push\njobs:\n  - build", "sha1"))
+    assert [f.rule for f in result.findings] == ["unparseable"]
+
+
+def test_does_not_auto_fix_when_the_workflow_references_github_token():
+    text = _BAD_PRT.replace("npm test", "gh pr comment --token ${{ github.token }}")
+    result = lint(WorkflowFile("w.yml", text, "sha1"))
+    assert result.findings and not result.fixable  # relies on the elevated token
+
+
+def test_does_not_auto_fix_when_the_workflow_declares_write_permissions():
+    text = _BAD_PRT.replace("on: pull_request_target\n", "on: pull_request_target\npermissions:\n  contents: write\n")
+    result = lint(WorkflowFile("w.yml", text, "sha1"))
+    assert result.findings and not result.fixable
+
+
 # ── route tests ──────────────────────────────────────────────────────────
 
 
@@ -425,6 +448,37 @@ def test_open_pr_is_idempotent_when_a_fix_pr_is_already_open(client, db, user):
     assert resp.json()["pr_url"] == "https://github.com/acme/api/pull/7"
     # the branch isn't reset and no new PR is opened — the files are just refreshed
     assert not calls["refs"] and not calls["pulls"] and calls["puts"]
+
+
+def test_open_fix_pr_creates_the_file_when_it_is_absent_from_the_fix_branch():
+    """An existing fix PR whose target workflow no longer exists on the fix branch: the
+    Contents GET 404s and the PUT must go out without a sha rather than crashing."""
+
+    class _Fake:
+        def __init__(self):
+            self.puts = []
+
+        def request(self, method, path, params=None, json=None):
+            if path.endswith("/repos/acme/api"):
+                return {"default_branch": "main"}
+            if method == "GET" and path.endswith("/pulls"):
+                return [{"html_url": "https://github.com/acme/api/pull/7"}]
+            if "/contents/" in path and method == "GET":
+                raise httpx.HTTPStatusError(
+                    "404", request=httpx.Request("GET", "https://api.github.com"),
+                    response=httpx.Response(404),
+                )
+            if "/contents/" in path and method == "PUT":
+                self.puts.append(json)
+                return {}
+            return {}
+
+    result = workflow_lint.LintResult()
+    result.fixes[".github/workflows/bad.yml"] = "on: pull_request\n"
+    fake = _Fake()
+    url = workflow_lint.open_fix_pr(fake, "acme", "api", result)
+    assert url == "https://github.com/acme/api/pull/7"
+    assert fake.puts and "sha" not in fake.puts[0]
 
 
 def test_personal_open_pr_requires_admin_of_a_connected_org(client, db, user):

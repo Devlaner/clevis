@@ -128,7 +128,9 @@ def run_triage(
         s.repo: s
         for s in automation_settings_repo.list_for_feature(db, ctx.org.tenant_id, _FEATURE)
     }
-    target = body.repos or list(settings)
+    # `repos: null` (omitted) means "every configured repo"; an explicit `repos: []`
+    # means "none" and must not expand to all.
+    target = list(settings) if body.repos is None else body.repos
     audit_repo.write(
         db, user.email, "dependabot_triage.run", ctx.org.github_login,
         {"repos": target, "dry_run": body.dry_run}, tenant_id=ctx.org.tenant_id,

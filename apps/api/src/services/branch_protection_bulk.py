@@ -74,10 +74,21 @@ class RepoResult:
     error: str | None = None
 
 
+_MAX_APPROVALS = 6
+
+
+class PresetValidationError(ValueError):
+    """A preset knob has the wrong type or is out of range — the router turns this into a 422."""
+
+
 def normalize_preset(preset: dict | None) -> dict:
     """Flatten the submitted preset to the four knob keys, dropping anything else.
     Accepts ``required_pull_request_reviews.required_approving_review_count`` (the UI's
-    shape) or a bare ``required_approving_review_count``."""
+    shape) or a bare ``required_approving_review_count``.
+
+    Raises ``PresetValidationError`` for malformed knobs — a bare ``bool`` isn't a valid
+    approval count, and ``"true"`` isn't a valid boolean (``bool("true")`` would silently
+    read as ``True``)."""
     preset = preset or {}
     knobs: dict = {}
     reviews = preset.get("required_pull_request_reviews")
@@ -86,6 +97,17 @@ def normalize_preset(preset: dict | None) -> dict:
     for key in _KNOB_KEYS:
         if key in preset:
             knobs[key] = preset[key]
+
+    count = knobs.get("required_approving_review_count")
+    if count is not None and (
+        isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= _MAX_APPROVALS
+    ):
+        raise PresetValidationError(
+            f"required_approving_review_count must be an integer between 0 and {_MAX_APPROVALS}"
+        )
+    for key in ("enforce_admins", "allow_force_pushes", "allow_deletions"):
+        if key in knobs and not isinstance(knobs[key], bool):
+            raise PresetValidationError(f"{key} must be a boolean")
     return knobs
 
 

@@ -76,12 +76,41 @@ def fetch_workflows(client: GitHubClient, owner: str, repo: str) -> list[Workflo
     return files
 
 
-def _file_uses_secrets(text: str) -> bool:
-    # Conservative: any secrets reference anywhere in the file (job step, job/workflow
-    # env, `with:` inputs) means the workflow relies on the elevated pull_request_target
-    # token, so flipping it to pull_request would break it — report only, don't auto-fix.
-    # Match both `secrets.NAME` and the `secrets['NAME']` / `secrets["NAME"]` index forms.
-    return "secrets." in text or "secrets[" in text
+def _file_relies_on_elevated_token(text: str) -> bool:
+    # Conservative: any sign the workflow leans on `pull_request_target`'s elevated token
+    # means flipping it to `pull_request` could break it — report only, don't auto-fix.
+    #   - `secrets.NAME` and the `secrets['NAME']` / `secrets["NAME"]` index forms;
+    #   - `github.token` / `GITHUB_TOKEN` (the auto-provisioned token, whose default
+    #     permissions differ between the two triggers).
+    return (
+        "secrets." in text
+        or "secrets[" in text
+        or "github.token" in text
+        or "GITHUB_TOKEN" in text
+    )
+
+
+def _declares_write_permissions(doc: dict) -> bool:
+    """True if the workflow (top-level or any job) grants a write-level `permissions:`
+    scope, or `write-all`. Such a workflow depends on a writable token that
+    `pull_request` from a fork does not get."""
+
+    def _perm_is_write(perms) -> bool:
+        if isinstance(perms, str):
+            return perms == "write-all"
+        if isinstance(perms, dict):
+            return any(v == "write" for v in perms.values())
+        return False
+
+    if _perm_is_write(doc.get("permissions")):
+        return True
+    jobs = doc.get("jobs")
+    if isinstance(jobs, dict):
+        return any(
+            isinstance(job, dict) and _perm_is_write(job.get("permissions"))
+            for job in jobs.values()
+        )
+    return False
 
 
 def _checks_out_pr_head(job: dict) -> bool:
@@ -118,13 +147,26 @@ def lint(wf: WorkflowFile) -> LintResult:
 
     # PyYAML parses the bare key `on:` as boolean True.
     triggers = doc.get("on", doc.get(True))
-    trigger_names = (
-        set(triggers) if isinstance(triggers, dict)
-        else {triggers} if isinstance(triggers, str)
-        else set(triggers) if isinstance(triggers, list)
-        else set()
-    )
+    if isinstance(triggers, dict):
+        trigger_names = set(triggers)
+    elif isinstance(triggers, str):
+        trigger_names = {triggers}
+    elif isinstance(triggers, list):
+        if not all(isinstance(t, str) for t in triggers):
+            result.findings.append(
+                Finding(wf.path, "unparseable", "warning", "Unsupported `on:` trigger list shape")
+            )
+            return result
+        trigger_names = set(triggers)
+    else:
+        trigger_names = set()
+
     jobs = doc.get("jobs", {}) or {}
+    if not isinstance(jobs, dict):
+        result.findings.append(
+            Finding(wf.path, "unparseable", "warning", "Unsupported `jobs:` shape (expected a mapping)")
+        )
+        return result
 
     if "pull_request_target" in trigger_names:
         for job_name, job in jobs.items():
@@ -143,7 +185,8 @@ def lint(wf: WorkflowFile) -> LintResult:
                 )
         # Auto-fix: flip `pull_request_target` -> `pull_request`, but only in the narrow
         # case where that's provably safe as a blind text substitution:
-        #   - the file uses no secrets (the trigger's elevated token isn't relied on), AND
+        #   - the file doesn't rely on the elevated token (no secrets, no github.token,
+        #     no write-level permissions), AND
         #   - `pull_request` isn't already a trigger (else we'd create a duplicate), AND
         #   - the token "pull_request_target" appears exactly once in the file (so it can't
         #     be sitting in a comment, a step name, or an `if: github.event_name ==` guard
@@ -151,7 +194,8 @@ def lint(wf: WorkflowFile) -> LintResult:
         # Anything more complex is reported only — the finding still stands.
         if (
             result.findings
-            and not _file_uses_secrets(wf.text)
+            and not _file_relies_on_elevated_token(wf.text)
+            and not _declares_write_permissions(doc)
             and "pull_request" not in trigger_names
             and wf.text.count("pull_request_target") == 1
         ):
@@ -248,19 +292,23 @@ def open_fix_pr(client: GitHubClient, owner: str, repo: str, result: LintResult)
             )
 
     for path, fixed_text in result.fixes.items():
-        existing = client.request(
-            "GET", f"/repos/{owner}/{repo}/contents/{path}", params={"ref": _FIX_BRANCH}
-        )
-        client.request(
-            "PUT",
-            f"/repos/{owner}/{repo}/contents/{path}",
-            json={
-                "message": f"ci: harden {path} against pull_request_target misuse",
-                "content": base64.b64encode(fixed_text.encode("utf-8")).decode("ascii"),
-                "sha": existing["sha"],
-                "branch": _FIX_BRANCH,
-            },
-        )
+        try:
+            existing = client.request(
+                "GET", f"/repos/{owner}/{repo}/contents/{path}", params={"ref": _FIX_BRANCH}
+            )
+            existing_sha = existing["sha"]
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            existing_sha = None  # file absent on the branch — PUT without a sha creates it
+        body = {
+            "message": f"ci: harden {path} against pull_request_target misuse",
+            "content": base64.b64encode(fixed_text.encode("utf-8")).decode("ascii"),
+            "branch": _FIX_BRANCH,
+        }
+        if existing_sha is not None:
+            body["sha"] = existing_sha
+        client.request("PUT", f"/repos/{owner}/{repo}/contents/{path}", json=body)
 
     if existing_pr_url is not None:
         return existing_pr_url

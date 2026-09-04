@@ -95,6 +95,11 @@ def bulk_branch_protection(
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        branch_protection_bulk.normalize_preset(body.preset)
+    except branch_protection_bulk.PresetValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     owner = ctx.org.github_login
     action = "branch_protection.bulk_dryrun" if body.dry_run else "branch_protection.bulk_apply"
     audit_repo.write(

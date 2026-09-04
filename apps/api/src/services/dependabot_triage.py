@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+import httpx
+
 from src.services.github_client import GitHubClient
 
 DEPENDABOT_LOGIN = "dependabot[bot]"
@@ -43,12 +45,17 @@ _BUMP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Any "Bumps/Updates ... from X to Y" line. Used to catch update lines whose targets
+# `_BUMP_RE` can't classify (pre-release, 4-part, or bare "from 3 to 4" Action bumps):
+# those must fail the PR closed, not be silently dropped.
+_UPDATE_LINE_RE = re.compile(r"\b(?:bumps|updates)\b.+?\bfrom\s+\S+\s+to\s+\S+", re.IGNORECASE)
+
 
 @dataclass
 class Decision:
     number: int | None
     title: str
-    action: str  # "approved" | "merged" | "would_approve" | "would_merge" | "skipped"
+    action: str  # approved | merged | merge_failed | would_approve | would_merge | skipped
     reason: str = ""
 
 
@@ -59,15 +66,36 @@ def _bump_is_patch(body: str) -> bool | None:
     that bundles a minor/major bump alongside a patch one returns ``False``, not
     ``True``. Pre-release / 4-part target versions aren't matched by ``_BUMP_RE``, so a
     body containing only those yields ``None``."""
-    matches = _BUMP_RE.findall(body or "")
-    if not matches:
+    seen_update_line = False
+    seen_patch = False
+    seen_non_patch = False  # a line we could parse and know is not a patch bump
+    seen_unparseable = False  # an update line whose targets we can't classify at all
+    for line in (body or "").splitlines():
+        if not _UPDATE_LINE_RE.search(line):
+            continue
+        seen_update_line = True
+        matches = _BUMP_RE.findall(line)
+        if not matches:
+            seen_unparseable = True
+            continue
+        for old_s, new_s in matches:
+            old = tuple(int(x) for x in old_s.split("."))
+            new = tuple(int(x) for x in new_s.split("."))
+            if old[0] == new[0] and old[1] == new[1] and new[2] >= old[2]:
+                seen_patch = True
+            else:
+                seen_non_patch = True
+
+    if not seen_update_line:
         return None
-    for old_s, new_s in matches:
-        old = tuple(int(x) for x in old_s.split("."))
-        new = tuple(int(x) for x in new_s.split("."))
-        if not (old[0] == new[0] and old[1] == new[1] and new[2] >= old[2]):
-            return False
-    return True
+    if seen_non_patch:
+        return False
+    # An unparseable line (pre-release / 4-part / bare "from 3 to 4") bundled alongside a
+    # real patch bump must reject the PR, not ride along on the patch line. On its own it's
+    # just "undeterminable" -> caller skips.
+    if seen_unparseable:
+        return False if seen_patch else None
+    return True if seen_patch else None
 
 
 def _checks_all_green(client: GitHubClient, owner: str, repo: str, sha: str) -> bool:
@@ -169,12 +197,24 @@ def triage(
             },
         )
         if will_merge:
-            client.request(
-                "PUT",
-                f"/repos/{owner}/{repo}/pulls/{number}/merge",
-                json={"merge_method": merge_method},
-            )
-            decisions.append(Decision(number, title, "merged"))
+            try:
+                client.request(
+                    "PUT",
+                    f"/repos/{owner}/{repo}/pulls/{number}/merge",
+                    json={"merge_method": merge_method},
+                )
+                decisions.append(Decision(number, title, "merged"))
+            except httpx.HTTPStatusError as exc:
+                # The approval already landed on GitHub — record it as its own decision
+                # (so the router audits it) and report the merge failure separately
+                # rather than letting the exception discard the completed approval.
+                decisions.append(Decision(number, title, "approved"))
+                decisions.append(
+                    Decision(
+                        number, title, "merge_failed",
+                        f"approved, but the merge request failed: {exc.response.status_code}",
+                    )
+                )
         else:
             decisions.append(Decision(number, title, "approved"))
         acted += 1

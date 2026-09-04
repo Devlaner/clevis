@@ -384,16 +384,24 @@ export default function AutomationPage() {
         )}
       </div>
 
+      {/* key each card by its target identity so switching owner/repo remounts it with
+          fresh selection / preview / mutation state instead of showing the old target's. */}
       <div className="mt-4">
-        <BranchProtectionCard org={owner.trim()} token={token} repos={repoOptions} />
+        <BranchProtectionCard key={owner.trim()} org={owner.trim()} token={token} repos={repoOptions} />
       </div>
 
       <div className="mt-4">
-        <WorkflowLintCard owner={owner} repo={repo} token={token} />
+        <WorkflowLintCard key={`${owner.trim()}|${repo.trim()}`} owner={owner} repo={repo} token={token} />
       </div>
 
       <div className="mt-4">
-        <DependabotTriageCard org={owner.trim()} owner={owner.trim()} repo={repo.trim()} token={token} />
+        <DependabotTriageCard
+          key={`${owner.trim()}|${owner.trim()}|${repo.trim()}`}
+          org={owner.trim()}
+          owner={owner.trim()}
+          repo={repo.trim()}
+          token={token}
+        />
       </div>
     </>
   )
