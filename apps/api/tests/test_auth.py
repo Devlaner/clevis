@@ -755,6 +755,23 @@ def test_update_config_removed_keys_rejected(config_client_owner, key):
     assert resp.status_code == 400
 
 
+def test_update_config_digest_cadence_rejects_bad_value(config_client_owner):
+    resp = config_client_owner.put("/config/digest_cadence", json={"value": "daily"})
+    assert resp.status_code == 422
+    assert "one of" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("value", ["off", "weekly", "monthly"])
+def test_update_config_digest_cadence_accepts_valid_values(config_client_owner, value):
+    with (
+        patch("src.routers.config.set_config") as mock_set,
+        patch("src.routers.config.read_all", return_value=_MOCK_CONFIG),
+    ):
+        resp = config_client_owner.put("/config/digest_cadence", json={"value": value})
+    assert resp.status_code == 200
+    mock_set.assert_called_once_with("digest_cadence", value)
+
+
 @pytest.mark.parametrize("value", ["yes", "1", ""])
 def test_update_config_invalid_bool(config_client_owner, value):
     resp = config_client_owner.put("/config/registration_enabled", json={"value": value})

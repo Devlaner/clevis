@@ -21,9 +21,14 @@ _INT_KEYS = {
     "gap_heal_poll_seconds",
     "gap_heal_stale_hours",
     "pr_nudge_stale_days",
+    "digest_poll_seconds",
 }
 _BOOL_KEYS = {"registration_enabled"}
-_PR_NUDGE_MODES = ("off", "comment", "label")  # issue #289
+# key -> allowed values, for small closed-vocabulary settings (issues #292, #289).
+_ENUM_KEYS = {
+    "digest_cadence": {"off", "weekly", "monthly"},
+    "pr_nudge_mode": {"off", "comment", "label"},
+}
 
 
 class ConfigValue(BaseModel):
@@ -58,10 +63,9 @@ def update_config(
     if key in _BOOL_KEYS and body.value not in ("true", "false"):
         raise HTTPException(status_code=422, detail=f"{key} must be 'true' or 'false'")
 
-    if key == "pr_nudge_mode" and body.value not in _PR_NUDGE_MODES:
-        raise HTTPException(
-            status_code=422, detail="pr_nudge_mode must be one of: off, comment, label"
-        )
+    if key in _ENUM_KEYS and body.value not in _ENUM_KEYS[key]:
+        allowed = ", ".join(sorted(_ENUM_KEYS[key]))
+        raise HTTPException(status_code=422, detail=f"{key} must be one of: {allowed}")
 
     try:
         set_config(key, body.value)

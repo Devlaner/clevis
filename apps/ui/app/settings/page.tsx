@@ -541,9 +541,26 @@ function SavedTokensSection() {
 
 // ── Instance configuration section (owner only) ──────────────────────────────
 
-const CONFIG_FIELDS: { key: string; label: string; description: string; type?: string }[] = [
+const CONFIG_FIELDS: {
+  key: string
+  label: string
+  description: string
+  type?: string
+  options?: { value: string; label: string }[]
+}[] = [
   { key: "worker_poll_seconds", label: "Worker Poll Interval",    description: "Seconds between job queue polls.", type: "number" },
   { key: "registration_enabled", label: "Self-Registration",     description: "Allow anyone to create an account via /register.", type: "boolean" },
+  {
+    key: "digest_cadence",
+    label: "Leadership Digest",
+    description: "Email org admins a periodic security-score + risk summary. Requires SMTP to be configured.",
+    type: "select",
+    options: [
+      { value: "off", label: "Off" },
+      { value: "weekly", label: "Weekly" },
+      { value: "monthly", label: "Monthly" },
+    ],
+  },
 ]
 
 function InstanceConfigSection() {
@@ -560,11 +577,11 @@ function InstanceConfigSection() {
     if (config) setValues((prev) => initialConfigValues(prev, config))
   }, [config])
 
-  async function saveKey(key: string) {
+  async function saveKey(key: string, explicitValue?: string) {
     setSaving(key)
     setErrors((prev) => ({ ...prev, [key]: "" }))
     try {
-      await api.config.update(key, values[key] ?? "")
+      await api.config.update(key, explicitValue ?? values[key] ?? "")
       const updated = await qc.fetchQuery<Record<string, string>>({
         queryKey: ["config"],
         queryFn: api.config.getAll,
@@ -602,13 +619,18 @@ function InstanceConfigSection() {
         {CONFIG_FIELDS.map((field) => {
           const isSavingField = saving === field.key
           const saveContent: React.ReactNode = isSavingField ? <CircleNotch className="size-3 animate-spin" /> : "Save"
+          const fieldId = `cfg-${field.key}`
+          // The value a select shows before the user touches it / before the key
+          // is persisted server-side: its first option ("" for non-select fields).
+          const firstOption = field.options?.[0]?.value ?? ""
 
           return (
           <div key={field.key} className="p-4 max-w-lg">
-            <label className="text-xs font-medium text-foreground block mb-1">{field.label}</label>
+            <label htmlFor={fieldId} className="text-xs font-medium text-foreground block mb-1">{field.label}</label>
             <div className="flex items-center gap-2">
               {field.type === "boolean" ? (
                 <select
+                  id={fieldId}
                   value={values[field.key] ?? "true"}
                   onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
                   className="h-8 border border-border bg-transparent px-2 font-mono text-xs"
@@ -616,15 +638,41 @@ function InstanceConfigSection() {
                   <option value="true">Enabled</option>
                   <option value="false">Disabled</option>
                 </select>
+              ) : field.type === "select" ? (
+                <select
+                  id={fieldId}
+                  value={values[field.key] ?? firstOption}
+                  onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
+                  className="h-8 border border-border bg-transparent px-2 font-mono text-xs"
+                >
+                  {field.options?.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
               ) : (
                 <Input
+                  id={fieldId}
                   value={values[field.key] ?? ""}
                   onChange={(e) => setValues((v) => ({ ...v, [field.key]: e.target.value }))}
                   type={field.type === "number" ? "number" : "text"}
                   className="font-mono text-xs"
                 />
               )}
-              <Button size="sm" variant="outline" onClick={() => saveKey(field.key)} disabled={isSavingField}>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  saveKey(
+                    field.key,
+                    // A select with no persisted value shows its first option but has
+                    // no entry in `values` yet -- save that visible value, not "".
+                    field.type === "select"
+                      ? (values[field.key] ?? firstOption)
+                      : undefined,
+                  )
+                }
+                disabled={isSavingField}
+              >
                 {saveContent}
               </Button>
             </div>

@@ -28,6 +28,8 @@ _ACCEPTED_KEYS = {
     # Issue #289: stale-PR nudges (on-demand sweep)
     "pr_nudge_stale_days",
     "pr_nudge_mode",
+    "digest_poll_seconds",
+    "digest_cadence",
 }
 _TTL = 60.0
 _cache: dict[str, tuple[str, float]] = {}

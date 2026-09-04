@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import anyio
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
 from src.repositories import installation_repo, job_repo, org_repo, scan_results_repo, tenant_repo
 from src.routers.github import _cached_events, _fetch_events_from_repo_events
 from src.schemas.analytics import (
+    ActionsUsageResponse,
     AnalyticsInput,
     AnalyticsResponse,
     AtRiskRepo,
@@ -164,6 +165,89 @@ def org_analytics_history(
     db: Session = Depends(get_db),
 ):
     return scan_results_repo.list_recent(db, owner=ctx.org.github_login, limit=30)
+
+
+def _billing_num(value: object) -> float:
+    """Coerce a GitHub billing quantity to a float, defaulting a missing / non-numeric
+    field to 0.0 rather than raising (the usage API's numeric fields are documented as
+    required, but we don't want a shape drift to 500 the whole Overview)."""
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+@router.get("/orgs/{org_login}/usage/actions", response_model=ActionsUsageResponse)
+def org_actions_usage(
+    response: Response,
+    ctx: OrgContext = Depends(require_org_role(min_role="admin")),
+    db: Session = Depends(get_db),
+    x_github_token: str | None = Header(default=None),
+):
+    """GitHub Actions minutes used this billing month for the org (issue #294).
+
+    **Needs a GitHub App permission Clevis does not request by default.** Reading
+    ``GET /organizations/{org}/settings/billing/usage/summary`` requires the org
+    **Administration** permission (read); billing was an explicitly deferred roadmap
+    area. Read-only. When the App lacks it GitHub returns 403, surfaced here as a 400
+    with a clear hint so the UI can hide the card rather than error the page.
+
+    This replaces the retired ``/orgs/{org}/settings/billing/actions`` endpoint
+    (GitHub shut it down on 2025-09-26). The response is billing data, so it's served
+    ``Cache-Control: no-store`` — it must never sit in a shared/browser cache where a
+    later, lower-privilege session could read it (CWE-525). No migration.
+    """
+    try:
+        token = resolve_org_token(
+            db, org_id=ctx.org.id, account_login=ctx.org.github_login, client_token=x_github_token
+        )
+    except NoGitHubTokenAvailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    now = datetime.now(timezone.utc)
+    try:
+        data = GitHubClient(token).request(
+            "GET",
+            f"/organizations/{ctx.org.github_login}/settings/billing/usage/summary",
+            params={"year": now.year, "month": now.month, "product": "actions"},
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 403:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Clevis's GitHub App can't read this org's Actions billing — grant it "
+                    "the org 'Administration' (plan) permission. See docs/self-hosting.md."
+                ),
+            ) from exc
+        raise _github_error(exc) from exc
+    except httpx.RequestError as exc:
+        raise _github_error(exc) from exc
+
+    if not isinstance(data, dict) or not isinstance(data.get("usageItems"), list):
+        raise HTTPException(status_code=502, detail="Unexpected response from GitHub billing API")
+
+    total = included = paid = 0.0
+    breakdown: dict[str, float] = {}
+    for item in data["usageItems"]:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=502, detail="Unexpected response from GitHub billing API")
+        # The summary is already product-filtered, but it still carries Actions
+        # *storage* (unitType "GB") alongside minutes — count only the minutes.
+        # GitHub's casing for unit types isn't contractually fixed, so match loosely.
+        if str(item.get("unitType", "")).lower() != "minutes":
+            continue
+        gross = _billing_num(item.get("grossQuantity"))
+        total += gross
+        included += _billing_num(item.get("discountQuantity"))
+        paid += _billing_num(item.get("netQuantity"))
+        sku = str(item.get("sku") or "actions")
+        breakdown[sku] = breakdown.get(sku, 0.0) + gross
+
+    response.headers["Cache-Control"] = "no-store"
+    return ActionsUsageResponse(
+        total_minutes_used=total,
+        included_minutes_used=included,
+        paid_minutes_used=paid,
+        minutes_used_breakdown=breakdown,
+    )
 
 
 @router.get("/me/analytics/history", response_model=list[ScanHistoryEntry])

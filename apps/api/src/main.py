@@ -33,6 +33,7 @@ from src.routers import (
     webhooks,
     workflow_lint,
 )
+from src.services.digest_loop import digest_loop
 from src.services.gap_heal_loop import gap_heal_loop
 from src.services.membership_reconcile_loop import membership_reconcile_loop
 
@@ -46,7 +47,12 @@ async def lifespan(_: FastAPI):
     # Two independent background loops -- activity-sync gap-healing (S5) and org-membership
     # reconciliation (Collaborators PR 2 of 3) are unrelated sweeps, each already tolerant of
     # a single iteration's exception without dying, so there's no reason to share one task.
-    tasks = [asyncio.create_task(gap_heal_loop()), asyncio.create_task(membership_reconcile_loop())]
+    tasks = [
+        asyncio.create_task(gap_heal_loop()),
+        asyncio.create_task(membership_reconcile_loop()),
+        # Issue #292: leadership digest. A no-op unless digest_cadence is configured.
+        asyncio.create_task(digest_loop()),
+    ]
     try:
         yield
     finally:

@@ -41,6 +41,16 @@ export interface PrNudgeResponse {
   results: PrNudgeResult[]
 }
 
+// Issue #294: GET /orgs/{org}/usage/actions (GitHub Actions minutes this billing month,
+// from GitHub's enhanced-billing usage summary API). `included_minutes_used` is the
+// slice covered by the plan's allowance; `paid_minutes_used` is what was billed on top.
+export interface ActionsUsageResponse {
+  total_minutes_used: number
+  included_minutes_used: number
+  paid_minutes_used: number
+  minutes_used_breakdown: Record<string, number>
+}
+
 export interface AnalyticsOverviewResponse {
   owner: string
   score: number
