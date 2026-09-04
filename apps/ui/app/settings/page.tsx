@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { Fragment, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query"
 import { Trash, Plus, CircleNotch, Check, ArrowSquareOut, CheckCircle } from "@phosphor-icons/react"
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { SectionError } from "@/components/section-error"
 import { EmptyStatePage } from "@/components/empty-state"
+import { PermissionDriftNotice } from "@/components/permission-drift-notice"
 import Link from "next/link"
 import { api } from "@/lib/api/client"
 import { initialConfigValues, mergeSavedConfigValue } from "@/lib/config-values"
@@ -348,8 +349,10 @@ function ConnectedOrgsSection() {
                 const key = rowKey(row)
                 const isConfirming = confirmingKey === key
                 const isThisRowMutating = disconnect.isPending && disconnect.variables && rowKey(disconnect.variables) === key
+                const showDrift = (row.blocked_features?.length ?? 0) > 0 || row.permissions_synced_at === null
                 return (
-                  <tr key={key} className="hover:bg-elevated transition-colors">
+                  <Fragment key={key}>
+                  <tr className="hover:bg-elevated transition-colors">
                     <td className="px-4 py-2.5 font-mono text-foreground/80">
                       {row.account_login}
                       {row.scope === "org" && <span className="ml-1.5 text-muted-foreground">(org)</span>}
@@ -381,6 +384,14 @@ function ConnectedOrgsSection() {
                       </Button>
                     </td>
                   </tr>
+                  {showDrift && (
+                    <tr>
+                      <td colSpan={4} className="px-4 pb-3 pt-0">
+                        <PermissionDriftNotice install={row} />
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 )
               })}
             </tbody>
