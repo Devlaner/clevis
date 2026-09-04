@@ -3,14 +3,17 @@
 import hashlib
 import hmac
 import json
+import threading
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy import text
 
 from src.core.config import settings
-from src.core.db import AuditLog, WebhookDelivery, get_db
+from src.core.db import AuditLog, GitHubInstallation, SessionLocal, WebhookDelivery, get_db, set_session_tenant
+from src.core.rbac import set_tenant_session_context
 from src.core.redis_client import get_redis_client
 from src.repositories import installation_repo, org_repo
 from src.routers import webhooks as webhooks_module
@@ -184,6 +187,101 @@ def test_installation_new_permissions_accepted_redelivery_does_not_duplicate_aud
     # permissions_synced_at still reflects the redelivery even though nothing changed.
     row = installation_repo.list_for_org(db, org_id=org.id)[0]
     assert row.granted_permissions == perms
+
+
+def test_update_permissions_serializes_concurrent_redeliveries():
+    """CodeRabbit finding on #400: the compare-then-update in
+    installation_repo.update_permissions wasn't atomic -- two genuinely concurrent
+    new_permissions_accepted deliveries for the same installation could both read the
+    same pre-update permissions, both compute changed=True, and both tell the webhook
+    handler to write an audit row. Needs two real separate connections (not the
+    savepoint-per-test `db` fixture -- same reasoning as
+    test_org_membership_repo.py's own concurrency test), since the race only exists
+    across genuinely concurrent transactions.
+
+    Session A manually takes the same FOR UPDATE lock update_permissions takes
+    internally and holds it open, simulating "another delivery is mid-update" right as
+    session B's real update_permissions call starts. B must block until A commits, then
+    -- since A already wrote the exact permissions B is about to write -- B's own
+    comparison must see no change.
+    """
+    setup = SessionLocal()
+    try:
+        org = org_repo.get_or_create(setup, github_login="acme-lock-test")
+        # A genuinely separate SessionLocal() commits for real (unlike the savepoint-per-test
+        # `db` fixture, where a nested db.commit() never actually ends the outer transaction,
+        # so a SET LOCAL from an earlier commit -- ensure_tenant_linked's own -- stays in
+        # effect for the rest of the test almost by accident). Real inserts need the same
+        # explicit tenant context the router itself sets before writing a row.
+        set_tenant_session_context(setup, org.tenant_id, 0)
+        # A direct insert, not installation_repo.create()/upsert() -- that helper's own
+        # db.commit() + db.refresh() immediately after can itself hit issue #330's documented
+        # nested-commit/RLS-timing flakiness under genuine thread concurrency (same class as
+        # test_org_membership_repo.py's xfail'd tests), which is no part of what this test
+        # means to exercise. Nothing after this needs the row's server-generated defaults.
+        setup.add(
+            GitHubInstallation(
+                account_login="acme-lock-test", account_type="Organization", auth_mode="app",
+                installation_id=9001, token_ref="tok_acme-lock-test", org_id=org.id, tenant_id=org.tenant_id,
+            )
+        )
+        setup.commit()
+    finally:
+        setup.close()
+
+    perms = {"issues": "write", "contents": "read", "metadata": "read"}
+
+    session_a = SessionLocal()
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+    b_result: dict[str, tuple[int, bool]] = {}
+
+    def hold_lock_in_session_a():
+        # Resolve/set tenant context exactly as update_permissions itself does -- under
+        # RLS (the CI job's constrained clevis_api role), a raw SELECT without this first
+        # would see zero rows and take no lock at all, making the test pass for the wrong
+        # reason (or flake) instead of genuinely exercising the row lock.
+        tenant_id = session_a.execute(
+            text("SELECT resolve_installation_tenant_id(:iid)"), {"iid": 9001}
+        ).scalar()
+        set_session_tenant(session_a, tenant_id)
+        session_a.execute(
+            text("SELECT * FROM github_installations WHERE installation_id = :iid FOR UPDATE"),
+            {"iid": 9001},
+        )
+        lock_held.set()
+        assert release_lock.wait(timeout=5), "test never released session A's lock"
+        session_a.query(GitHubInstallation).filter(GitHubInstallation.installation_id == 9001).update(
+            {GitHubInstallation.granted_permissions: perms}
+        )
+        session_a.commit()
+
+    def run_update_permissions_in_session_b():
+        session_b = SessionLocal()
+        try:
+            b_result["value"] = installation_repo.update_permissions(
+                session_b, installation_id=9001, permissions=perms
+            )
+        finally:
+            session_b.close()
+
+    try:
+        lock_thread = threading.Thread(target=hold_lock_in_session_a)
+        lock_thread.start()
+        assert lock_held.wait(timeout=5), "session A never acquired its lock"
+
+        b_thread = threading.Thread(target=run_update_permissions_in_session_b)
+        b_thread.start()
+        b_thread.join(timeout=0.3)
+        assert not b_result, "update_permissions must block while another delivery holds the row lock"
+
+        release_lock.set()
+        lock_thread.join(timeout=5)
+        b_thread.join(timeout=5)
+
+        assert b_result.get("value") == (1, False)
+    finally:
+        session_a.close()
 
 
 def test_installation_new_permissions_accepted_writes_new_audit_row_when_permissions_actually_change(db, webhook_client):

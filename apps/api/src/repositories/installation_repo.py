@@ -212,6 +212,14 @@ def update_permissions(
     row's permissions column is safe from the webhook — the row's ownership was
     established by the authenticated sync flow; only *creating* rows from a webhook would
     cross a trust boundary (see webhooks.py's installation.created comment).
+
+    The compare-then-update below is made atomic with `with_for_update()`: without it, two
+    overlapping calls for the same installation_id (GitHub redelivers webhooks on retry,
+    and a redelivery can also be triggered manually from the GitHub UI) could both read the
+    same pre-update `granted_permissions`, both compute `changed=True`, and both commit --
+    writing two audit rows for what the webhook handler intends to treat as one. Locking the
+    row here means the second call blocks until the first's transaction commits, then reads
+    the now-current (already-updated) value, so its own comparison correctly yields False.
     """
     tenant_id = db.execute(
         text("SELECT resolve_installation_tenant_id(:installation_id)"), {"installation_id": installation_id}
@@ -219,7 +227,12 @@ def update_permissions(
     if tenant_id is not None:
         set_session_tenant(db, tenant_id)
 
-    rows = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).all()
+    rows = (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.installation_id == installation_id)
+        .with_for_update()
+        .all()
+    )
     changed = any(r.granted_permissions != permissions for r in rows)
 
     count = (
