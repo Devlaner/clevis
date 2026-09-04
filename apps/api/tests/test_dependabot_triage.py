@@ -41,14 +41,10 @@ def _wire(mock, *, prs, check_runs=None, status_state="success", statuses=None, 
     check_runs = check_runs if check_runs is not None else [{"status": "completed", "conclusion": "success"}]
 
     def request(method, path, params=None, json=None):
-        if path.endswith("/pulls") and method == "GET":
-            return prs
         if path.endswith("/check-runs"):
-            return {"check_runs": check_runs}
+            return {"check_runs": check_runs, "total_count": len(check_runs)}
         if path.endswith("/status"):
             return {"state": status_state, "statuses": statuses if statuses is not None else []}
-        if path.endswith("/reviews") and method == "GET":
-            return reviews or []
         if path.endswith("/reviews") and method == "POST":
             calls["reviews_posted"].append(path)
             return {"id": 1}
@@ -57,14 +53,22 @@ def _wire(mock, *, prs, check_runs=None, status_state="success", statuses=None, 
             return {"merged": True}
         return {}
 
+    def request_paginated(path, params=None):
+        if path.endswith("/pulls"):
+            return prs
+        if path.endswith("/reviews"):
+            return reviews or []
+        return []
+
     inst.request.side_effect = request
+    inst.request_paginated.side_effect = request_paginated
     return inst, calls
 
 
 # --- service: eligibility ------------------------------------------------
 
 
-_GREEN_RUNS = {"check_runs": [{"status": "completed", "conclusion": "success"}]}
+_GREEN_RUNS = {"check_runs": [{"status": "completed", "conclusion": "success"}], "total_count": 1}
 _GREEN_STATUS = {"state": "success", "statuses": []}
 
 
@@ -93,6 +97,14 @@ class _FakeClient:
             return self.prs
         return {}
 
+    def request_paginated(self, path, params=None):
+        self.calls.append(("GET", path, None))
+        if path.endswith("/reviews"):
+            return self.reviews
+        if path.endswith("/pulls"):
+            return self.prs
+        return []
+
 
 def _run(prs, *, mode="approve_only", dry_run=False, check_runs=_GREEN_RUNS, status=_GREEN_STATUS, reviews=None):
     client = _FakeClient(prs=prs, check_runs=check_runs, status=status, reviews=reviews)
@@ -117,6 +129,32 @@ def test_non_patch_bump_is_skipped():
 
 def test_unparseable_bump_body_is_skipped():
     _c, decisions = _run([_pr(body="Update foo, see changelog")])
+    assert "could not determine" in decisions[0].reason
+
+
+def test_grouped_pr_with_a_non_patch_entry_is_skipped():
+    body = (
+        "Bumps the npm group with 2 updates:\n"
+        "Updates `braces` from 3.0.2 to 3.0.3\n"
+        "Updates `micromatch` from 4.0.5 to 5.0.0\n"
+    )
+    _c, decisions = _run([_pr(body=body)])
+    assert decisions[0].reason == "not a patch-level bump"
+
+
+def test_grouped_pr_where_every_entry_is_patch_is_eligible():
+    body = "Updates `braces` from 3.0.2 to 3.0.3\nUpdates `fill-range` from 7.0.1 to 7.0.2\n"
+    _c, decisions = _run([_pr(body=body)])
+    assert decisions[0].action == "approved"
+
+
+def test_prerelease_target_version_is_skipped():
+    _c, decisions = _run([_pr(body="Bumps foo from 1.2.9 to 1.2.10-rc1.")])
+    assert "could not determine" in decisions[0].reason
+
+
+def test_four_part_target_version_is_skipped():
+    _c, decisions = _run([_pr(body="Bumps foo from 1.2.3 to 1.2.3.4")])
     assert "could not determine" in decisions[0].reason
 
 
@@ -149,7 +187,20 @@ def test_failing_classic_status_is_skipped():
 
 
 def test_head_sha_with_no_ci_at_all_is_skipped():
-    _c, decisions = _run([_pr()], check_runs={"check_runs": []}, status={"state": "pending", "statuses": []})
+    _c, decisions = _run(
+        [_pr()],
+        check_runs={"check_runs": [], "total_count": 0},
+        status={"state": "pending", "statuses": []},
+    )
+    assert decisions[0].reason == "checks are not all green"
+
+
+def test_more_check_runs_than_one_page_is_treated_as_not_green():
+    # total_count says 120 but we only see 100 -> a failing run could be hiding
+    _c, decisions = _run(
+        [_pr()],
+        check_runs={"check_runs": [{"status": "completed", "conclusion": "success"}] * 100, "total_count": 120},
+    )
     assert decisions[0].reason == "checks are not all green"
 
 
@@ -255,6 +306,54 @@ def test_setting_endpoint_upserts_and_validates(db, acme):
     assert row.extra["merge_method"] == "rebase"
 
 
+def test_get_setting_returns_defaults_then_the_saved_row(db, acme):
+    client = _client(db, acme["admin"].id)
+    before = client.get("/orgs/acme/repos/acme/api/automation/dependabot-triage")
+    assert before.json() == {"enabled": False, "mode": "approve_only", "merge_method": "squash"}
+
+    client.put(
+        "/orgs/acme/repos/acme/api/automation/dependabot-triage",
+        json={"enabled": True, "mode": "approve_and_merge", "merge_method": "rebase"},
+    )
+    after = client.get("/orgs/acme/repos/acme/api/automation/dependabot-triage")
+    assert after.json() == {"enabled": True, "mode": "approve_and_merge", "merge_method": "rebase"}
+
+
+def test_a_non_403_error_on_one_repo_does_not_abort_the_sweep(db, acme):
+    client = _client(db, acme["admin"].id)
+    for r in ("good", "bad"):
+        automation_settings_repo.upsert(
+            db, acme["org"].tenant_id, f"acme/{r}", "dependabot_triage", enabled=True, mode="approve_only"
+        )
+    db.commit()
+
+    def request_paginated(path, params=None):
+        if "/bad/" in path:
+            raise httpx.HTTPStatusError(
+                "500", request=httpx.Request("GET", "https://api.github.com"), response=httpx.Response(500)
+            )
+        return [_pr(1)] if path.endswith("/pulls") else []
+
+    with patch("src.routers.dependabot_triage.GitHubClient") as mock:
+        inst = mock.return_value
+        inst.request_paginated.side_effect = request_paginated
+        inst.request.side_effect = lambda m, p, params=None, json=None: (
+            {"check_runs": [{"status": "completed", "conclusion": "success"}], "total_count": 1}
+            if p.endswith("/check-runs")
+            else {"state": "success", "statuses": []} if p.endswith("/status")
+            else {"id": 1}
+        )
+        resp = client.post(
+            "/orgs/acme/dependabot-triage", json={"token": "ghp_admin", "repos": ["acme/good", "acme/bad"]}
+        )
+    assert resp.status_code == 200
+    by_repo = {d["repo"]: d["action"] for d in resp.json()["decisions"]}
+    assert by_repo == {"acme/good": "approved", "acme/bad": "error"}
+    # both were audited before the response
+    assert db.query(AuditLog).filter(AuditLog.action == "dependabot_triage.approved").count() == 1
+    assert db.query(AuditLog).filter(AuditLog.action == "dependabot_triage.error").count() == 1
+
+
 def test_setting_endpoint_requires_admin(db, acme):
     client = _client(db, acme["member"].id, email="m@e.com")
     resp = client.put(
@@ -330,8 +429,9 @@ def test_run_github_403_becomes_400_with_hint(db, acme):
         "403", request=httpx.Request("GET", "https://api.github.com"), response=httpx.Response(403)
     )
     with patch("src.routers.dependabot_triage.GitHubClient") as mock:
-        mock.return_value.request.side_effect = err
+        mock.return_value.request_paginated.side_effect = err
         resp = client.post("/orgs/acme/dependabot-triage", json={"token": "ghp_x", "repos": ["acme/api"]})
+    # 403 is a scope problem — the whole sweep aborts with the hint
     assert resp.status_code == 400 and "Pull requests" in resp.json()["detail"]
 
 
@@ -357,7 +457,7 @@ def test_run_accepts_a_bare_repo_name(db, acme):
     assert resp.json()["decisions"][0]["action"] == "approved"
 
 
-def test_run_non_403_github_error_is_surfaced(db, acme):
+def test_run_non_403_github_error_becomes_a_per_repo_error_decision(db, acme):
     client = _client(db, acme["admin"].id)
     automation_settings_repo.upsert(
         db, acme["org"].tenant_id, "acme/api", "dependabot_triage", enabled=True, mode="approve_only"
@@ -367,21 +467,24 @@ def test_run_non_403_github_error_is_surfaced(db, acme):
         "500", request=httpx.Request("GET", "https://api.github.com"), response=httpx.Response(500)
     )
     with patch("src.routers.dependabot_triage.GitHubClient") as mock:
-        mock.return_value.request.side_effect = err
+        mock.return_value.request_paginated.side_effect = err
         resp = client.post("/orgs/acme/dependabot-triage", json={"token": "ghp_x", "repos": ["acme/api"]})
-    assert resp.status_code >= 400 and "Pull requests" not in resp.json()["detail"]
+    assert resp.status_code == 200
+    assert resp.json()["decisions"][0]["action"] == "error"
+    assert db.query(AuditLog).filter(AuditLog.action == "dependabot_triage.error").count() == 1
 
 
-def test_run_surfaces_a_network_error(db, acme):
+def test_run_network_error_becomes_a_per_repo_error_decision(db, acme):
     client = _client(db, acme["admin"].id)
     automation_settings_repo.upsert(
         db, acme["org"].tenant_id, "acme/api", "dependabot_triage", enabled=True, mode="approve_only"
     )
     db.commit()
     with patch("src.routers.dependabot_triage.GitHubClient") as mock:
-        mock.return_value.request.side_effect = httpx.ConnectError("boom")
+        mock.return_value.request_paginated.side_effect = httpx.ConnectError("boom")
         resp = client.post("/orgs/acme/dependabot-triage", json={"token": "ghp_x", "repos": ["acme/api"]})
-    assert resp.status_code >= 500
+    assert resp.status_code == 200
+    assert resp.json()["decisions"][0]["reason"] == "GitHub API unreachable"
 
 
 def test_run_dry_run_writes_no_reviews(db, acme):

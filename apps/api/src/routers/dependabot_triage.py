@@ -22,7 +22,7 @@ from src.core.db import get_db
 from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
 from src.repositories import audit_repo, automation_settings_repo
 from src.services import dependabot_triage
-from src.services.github_client import GitHubClient, github_error as _github_error
+from src.services.github_client import GitHubClient
 from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token
 
 router = APIRouter()
@@ -59,6 +59,23 @@ class DecisionOut(BaseModel):
 
 class TriageResponse(BaseModel):
     decisions: list[DecisionOut]
+
+
+@router.get("/orgs/{org_login}/repos/{owner}/{repo}/automation/dependabot-triage")
+def get_triage_setting(
+    org_login: str,
+    owner: str,
+    repo: str,
+    ctx: OrgContext = Depends(require_org_role(min_role="admin")),
+    db: Session = Depends(get_db),
+):
+    assert_owner_matches_org(owner, ctx)
+    row = automation_settings_repo.get(db, ctx.org.tenant_id, f"{owner}/{repo}", _FEATURE)
+    return {
+        "enabled": bool(row and row.enabled),
+        "mode": (row.mode if row and row.mode else dependabot_triage.MODE_APPROVE_ONLY),
+        "merge_method": (row.extra or {}).get("merge_method", "squash") if row else "squash",
+    }
 
 
 @router.put("/orgs/{org_login}/repos/{owner}/{repo}/automation/dependabot-triage")
@@ -135,11 +152,14 @@ def run_triage(
                 dry_run=body.dry_run,
             )
         except httpx.HTTPStatusError as exc:
+            # 403 is almost always a missing scope — retrying the other repos is pointless,
+            # so surface the hint. Any other GitHub error is recorded against just this
+            # repo so the rest of the sweep still runs (and stays audited).
             if exc.response.status_code == 403:
                 raise HTTPException(status_code=400, detail=_PERMISSION_HINT) from exc
-            raise _github_error(exc) from exc
-        except httpx.RequestError as exc:
-            raise _github_error(exc) from exc
+            decisions = [dependabot_triage.Decision(None, "", "error", f"GitHub API error: {exc.response.status_code}")]
+        except httpx.RequestError:
+            decisions = [dependabot_triage.Decision(None, "", "error", "GitHub API unreachable")]
 
         if not decisions and not (setting and setting.enabled):
             decisions = [dependabot_triage.Decision(None, "", "skipped", "not enabled for this repo")]
@@ -148,10 +168,11 @@ def run_triage(
             out.append(
                 DecisionOut(repo=full_repo, number=d.number, title=d.title, action=d.action, reason=d.reason)
             )
+            # audit_repo.write commits per call, so a decision already acted on GitHub is
+            # never left unaudited by a later repo's failure.
             audit_repo.write(
                 db, user.email, f"dependabot_triage.{d.action}",
                 f"{full_repo}#{d.number}" if d.number else full_repo,
                 {"reason": d.reason}, tenant_id=ctx.org.tenant_id,
             )
-    db.commit()
     return TriageResponse(decisions=out)

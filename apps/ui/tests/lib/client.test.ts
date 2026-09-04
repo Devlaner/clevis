@@ -86,7 +86,13 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     expect(JSON.parse(init.body as string)).toEqual({ repos: ["api"], dry_run: true, token: undefined });
   });
 
-  it("PUTs the dependabot-triage setting and POSTs the run under the org path", async () => {
+  it("GET/PUTs the dependabot-triage setting and POSTs the run under the org path", async () => {
+    stubOkJson({ enabled: false, mode: "approve_only", merge_method: "squash" });
+    await api.dependabotTriage.getRepo("acme", "acme", "api");
+    const [getUrl, getInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(getUrl).toContain("/orgs/acme/repos/acme/api/automation/dependabot-triage");
+    expect(getInit.method).toBeUndefined();
+
     stubOkJson({ enabled: true, mode: "approve_only", merge_method: "squash" });
     await api.dependabotTriage.setRepo("acme", "acme", "api", { enabled: true, mode: "approve_only" });
     const [settingUrl, settingInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];

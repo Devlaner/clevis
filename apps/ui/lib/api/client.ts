@@ -344,6 +344,10 @@ export const api = {
     // Per-repo opt-in + mode for Dependabot auto-triage (issue #290). Default off; only
     // patch-level dependabot[bot] bumps with all checks green and no pending human
     // review are ever acted on. approve_and_merge is the only mode that merges.
+    getRepo: (org: string, owner: string, repo: string) =>
+      get<{ enabled: boolean; mode: "approve_only" | "approve_and_merge"; merge_method: string }>(
+        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/automation/dependabot-triage`,
+      ),
     setRepo: (
       org: string,
       owner: string,

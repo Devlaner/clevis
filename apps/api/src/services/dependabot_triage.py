@@ -34,9 +34,12 @@ MODE_APPROVE_AND_MERGE = "approve_and_merge"
 MODES = (MODE_APPROVE_ONLY, MODE_APPROVE_AND_MERGE)
 DEFAULT_CAP = 5
 
-# Dependabot PR bodies open with e.g. "Bumps [lodash](...) from 4.17.20 to 4.17.21."
+# Dependabot PR bodies open with e.g. "Bumps [lodash](...) from 4.17.20 to 4.17.21.".
+# A grouped PR has several such lines ("Updates `x` from ... to ...", "Updates `y` ...").
+# The trailing (?![.\w-]) rejects a 4-part or pre-release target ("1.2.3.4", "1.2.3-rc1")
+# so those fall through to "undeterminable" -> skip.
 _BUMP_RE = re.compile(
-    r"(?:Bumps|Updates?)\s+.*?\bfrom\s+v?(\d+\.\d+\.\d+)\s+to\s+v?(\d+\.\d+\.\d+)",
+    r"\bfrom\s+v?(\d+\.\d+\.\d+)\s+to\s+v?(\d+\.\d+\.\d+)(?![-\w]|\.\d)",
     re.IGNORECASE,
 )
 
@@ -50,25 +53,35 @@ class Decision:
 
 
 def _bump_is_patch(body: str) -> bool | None:
-    """``True``/``False`` when the bump level is determinable from the Dependabot PR
-    body, ``None`` when it isn't (caller skips — fail closed). Only plain ``X.Y.Z``
-    versions are recognised; a pre-release or 2-part version yields ``None``."""
-    m = _BUMP_RE.search(body or "")
-    if not m:
+    """``True`` only when **every** "from X.Y.Z to X.Y.Z" line in the body is a
+    same-major, same-minor, non-decreasing patch bump. ``None`` when the body has no
+    recognisable bump line at all (caller skips — fail closed). A grouped Dependabot PR
+    that bundles a minor/major bump alongside a patch one returns ``False``, not
+    ``True``. Pre-release / 4-part target versions aren't matched by ``_BUMP_RE``, so a
+    body containing only those yields ``None``."""
+    matches = _BUMP_RE.findall(body or "")
+    if not matches:
         return None
-    old = tuple(int(x) for x in m.group(1).split("."))
-    new = tuple(int(x) for x in m.group(2).split("."))
-    return old[0] == new[0] and old[1] == new[1] and new[2] >= old[2]
+    for old_s, new_s in matches:
+        old = tuple(int(x) for x in old_s.split("."))
+        new = tuple(int(x) for x in new_s.split("."))
+        if not (old[0] == new[0] and old[1] == new[1] and new[2] >= old[2]):
+            return False
+    return True
 
 
 def _checks_all_green(client: GitHubClient, owner: str, repo: str, sha: str) -> bool:
     """Every check-run *and* every classic commit status on ``sha`` is a completed
     success. Requires at least one signal — a head SHA with no CI at all is treated as
-    not-green (this feature does not auto-merge unverified code)."""
+    not-green (this feature does not auto-merge unverified code). If GitHub reports more
+    check-runs than the one page we fetched, we can't verify them all, so → not green."""
     runs = client.request(
         "GET", f"/repos/{owner}/{repo}/commits/{sha}/check-runs", params={"per_page": 100}
     )
     check_runs = runs.get("check_runs", []) if isinstance(runs, dict) else []
+    total = runs.get("total_count", len(check_runs)) if isinstance(runs, dict) else 0
+    if total > len(check_runs):
+        return False  # a failing run could be hiding on a page we didn't fetch
     for run in check_runs:
         if run.get("status") != "completed":
             return False
@@ -87,9 +100,7 @@ def _checks_all_green(client: GitHubClient, owner: str, repo: str, sha: str) -> 
 def _human_review_blocks(client: GitHubClient, owner: str, repo: str, pr: dict) -> bool:
     if pr.get("requested_reviewers") or pr.get("requested_teams"):
         return True
-    reviews = client.request(
-        "GET", f"/repos/{owner}/{repo}/pulls/{pr['number']}/reviews", params={"per_page": 100}
-    )
+    reviews = client.request_paginated(f"/repos/{owner}/{repo}/pulls/{pr['number']}/reviews")
     return any(r.get("state") == "CHANGES_REQUESTED" for r in reviews)
 
 
@@ -128,8 +139,8 @@ def triage(
     if not enabled:
         return []
 
-    prs = client.request(
-        "GET", f"/repos/{owner}/{repo}/pulls", params={"state": "open", "per_page": 100}
+    prs = client.request_paginated(
+        f"/repos/{owner}/{repo}/pulls", params={"state": "open"}
     )
     decisions: list[Decision] = []
     acted = 0

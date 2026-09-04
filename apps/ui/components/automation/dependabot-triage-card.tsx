@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { useMutation } from "@tanstack/react-query"
+import { useEffect, useRef, useState } from "react"
+import { useMutation, useQuery } from "@tanstack/react-query"
 import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api/client"
 import type { DependabotTriageResponse } from "@/lib/api/types"
@@ -28,6 +28,24 @@ export function DependabotTriageCard({ org, owner, repo, token }: Props) {
   const [runArmed, setRunArmed] = useState(false)
 
   const ready = org.trim().length > 0 && owner.trim().length > 0 && repo.trim().length > 0
+
+  // Hydrate the form from the persisted setting so opening the page can't silently
+  // downgrade a repo that's already enabled.
+  const current = useQuery({
+    queryKey: ["dependabotTriage.setting", org.trim(), owner.trim(), repo.trim()],
+    queryFn: () => api.dependabotTriage.getRepo(org.trim(), owner.trim(), repo.trim()),
+    enabled: ready,
+    retry: false,
+  })
+  // Hydrate once per repo, and never over a user edit in progress.
+  const hydratedFor = useRef<string | null>(null)
+  useEffect(() => {
+    if (!current.data || hydratedFor.current === repo.trim()) return
+    hydratedFor.current = repo.trim()
+    setEnabled(current.data.enabled)
+    setMode(current.data.mode)
+    setMergeMethod(current.data.merge_method || "squash")
+  }, [current.data, repo])
 
   useEffect(() => {
     setRunArmed(false)
@@ -113,22 +131,24 @@ export function DependabotTriageCard({ org, owner, repo, token }: Props) {
           >
             {run.isPending ? "Running…" : "Dry run"}
           </Button>
-          {mode === "approve_and_merge" && (
-            <Button
-              size="sm"
-              disabled={!ready || run.isPending}
-              onClick={() => {
-                if (runArmed) {
-                  setRunArmed(false)
-                  run.mutate(false)
-                } else {
-                  setRunArmed(true)
-                }
-              }}
-            >
-              {runArmed ? "Click again to run for real" : "Run for real"}
-            </Button>
-          )}
+          <Button
+            size="sm"
+            disabled={!ready || run.isPending || !enabled}
+            onClick={() => {
+              if (runArmed) {
+                setRunArmed(false)
+                run.mutate(false)
+              } else {
+                setRunArmed(true)
+              }
+            }}
+          >
+            {runArmed
+              ? "Click again to confirm"
+              : mode === "approve_and_merge"
+                ? "Approve & merge eligible PRs"
+                : "Approve eligible PRs"}
+          </Button>
         </div>
 
         {runErr && <p className="text-xs text-red-500">{runErr}</p>}
