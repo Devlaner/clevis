@@ -78,6 +78,14 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     expect(JSON.parse(init.body as string)).toEqual({ token: undefined, actor: "me", dry_run: true });
   });
 
+  it("POSTs branch-protection/bulk with the org in the path and drops an empty token", async () => {
+    stubOkJson({ dry_run: true, diffs: [] });
+    await api.branchProtection.bulk("acme", { repos: ["api"], dry_run: true, token: "" });
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/orgs/acme/branch-protection/bulk");
+    expect(JSON.parse(init.body as string)).toEqual({ repos: ["api"], dry_run: true, token: undefined });
+  });
+
   it("builds the analytics.exportHistory URL with only owner when no window is given", async () => {
     stubOkJson({ truncated: false, row_count: 0, entries: [] });
     await api.analytics.exportHistory("acme corp");

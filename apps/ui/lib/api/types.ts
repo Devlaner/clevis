@@ -509,6 +509,37 @@ export interface DispatchResponse {
   message: string | null
 }
 
+// issue #288 — bulk branch-protection apply
+export interface BranchProtectionPreset {
+  required_pull_request_reviews?: { required_approving_review_count: number } | null
+  enforce_admins?: boolean
+  allow_force_pushes?: boolean
+  allow_deletions?: boolean
+  required_status_checks?: { strict: boolean; contexts: string[] } | null
+  restrictions?: null
+}
+
+export interface BranchProtectionRepoDiff {
+  repo: string
+  branch: string
+  currently_protected: boolean
+  would_change: boolean
+  changes: Record<string, { from: unknown; to: unknown }>
+  error: string | null
+}
+
+export interface BranchProtectionRepoResult {
+  repo: string
+  applied: boolean
+  error: string | null
+}
+
+export interface BranchProtectionBulkResponse {
+  dry_run: boolean
+  diffs?: BranchProtectionRepoDiff[]
+  results?: BranchProtectionRepoResult[]
+}
+
 export interface RepoSecurityRow {
   repo: string
   branch_protection: boolean

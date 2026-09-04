@@ -11,6 +11,7 @@ import { api } from "@/lib/api/client"
 import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
+import { BranchProtectionCard } from "@/components/automation/branch-protection-card"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import type { InstallationMeta, RunSummary, WorkflowSummary } from "@/lib/api/types"
@@ -379,6 +380,10 @@ export default function AutomationPage() {
             </>
           </div>
         )}
+      </div>
+
+      <div className="mt-4">
+        <BranchProtectionCard org={owner.trim()} token={token} repos={repoOptions} />
       </div>
     </>
   )

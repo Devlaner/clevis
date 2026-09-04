@@ -2,6 +2,8 @@ import type {
   AnalyticsHistoryResponse,
   AnalyticsOverviewResponse,
   AuditLogOut,
+  BranchProtectionBulkResponse,
+  BranchProtectionPreset,
   CacheClearResponse,
   CacheListResponse,
   CheckValue,
@@ -325,6 +327,25 @@ export const api = {
     ) =>
       post<DispatchResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflows/${workflowId}/dispatch`,
+        { ...body, token: body.token || undefined },
+      ),
+  },
+  branchProtection: {
+    // Bulk-apply a branch-protection preset across an org's repos (issue #288). Org-admin
+    // only; needs `Administration: write`. dry_run returns a per-repo diff and writes
+    // nothing. A 400 with a docs pointer means the App is missing the permission.
+    bulk: (
+      org: string,
+      body: {
+        repos: string[]
+        preset?: BranchProtectionPreset
+        dry_run: boolean
+        save_preset?: boolean
+        token?: string
+      },
+    ) =>
+      post<BranchProtectionBulkResponse>(
+        `/orgs/${encodeURIComponent(org)}/branch-protection/bulk`,
         { ...body, token: body.token || undefined },
       ),
   },
