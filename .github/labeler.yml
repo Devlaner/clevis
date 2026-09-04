@@ -1,7 +1,7 @@
-"api":
+"API":
   - changed-files:
       - any-glob-to-any-file: "apps/api/**"
-"ui":
+"UX/UI":
   - changed-files:
       - any-glob-to-any-file: "apps/ui/**"
 "worker":

@@ -40,23 +40,52 @@ jobs:
             const author = item.user.login;
             const repo = context.repo;
 
-            // Scopes we recognise, mapped to the label name to apply; anything else is
-            // ignored rather than auto-creating a junk label. Keep in sync with
-            // .github/labeler.yml -- "ci" maps to the repo's existing "CI/CD" label
-            // rather than a plain "ci" one.
-            const AREA_LABELS = {
-              api: "api", ui: "ui", worker: "worker", checks: "checks", db: "db", ci: "CI/CD",
+            // Scopes we recognise; anything else is ignored rather than auto-creating a
+            // junk label. Each maps to the *existing* repo label(s) to look for first
+            // (checked case-insensitively, in order) -- e.g. "ui" reuses the repo's
+            // "UX/UI" label rather than creating a near-duplicate "ui" one. The last
+            // entry is what gets created if none of the candidates exist yet. Keep in
+            // sync with .github/labeler.yml.
+            const AREA_LABEL_CANDIDATES = {
+              api: ["API", "api"],
+              ui: ["UX/UI", "ui"],
+              worker: ["worker"],
+              checks: ["checks"],
+              db: ["db"],
+              ci: ["CI/CD", "ci"],
             };
+
+            // Look up the repo's labels once so area labels above (and TYPE_LABELS
+            // below) can reuse whatever already exists instead of assuming a name.
+            const existingLabels = await github.paginate(github.rest.issues.listLabelsForRepo, { ...repo, per_page: 100 });
+            const labelsByLower = new Map(existingLabels.map((l) => [l.name.toLowerCase(), l.name]));
+
+            async function resolveLabel(candidates) {
+              for (const name of candidates) {
+                const found = labelsByLower.get(name.toLowerCase());
+                if (found) return found;
+              }
+              const toCreate = candidates[candidates.length - 1];
+              try {
+                await github.rest.issues.createLabel({ ...repo, name: toCreate, color: "ededed" });
+                labelsByLower.set(toCreate.toLowerCase(), toCreate);
+              } catch (e) {
+                // Race with another run creating the same label concurrently, or
+                // missing perms -- addLabels below will warn if it's still missing.
+                core.warning(`could not create label "${toCreate}": ${e.message}`);
+              }
+              return toCreate;
+            }
 
             // 1. Labels from the "type(scope):" title prefix
             const m = (item.title || "").match(/^([a-z]+)(?:\(([^)]+)\))?!?:/i);
             const labels = [];
             if (m) {
               const type = TYPE_LABELS[m[1].toLowerCase()];
-              if (type) labels.push(type);
+              if (type) labels.push(await resolveLabel([type]));
               const scope = (m[2] || "").toLowerCase().trim();
-              const areaLabel = AREA_LABELS[scope];
-              if (areaLabel) labels.push(areaLabel);
+              const areaCandidates = AREA_LABEL_CANDIDATES[scope];
+              if (areaCandidates) labels.push(await resolveLabel(areaCandidates));
             }
             if (labels.length) {
               // Don't let a labelling failure abort assignee/milestone below.
