@@ -69,7 +69,7 @@ function ProfileDropdown({
   scopeOptions,
   activeScope,
   onSelectScope,
-  personalInstallUrl,
+  addInstallUrl,
   inviteHref,
   onClose,
   onSignOut,
@@ -78,7 +78,7 @@ function ProfileDropdown({
   scopeOptions: ScopeOption[]
   activeScope: ActiveScope | null
   onSelectScope: (scope: ActiveScope) => void
-  personalInstallUrl: string | null
+  addInstallUrl: string | null
   inviteHref: string
   onClose: () => void
   onSignOut: () => void
@@ -118,7 +118,7 @@ function ProfileDropdown({
       </div>
 
       {/* Scope switcher — personal account + orgs you belong to */}
-      {(scopeOptions.length > 0 || personalInstallUrl) && (
+      {(scopeOptions.length > 0 || addInstallUrl) && (
         <div className="px-1.5 pb-1.5 border-b border-sidebar-border/60">
           <p className="px-2 pt-1 pb-1.5 text-[0.6875rem] font-medium uppercase tracking-wide text-sidebar-foreground/40">
             Switch account
@@ -140,13 +140,17 @@ function ProfileDropdown({
               </button>
             )
           })}
-          {personalInstallUrl && (
+          {addInstallUrl && (
             <a
-              href={personalInstallUrl}
+              href={addInstallUrl}
               className="flex items-center gap-2 px-2 py-1.5 text-left rounded-md hover:bg-sidebar-accent/60 transition-colors text-sidebar-foreground/70 hover:text-sidebar-foreground"
             >
               <User className="size-3.5 shrink-0" />
-              <span className="text-[0.8125rem] flex-1">Connect your personal GitHub account</span>
+              <span className="text-[0.8125rem] flex-1">
+                {scopeOptions.some((o) => o.scope.kind === "personal")
+                  ? "Add another account or org"
+                  : "Connect your personal GitHub account"}
+              </span>
               <ArrowSquareOut className="size-3 shrink-0" />
             </a>
           )}
@@ -217,7 +221,9 @@ export function AppSidebar() {
   })
   const personalInstall = installs.find((i) => i.account_type === "User")
   const slug = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG
-  const personalInstallUrl = !personalInstall && slug ? `https://github.com/apps/${slug}/installations/new` : null
+  // Always offer a way to install the App on another account/org (there's no cap on how
+  // many an org admin can connect) — not only when the user has no personal install yet.
+  const addInstallUrl = slug ? `https://github.com/apps/${slug}/installations/new` : null
 
   const scopeOptions: ScopeOption[] = useMemo(
     () => [
@@ -344,7 +350,7 @@ export function AppSidebar() {
             scopeOptions={scopeOptions}
             activeScope={scope}
             onSelectScope={setScope}
-            personalInstallUrl={personalInstallUrl}
+            addInstallUrl={addInstallUrl}
             inviteHref={inviteHref}
             onClose={() => setOpen(false)}
             onSignOut={() => { logout(); setOpen(false); router.replace("/login") }}

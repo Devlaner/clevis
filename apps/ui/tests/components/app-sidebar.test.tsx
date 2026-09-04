@@ -511,6 +511,19 @@ describe("AppSidebar scope switcher", () => {
     expect(connectLink).toHaveAttribute("href", "https://github.com/apps/clevis/installations/new");
   });
 
+  it("offers 'add another account or org' even when a personal installation already exists", async () => {
+    vi.stubEnv("NEXT_PUBLIC_GITHUB_APP_SLUG", "clevis");
+    installations = [
+      { id: 1, account_login: "octocat", account_type: "User", installation_id: 5, created_at: "2026-01-01T00:00:00Z" },
+    ];
+    renderSidebar();
+
+    fireEvent.click(screen.getByRole("button", { name: /user/i }));
+
+    const addLink = await screen.findByRole("link", { name: /add another account or org/i });
+    expect(addLink).toHaveAttribute("href", "https://github.com/apps/clevis/installations/new");
+  });
+
   // Issue #371
   it("auto-selects the sole org membership as the active scope when nothing is persisted", async () => {
     orgMemberships = [{ org_login: "acme", role: "admin" }];
