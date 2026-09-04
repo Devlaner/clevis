@@ -51,8 +51,8 @@ jobs:
               const type = TYPE_LABELS[m[1].toLowerCase()];
               if (type) labels.push(type);
               const scope = (m[2] || "").toLowerCase().trim();
-              if (AREAS.has(scope) && `area:${scope}`.length <= 50) {
-                labels.push(`area:${scope}`);
+              if (AREAS.has(scope)) {
+                labels.push(scope);
               }
             }
             if (labels.length) {
