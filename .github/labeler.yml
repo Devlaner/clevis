@@ -1,0 +1,18 @@
+"area:api":
+  - changed-files:
+      - any-glob-to-any-file: "apps/api/**"
+"area:ui":
+  - changed-files:
+      - any-glob-to-any-file: "apps/ui/**"
+"area:worker":
+  - changed-files:
+      - any-glob-to-any-file: "apps/worker/**"
+"area:checks":
+  - changed-files:
+      - any-glob-to-any-file: "packages/checks/**"
+"area:db":
+  - changed-files:
+      - any-glob-to-any-file: "apps/api/alembic/versions/**"
+"area:ci":
+  - changed-files:
+      - any-glob-to-any-file: [".github/**"]
