@@ -119,6 +119,17 @@ async def github_webhook(request: Request, db: Session = Depends(get_db)):
 
     if event == "installation" and payload.get("action") == "deleted":
         _handle_installation_deleted(db, payload)
+    elif event == "installation" and payload.get("action") == "new_permissions_accepted":
+        _handle_installation_permissions_accepted(db, payload)
+    elif event == "installation" and payload.get("action") in {"suspend", "unsuspend"}:
+        # Not yet acted on (token_resolution already degrades gracefully when minting
+        # fails against a suspended install), but log it rather than silently 200 so a
+        # suspended install is at least visible in the API logs.
+        logger.info(
+            "installation.%s webhook for installation %s (not acted on yet)",
+            payload.get("action"),
+            (payload.get("installation") or {}).get("id"),
+        )
     # installation.created is deliberately a no-op: rows are only ever written to
     # github_installations by the authenticated /orgs/{org}/installations/sync and
     # /me/installations/sync endpoints, which independently verify (via
@@ -188,6 +199,37 @@ def _handle_ingested_event(db: Session, event: str, delivery_id: str, raw_body: 
         logger.exception("Failed to enqueue webhook_deliveries row %s onto Redis stream %s", row.id, _WEBHOOK_STREAM_KEY)
         row.status = "queue_failed"
         db.commit()
+
+
+def _handle_installation_permissions_accepted(db: Session, payload: dict) -> None:
+    """An org owner approved the App's updated permission request on GitHub. The payload
+    carries the full `installation` object including its now-current `permissions` dict —
+    persist it so the "some automations need extra access" notice clears on its own."""
+    installation = payload.get("installation") or {}
+    installation_id = installation.get("id")
+    if not isinstance(installation_id, int) or isinstance(installation_id, bool):
+        logger.warning("installation.new_permissions_accepted has a missing/non-integer id: %r", installation_id)
+        return
+    permissions = installation.get("permissions")
+    if not isinstance(permissions, dict):
+        logger.warning("installation.new_permissions_accepted %s has no permissions object", installation_id)
+        return
+
+    updated = installation_repo.update_permissions(db, installation_id=installation_id, permissions=permissions)
+    if updated:
+        # update_permissions already set the session tenant context via the SECURITY
+        # DEFINER resolver; re-read it here so the audit row is attributed under RLS.
+        tenant_id = db.execute(
+            text("SELECT resolve_installation_tenant_id(:iid)"), {"iid": installation_id}
+        ).scalar()
+        audit_repo.write(
+            db,
+            actor="github-webhook",
+            action="installation.permissions_accepted",
+            target=str(installation_id),
+            payload={"installation_id": installation_id, "permissions": permissions},
+            tenant_id=tenant_id,
+        )
 
 
 def _handle_installation_deleted(db: Session, payload: dict) -> None:
