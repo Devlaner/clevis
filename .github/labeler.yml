@@ -13,6 +13,6 @@
 "db":
   - changed-files:
       - any-glob-to-any-file: "apps/api/alembic/versions/**"
-"ci":
+"CI/CD":
   - changed-files:
       - any-glob-to-any-file: [".github/**"]

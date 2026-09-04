@@ -40,9 +40,13 @@ jobs:
             const author = item.user.login;
             const repo = context.repo;
 
-            // Scopes we recognise; anything else is ignored rather than
-            // auto-creating a junk label. Keep in sync with .github/labeler.yml.
-            const AREAS = new Set(["api", "ui", "worker", "checks", "db", "ci"]);
+            // Scopes we recognise, mapped to the label name to apply; anything else is
+            // ignored rather than auto-creating a junk label. Keep in sync with
+            // .github/labeler.yml -- "ci" maps to the repo's existing "CI/CD" label
+            // rather than a plain "ci" one.
+            const AREA_LABELS = {
+              api: "api", ui: "ui", worker: "worker", checks: "checks", db: "db", ci: "CI/CD",
+            };
 
             // 1. Labels from the "type(scope):" title prefix
             const m = (item.title || "").match(/^([a-z]+)(?:\(([^)]+)\))?!?:/i);
@@ -51,9 +55,8 @@ jobs:
               const type = TYPE_LABELS[m[1].toLowerCase()];
               if (type) labels.push(type);
               const scope = (m[2] || "").toLowerCase().trim();
-              if (AREAS.has(scope)) {
-                labels.push(scope);
-              }
+              const areaLabel = AREA_LABELS[scope];
+              if (areaLabel) labels.push(areaLabel);
             }
             if (labels.length) {
               // Don't let a labelling failure abort assignee/milestone below.
