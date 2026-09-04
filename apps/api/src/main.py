@@ -16,6 +16,7 @@ from src.routers import (
     branch_protection,
     collab,
     config,
+    dependabot_triage,
     github,
     github_auth,
     health,
@@ -98,6 +99,7 @@ app.include_router(automation.router, tags=["automation"])
 app.include_router(pr_nudges.router, tags=["pull-requests"])
 app.include_router(branch_protection.router, tags=["automation"])
 app.include_router(workflow_lint.router, tags=["automation"])
+app.include_router(dependabot_triage.router, tags=["automation"])
 app.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 app.include_router(audit.router, prefix="/audit", tags=["audit"])
 app.include_router(tokens.router, prefix="/tokens", tags=["tokens"])

@@ -554,6 +554,19 @@ export interface WorkflowLintResponse {
   pr_url: string | null
 }
 
+// issue #290 — Dependabot auto-triage
+export interface DependabotTriageDecision {
+  repo: string
+  number: number | null
+  title: string
+  action: string
+  reason: string
+}
+
+export interface DependabotTriageResponse {
+  decisions: DependabotTriageDecision[]
+}
+
 export interface RepoSecurityRow {
   repo: string
   branch_protection: boolean

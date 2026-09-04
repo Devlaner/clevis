@@ -94,6 +94,26 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     expect(JSON.parse(init.body as string)).toEqual({ open_pr: true, token: undefined });
   });
 
+  it("GET/PUTs the dependabot-triage setting and POSTs the run under the org path", async () => {
+    stubOkJson({ enabled: false, mode: "approve_only", merge_method: "squash" });
+    await api.dependabotTriage.getRepo("acme", "acme", "api");
+    const [getUrl, getInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(getUrl).toContain("/orgs/acme/repos/acme/api/automation/dependabot-triage");
+    expect(getInit.method).toBeUndefined();
+
+    stubOkJson({ enabled: true, mode: "approve_only", merge_method: "squash" });
+    await api.dependabotTriage.setRepo("acme", "acme", "api", { enabled: true, mode: "approve_only" });
+    const [settingUrl, settingInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(settingUrl).toContain("/orgs/acme/repos/acme/api/automation/dependabot-triage");
+    expect(settingInit.method).toBe("PUT");
+
+    stubOkJson({ decisions: [] });
+    await api.dependabotTriage.run("acme", { repos: ["acme/api"], dry_run: true }, "");
+    const [runUrl, runInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(runUrl).toContain("/orgs/acme/dependabot-triage");
+    expect(JSON.parse(runInit.body as string)).toEqual({ repos: ["acme/api"], dry_run: true, token: undefined });
+  });
+
   it("builds the analytics.exportHistory URL with only owner when no window is given", async () => {
     stubOkJson({ truncated: false, row_count: 0, entries: [] });
     await api.analytics.exportHistory("acme corp");

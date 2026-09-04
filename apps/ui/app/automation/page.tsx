@@ -12,6 +12,7 @@ import { useActiveScope } from "@/lib/active-scope"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { BranchProtectionCard } from "@/components/automation/branch-protection-card"
+import { DependabotTriageCard } from "@/components/automation/dependabot-triage-card"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { WorkflowLintCard } from "@/components/automation/workflow-lint-card"
 import { relativeTime } from "@/lib/format"
@@ -389,6 +390,10 @@ export default function AutomationPage() {
 
       <div className="mt-4">
         <WorkflowLintCard owner={owner} repo={repo} token={token} />
+      </div>
+
+      <div className="mt-4">
+        <DependabotTriageCard org={owner.trim()} owner={owner.trim()} repo={repo.trim()} token={token} />
       </div>
     </>
   )
