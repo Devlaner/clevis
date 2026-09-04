@@ -193,11 +193,17 @@ def delete_by_installation_id(db: Session, installation_id: int) -> tuple[int, i
 
 def update_permissions(
     db: Session, *, installation_id: int, permissions: dict, synced_at: datetime | None = None
-) -> int:
+) -> tuple[int, bool]:
     """Record GitHub's installation `permissions` object on every row for `installation_id`.
 
-    Returns the number of rows updated (0 if the installation isn't connected in Clevis —
-    e.g. a new_permissions_accepted webhook for an install nobody has synced yet).
+    Returns `(rows_updated, changed)`. `rows_updated` is 0 if the installation isn't
+    connected in Clevis (e.g. a new_permissions_accepted webhook for an install nobody has
+    synced yet). `changed` is True if any updated row's `granted_permissions` differed from
+    `permissions` beforehand -- callers that log an audit entry on change (the webhook
+    handler) use this so a GitHub webhook redelivery of the same new_permissions_accepted
+    event (retries, or a manual redelivery from the GitHub UI) re-confirms
+    `permissions_synced_at` without writing a second identical audit row. `synced_at` is
+    still bumped either way, since "we just reconfirmed this" is true regardless.
 
     Reuses the same RLS handling as delete_by_installation_id: this is called from the
     unauthenticated webhook receiver, which never sets app.tenant_id, so resolve the
@@ -213,6 +219,9 @@ def update_permissions(
     if tenant_id is not None:
         set_session_tenant(db, tenant_id)
 
+    rows = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).all()
+    changed = any(r.granted_permissions != permissions for r in rows)
+
     count = (
         db.query(GitHubInstallation)
         .filter(GitHubInstallation.installation_id == installation_id)
@@ -225,4 +234,4 @@ def update_permissions(
         )
     )
     db.commit()
-    return count
+    return count, changed

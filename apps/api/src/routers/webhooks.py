@@ -215,8 +215,15 @@ def _handle_installation_permissions_accepted(db: Session, payload: dict) -> Non
         logger.warning("installation.new_permissions_accepted %s has no permissions object", installation_id)
         return
 
-    updated = installation_repo.update_permissions(db, installation_id=installation_id, permissions=permissions)
-    if updated:
+    updated, changed = installation_repo.update_permissions(db, installation_id=installation_id, permissions=permissions)
+    # Only write an audit entry when the permissions actually changed -- GitHub redelivers
+    # webhooks on retry (and a redelivery can also be triggered manually from the GitHub
+    # UI), so without this check a redelivered new_permissions_accepted event -- carrying
+    # the identical permissions payload -- would write a second, duplicate audit row for
+    # what is really the same approval. permissions_synced_at is still bumped either way
+    # (update_permissions always does that), since re-observing the same permissions is
+    # itself a useful confirmation, just not one worth a second audit entry.
+    if updated and changed:
         # update_permissions already set the session tenant context via the SECURITY
         # DEFINER resolver; re-read it here so the audit row is attributed under RLS.
         tenant_id = db.execute(
