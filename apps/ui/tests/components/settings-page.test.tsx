@@ -339,6 +339,21 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("relabels the install button once an account is already connected", async () => {
+    vi.stubEnv("NEXT_PUBLIC_GITHUB_APP_SLUG", "clevis");
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "shabnam", account_type: "User", installation_id: 7, created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: /install on another account or org/i })).toBeInTheDocument();
+    vi.unstubAllEnvs();
+  });
+
   it("lists both personal and admin-org installations, and disconnects one after a confirm click", async () => {
     orgsMineMock.mockResolvedValue([{ org_login: "acme", role: "admin" }]);
     installationsListMock.mockResolvedValue([

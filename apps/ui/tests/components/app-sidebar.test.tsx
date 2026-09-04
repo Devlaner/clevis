@@ -511,6 +511,19 @@ describe("AppSidebar scope switcher", () => {
     expect(connectLink).toHaveAttribute("href", "https://github.com/apps/clevis/installations/new");
   });
 
+  it("shows a 'Connect account' heading instead of 'Switch account' when there's nothing to switch between", async () => {
+    vi.stubEnv("NEXT_PUBLIC_GITHUB_APP_SLUG", "clevis");
+    orgMemberships = [];
+    installations = [];
+    renderSidebar();
+
+    fireEvent.click(screen.getByRole("button", { name: /user/i }));
+
+    await screen.findByRole("link", { name: /connect your personal github account/i });
+    expect(screen.getByText("Connect account")).toBeInTheDocument();
+    expect(screen.queryByText("Switch account")).not.toBeInTheDocument();
+  });
+
   it("offers 'add another account or org' even when a personal installation already exists", async () => {
     vi.stubEnv("NEXT_PUBLIC_GITHUB_APP_SLUG", "clevis");
     installations = [
@@ -522,6 +535,8 @@ describe("AppSidebar scope switcher", () => {
 
     const addLink = await screen.findByRole("link", { name: /add another account or org/i });
     expect(addLink).toHaveAttribute("href", "https://github.com/apps/clevis/installations/new");
+    // A switchable option (the personal account) exists here, so the original heading holds.
+    expect(screen.getByText("Switch account")).toBeInTheDocument();
   });
 
   // Issue #371

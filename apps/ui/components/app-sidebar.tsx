@@ -121,7 +121,7 @@ function ProfileDropdown({
       {(scopeOptions.length > 0 || addInstallUrl) && (
         <div className="px-1.5 pb-1.5 border-b border-sidebar-border/60">
           <p className="px-2 pt-1 pb-1.5 text-[0.6875rem] font-medium uppercase tracking-wide text-sidebar-foreground/40">
-            Switch account
+            {scopeOptions.length > 0 ? "Switch account" : "Connect account"}
           </p>
           {scopeOptions.map((opt) => {
             const isActive =
