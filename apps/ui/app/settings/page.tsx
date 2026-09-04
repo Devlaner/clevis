@@ -402,7 +402,8 @@ function ConnectedOrgsSection() {
       <div className="border-t border-border p-4">
         {installUrl ? (
           <Button onClick={() => { window.location.href = installUrl }}>
-            <ArrowSquareOut className="size-3.5" />Install GitHub App
+            <ArrowSquareOut className="size-3.5" />
+            {rows.length > 0 ? "Install on another account or org" : "Install GitHub App"}
           </Button>
         ) : (
           <p className="text-xs text-muted-foreground">
