@@ -198,6 +198,28 @@ describe("AutomationPage", () => {
     });
   });
 
+  it("shows a permission-drift notice when the org installation is missing scopes", async () => {
+    installationsListForOrgMock.mockResolvedValue([
+      {
+        id: 2,
+        account_login: "acme",
+        account_type: "Organization",
+        installation_id: 99,
+        created_at: "2026-07-20T00:00:00Z",
+        permissions_synced_at: "2026-09-01T00:00:00Z",
+        blocked_features: [
+          { feature: "bulk_branch_protection", label: "Bulk branch-protection apply", missing: { administration: "write" } },
+        ],
+      },
+    ]);
+    renderPage();
+    fireEvent.change(screen.getByPlaceholderText("e.g. octocat"), { target: { value: "acme" } });
+    await waitFor(() => {
+      expect(screen.getByText(/needs extra GitHub access/i)).toBeInTheDocument();
+      expect(screen.getByText("Bulk branch-protection apply")).toBeInTheDocument();
+    });
+  });
+
   it("loads workflows and run history for the selected owner/repo", async () => {
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
     workflowsMock.mockResolvedValue({

@@ -312,6 +312,33 @@ describe("SettingsPage", () => {
     });
   });
 
+  it("shows a permission-drift notice under a connected account that's missing scopes", async () => {
+    orgsMineMock.mockResolvedValue([{ org_login: "acme", role: "admin" }]);
+    installationsListMock.mockResolvedValue([]);
+    installationsListForOrgMock.mockResolvedValue([
+      {
+        id: 2,
+        account_login: "acme",
+        account_type: "Organization",
+        installation_id: 42,
+        created_at: "2026-01-02T00:00:00Z",
+        permissions_synced_at: "2026-09-01T00:00:00Z",
+        blocked_features: [
+          { feature: "stale_pr_nudges", label: "Stale pull-request nudges", missing: { pull_requests: "write" } },
+        ],
+      },
+    ]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/needs extra GitHub access/i)).toBeInTheDocument();
+      expect(screen.getByText("Stale pull-request nudges")).toBeInTheDocument();
+    });
+  });
+
   it("lists both personal and admin-org installations, and disconnects one after a confirm click", async () => {
     orgsMineMock.mockResolvedValue([{ org_login: "acme", role: "admin" }]);
     installationsListMock.mockResolvedValue([

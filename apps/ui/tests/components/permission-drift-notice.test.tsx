@@ -51,4 +51,32 @@ describe("PermissionDriftNotice", () => {
     expect(screen.getByText(/not yet checked/i)).toBeInTheDocument()
     expect(screen.queryByRole("link")).not.toBeInTheDocument()
   })
+
+  it("uses the singular 'automation' for exactly one blocked feature", () => {
+    render(
+      <PermissionDriftNotice
+        install={install({
+          blocked_features: [
+            { feature: "stale_pr_nudges", label: "Stale pull-request nudges", missing: { pull_requests: "write" } },
+          ],
+        })}
+      />,
+    )
+    expect(screen.getByText(/1 automation needs extra GitHub access/i)).toBeInTheDocument()
+  })
+
+  it("explains the slug isn't configured instead of a link when the App slug is unset", () => {
+    vi.unstubAllEnvs()
+    render(
+      <PermissionDriftNotice
+        install={install({
+          blocked_features: [
+            { feature: "stale_pr_nudges", label: "Stale pull-request nudges", missing: { pull_requests: "write" } },
+          ],
+        })}
+      />,
+    )
+    expect(screen.queryByRole("link")).not.toBeInTheDocument()
+    expect(screen.getByText(/slug isn.t configured/i)).toBeInTheDocument()
+  })
 })
