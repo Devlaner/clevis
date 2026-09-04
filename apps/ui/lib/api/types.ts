@@ -540,6 +540,20 @@ export interface BranchProtectionBulkResponse {
   results?: BranchProtectionRepoResult[]
 }
 
+// issue #291 — workflow policy lint + auto-fix PR
+export interface WorkflowLintFinding {
+  path: string
+  rule: string
+  severity: string
+  message: string
+}
+
+export interface WorkflowLintResponse {
+  findings: WorkflowLintFinding[]
+  fixable: boolean
+  pr_url: string | null
+}
+
 export interface RepoSecurityRow {
   repo: string
   branch_protection: boolean

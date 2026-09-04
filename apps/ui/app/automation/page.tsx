@@ -13,6 +13,7 @@ import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { BranchProtectionCard } from "@/components/automation/branch-protection-card"
 import { CHART_COLORS } from "@/lib/charts/theme"
+import { WorkflowLintCard } from "@/components/automation/workflow-lint-card"
 import { relativeTime } from "@/lib/format"
 import type { InstallationMeta, RunSummary, WorkflowSummary } from "@/lib/api/types"
 
@@ -384,6 +385,10 @@ export default function AutomationPage() {
 
       <div className="mt-4">
         <BranchProtectionCard org={owner.trim()} token={token} repos={repoOptions} />
+      </div>
+
+      <div className="mt-4">
+        <WorkflowLintCard owner={owner} repo={repo} token={token} />
       </div>
     </>
   )

@@ -86,6 +86,14 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     expect(JSON.parse(init.body as string)).toEqual({ repos: ["api"], dry_run: true, token: undefined });
   });
 
+  it("POSTs workflow-lint under the personal route and drops an empty token", async () => {
+    stubOkJson({ findings: [], fixable: false, pr_url: null });
+    await api.workflowLint.scan("acme", "api", { open_pr: true }, "");
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/me/repos/acme/api/workflow-lint");
+    expect(JSON.parse(init.body as string)).toEqual({ open_pr: true, token: undefined });
+  });
+
   it("builds the analytics.exportHistory URL with only owner when no window is given", async () => {
     stubOkJson({ truncated: false, row_count: 0, entries: [] });
     await api.analytics.exportHistory("acme corp");
