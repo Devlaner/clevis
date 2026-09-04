@@ -3,11 +3,14 @@ import type {
   AnalyticsHistoryResponse,
   AnalyticsOverviewResponse,
   AuditLogOut,
+  BranchProtectionBulkResponse,
+  BranchProtectionPreset,
   CacheClearResponse,
   CacheListResponse,
   CheckValue,
   CockpitResponse,
   CreateIssueResponse,
+  DependabotTriageResponse,
   DispatchResponse,
   FailedRunsResponse,
   GithubMembershipStatus,
@@ -28,6 +31,7 @@ import type {
   OrgEventsResponse,
   PendingInvitationSummary,
   PermissionAuditResponse,
+  PrNudgeResponse,
   ReleaseTimelineResponse,
   RepoListResponse,
   RepoPullsResponse,
@@ -39,6 +43,7 @@ import type {
   SecretScanningResponse,
   SecurityMatrixResponse,
   SyncInstallationsResponse,
+  WorkflowLintResponse,
   WorkflowsResponse,
 } from "./types"
 
@@ -265,6 +270,15 @@ export const api = {
         { ...body, token: token || undefined },
       ),
   },
+  prNudges: {
+    // Nudge stale PRs in {owner}/{repo} (issue #289). Needs `Pull requests: write`
+    // on the App/PAT; a 403 from GitHub surfaces here as a 400. Org-admin gated.
+    sweep: (org: string, owner: string, repo: string, token?: string) =>
+      post<PrNudgeResponse>(
+        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pr-nudges`,
+        { token: token || undefined },
+      ),
+  },
   cache: {
     list: (owner: string, repo: string, token: string) =>
       post<CacheListResponse>(
@@ -325,6 +339,61 @@ export const api = {
       post<DispatchResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflows/${workflowId}/dispatch`,
         { ...body, token: body.token || undefined },
+      ),
+  },
+  branchProtection: {
+    // Bulk-apply a branch-protection preset across an org's repos (issue #288). Org-admin
+    // only; needs `Administration: write`. dry_run returns a per-repo diff and writes
+    // nothing. A 400 with a docs pointer means the App is missing the permission.
+    bulk: (
+      org: string,
+      body: {
+        repos: string[]
+        preset?: BranchProtectionPreset
+        dry_run: boolean
+        save_preset?: boolean
+        token?: string
+      },
+    ) =>
+      post<BranchProtectionBulkResponse>(
+        `/orgs/${encodeURIComponent(org)}/branch-protection/bulk`,
+        { ...body, token: body.token || undefined },
+      ),
+  },
+  workflowLint: {
+    // Lint {owner}/{repo}'s .github/workflows (issue #291). Personal route, matching the
+    // rest of the Automation page: an arbitrary free-text owner via App-or-PAT. A scan
+    // needs only membership (or a PAT); open_pr: true needs org-admin when owner is a
+    // connected Clevis org, and opens a fix PR (returns its URL). A 400 with a docs
+    // pointer means the App is missing a write scope.
+    scan: (owner: string, repo: string, body: { open_pr: boolean }, token?: string) =>
+      post<WorkflowLintResponse>(
+        `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflow-lint`,
+        { ...body, token: token || undefined },
+      ),
+  },
+  dependabotTriage: {
+    // Per-repo opt-in + mode for Dependabot auto-triage (issue #290). Default off; only
+    // patch-level dependabot[bot] bumps with all checks green and no pending human
+    // review are ever acted on. approve_and_merge is the only mode that merges.
+    getRepo: (org: string, owner: string, repo: string) =>
+      get<{ enabled: boolean; mode: "approve_only" | "approve_and_merge"; merge_method: string }>(
+        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/automation/dependabot-triage`,
+      ),
+    setRepo: (
+      org: string,
+      owner: string,
+      repo: string,
+      body: { enabled: boolean; mode: "approve_only" | "approve_and_merge"; merge_method?: string },
+    ) =>
+      put<{ enabled: boolean; mode: string; merge_method: string }>(
+        `/orgs/${encodeURIComponent(org)}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/automation/dependabot-triage`,
+        body,
+      ),
+    run: (org: string, body: { repos?: string[]; dry_run: boolean }, token?: string) =>
+      post<DependabotTriageResponse>(
+        `/orgs/${encodeURIComponent(org)}/dependabot-triage`,
+        { ...body, token: token || undefined },
       ),
   },
   github: {

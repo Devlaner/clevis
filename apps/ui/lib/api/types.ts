@@ -28,6 +28,19 @@ export interface CheckResult {
   value: CheckValue
 }
 
+// Issue #289: POST /orgs/{org}/repos/{owner}/{repo}/pr-nudges
+export interface PrNudgeResult {
+  number: number
+  title: string
+  action: string
+}
+
+export interface PrNudgeResponse {
+  mode: string
+  stale_days: number
+  results: PrNudgeResult[]
+}
+
 // Issue #294: GET /orgs/{org}/usage/actions (GitHub Actions minutes this billing month,
 // from GitHub's enhanced-billing usage summary API). `included_minutes_used` is the
 // slice covered by the plan's allowance; `paid_minutes_used` is what was billed on top.
@@ -504,6 +517,64 @@ export interface RunsResponse {
 export interface DispatchResponse {
   dispatched: boolean
   message: string | null
+}
+
+// issue #288 — bulk branch-protection apply
+export interface BranchProtectionPreset {
+  required_pull_request_reviews?: { required_approving_review_count: number } | null
+  enforce_admins?: boolean
+  allow_force_pushes?: boolean
+  allow_deletions?: boolean
+  required_status_checks?: { strict: boolean; contexts: string[] } | null
+  restrictions?: null
+}
+
+export interface BranchProtectionRepoDiff {
+  repo: string
+  branch: string
+  currently_protected: boolean
+  would_change: boolean
+  changes: Record<string, { from: unknown; to: unknown }>
+  error: string | null
+}
+
+export interface BranchProtectionRepoResult {
+  repo: string
+  applied: boolean
+  error: string | null
+}
+
+export interface BranchProtectionBulkResponse {
+  dry_run: boolean
+  diffs?: BranchProtectionRepoDiff[]
+  results?: BranchProtectionRepoResult[]
+}
+
+// issue #291 — workflow policy lint + auto-fix PR
+export interface WorkflowLintFinding {
+  path: string
+  rule: string
+  severity: string
+  message: string
+}
+
+export interface WorkflowLintResponse {
+  findings: WorkflowLintFinding[]
+  fixable: boolean
+  pr_url: string | null
+}
+
+// issue #290 — Dependabot auto-triage
+export interface DependabotTriageDecision {
+  repo: string
+  number: number | null
+  title: string
+  action: string
+  reason: string
+}
+
+export interface DependabotTriageResponse {
+  decisions: DependabotTriageDecision[]
 }
 
 export interface RepoSecurityRow {

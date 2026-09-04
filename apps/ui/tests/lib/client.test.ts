@@ -78,6 +78,42 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     expect(JSON.parse(init.body as string)).toEqual({ token: undefined, actor: "me", dry_run: true });
   });
 
+  it("POSTs branch-protection/bulk with the org in the path and drops an empty token", async () => {
+    stubOkJson({ dry_run: true, diffs: [] });
+    await api.branchProtection.bulk("acme", { repos: ["api"], dry_run: true, token: "" });
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/orgs/acme/branch-protection/bulk");
+    expect(JSON.parse(init.body as string)).toEqual({ repos: ["api"], dry_run: true, token: undefined });
+  });
+
+  it("POSTs workflow-lint under the personal route and drops an empty token", async () => {
+    stubOkJson({ findings: [], fixable: false, pr_url: null });
+    await api.workflowLint.scan("acme", "api", { open_pr: true }, "");
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/me/repos/acme/api/workflow-lint");
+    expect(JSON.parse(init.body as string)).toEqual({ open_pr: true, token: undefined });
+  });
+
+  it("GET/PUTs the dependabot-triage setting and POSTs the run under the org path", async () => {
+    stubOkJson({ enabled: false, mode: "approve_only", merge_method: "squash" });
+    await api.dependabotTriage.getRepo("acme", "acme", "api");
+    const [getUrl, getInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(getUrl).toContain("/orgs/acme/repos/acme/api/automation/dependabot-triage");
+    expect(getInit.method).toBeUndefined();
+
+    stubOkJson({ enabled: true, mode: "approve_only", merge_method: "squash" });
+    await api.dependabotTriage.setRepo("acme", "acme", "api", { enabled: true, mode: "approve_only" });
+    const [settingUrl, settingInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(settingUrl).toContain("/orgs/acme/repos/acme/api/automation/dependabot-triage");
+    expect(settingInit.method).toBe("PUT");
+
+    stubOkJson({ decisions: [] });
+    await api.dependabotTriage.run("acme", { repos: ["acme/api"], dry_run: true }, "");
+    const [runUrl, runInit] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(runUrl).toContain("/orgs/acme/dependabot-triage");
+    expect(JSON.parse(runInit.body as string)).toEqual({ repos: ["acme/api"], dry_run: true, token: undefined });
+  });
+
   it("builds the analytics.exportHistory URL with only owner when no window is given", async () => {
     stubOkJson({ truncated: false, row_count: 0, entries: [] });
     await api.analytics.exportHistory("acme corp");
@@ -527,6 +563,37 @@ describe("api.security.remediate (issue #287)", () => {
     await api.security.remediate("acme", "api", "repository_dependabot_alerts_clear", "ghp_x");
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: "ghp_x" });
+  });
+});
+
+describe("api.prNudges.sweep (issue #289)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("POSTs the org-scoped nudge path and forwards a supplied token", async () => {
+    const body = { mode: "comment", stale_days: 3, results: [] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))),
+    );
+    const result = await api.prNudges.sweep("acme", "acme", "api", "ghp_admin");
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain("/orgs/acme/repos/acme/api/pr-nudges");
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ token: "ghp_admin" });
+    expect(result).toEqual(body);
+  });
+
+  it("omits the token when none is supplied", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify({ mode: "off", stale_days: 3, results: [] }), { status: 200 }))),
+    );
+    await api.prNudges.sweep("acme", "acme", "api");
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({});
   });
 });
 

@@ -90,6 +90,22 @@ def test_admin_creates_issue_and_writes_audit(client, db, user):
     assert log.target == "acme/api" and log.actor == user.email
 
 
+def test_bring_your_own_pat_against_an_unconnected_owner_audits_under_the_personal_tenant(client, db, user):
+    # No Clevis org for "someone" -> resolve_owner_token falls through to the personal
+    # (BYO-PAT) path, and the audit row must land on the caller's personal tenant, never
+    # NULL (audit_logs' RLS policy rejects a NULL tenant_id under the constrained role).
+    from src.repositories import tenant_repo
+
+    with patch("src.routers.issues.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = {"number": 1, "html_url": "u"}
+        resp = client.post(
+            "/me/repos/someone/api/issues", json={"title": "x", "token": "ghp_byo"}
+        )
+    assert resp.status_code == 201
+    log = db.query(AuditLog).filter(AuditLog.action == "issues.create").one()
+    assert log.tenant_id == tenant_repo.ensure_personal_tenant(db, user.id).id
+
+
 def test_github_permission_error_maps_to_400(client, db, user):
     org = org_repo.get_or_create(db, github_login="acme")
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="admin")

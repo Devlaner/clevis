@@ -16,10 +16,19 @@ from src.core.auth import UserOut, require_workspace_admin
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_INT_KEYS = {"worker_poll_seconds", "gap_heal_poll_seconds", "gap_heal_stale_hours", "digest_poll_seconds"}
+_INT_KEYS = {
+    "worker_poll_seconds",
+    "gap_heal_poll_seconds",
+    "gap_heal_stale_hours",
+    "pr_nudge_stale_days",
+    "digest_poll_seconds",
+}
 _BOOL_KEYS = {"registration_enabled"}
-# key -> allowed values, for small closed-vocabulary settings (issue #292).
-_ENUM_KEYS = {"digest_cadence": {"off", "weekly", "monthly"}}
+# key -> allowed values, for small closed-vocabulary settings (issues #292, #289).
+_ENUM_KEYS = {
+    "digest_cadence": {"off", "weekly", "monthly"},
+    "pr_nudge_mode": {"off", "comment", "label"},
+}
 
 
 class ConfigValue(BaseModel):

@@ -19,8 +19,8 @@ from sqlalchemy.orm import Session
 
 from src.core.auth import UserOut, require_auth
 from src.core.db import get_db
-from src.core.rbac import set_tenant_session_context
-from src.repositories import audit_repo, org_repo, tenant_repo
+from src.core.rbac import audit_tenant
+from src.repositories import audit_repo
 from src.services import check_remediation
 from src.services.github_client import GitHubClient
 from src.services.token_resolution import (
@@ -40,17 +40,6 @@ class RemediateResponse(BaseModel):
     check_id: str
     repo: str
     remediated: bool = True
-
-
-def _connected_tenant(db: Session, user_id: int, owner: str) -> int | None:
-    org = org_repo.get_by_login_ci(db, owner)
-    if org is None:
-        return None
-    org = org_repo.ensure_tenant_linked(db, org)
-    if tenant_repo.get_membership(db, org.tenant_id, user_id) is None:
-        return None
-    set_tenant_session_context(db, org.tenant_id, user_id)
-    return org.tenant_id
 
 
 @router.post(
@@ -82,7 +71,7 @@ def remediate_check(
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    tenant_id = _connected_tenant(db, user.id, owner)
+    tenant_id = audit_tenant(db, user.id, owner)
     # Record the attempt before it reaches GitHub, so a rejected write is still audited.
     audit_repo.write(
         db,
