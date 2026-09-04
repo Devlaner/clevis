@@ -1,0 +1,92 @@
+name: Triage
+
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions: {}
+
+jobs:
+  pr-path-labels:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # actions/labeler reads the repo's .github/labeler.yml
+      pull-requests: write # ...and writes labels onto the PR
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          sync-labels: false # additive only; never strip manually-set labels
+
+  triage:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write # labels/assignee/milestone on issues
+      pull-requests: write # ...and the same on PRs (pull_request_target)
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // fix -> bug, feat -> enhancement, everything else -> chore/documentation
+            const TYPE_LABELS = {
+              feat: "enhancement", fix: "bug", docs: "documentation",
+              perf: "chore", refactor: "chore", test: "chore", chore: "chore", ci: "chore",
+            };
+
+            const item = context.payload.issue || context.payload.pull_request;
+            const issue_number = item.number;
+            const author = item.user.login;
+            const repo = context.repo;
+
+            // Scopes we recognise; anything else is ignored rather than
+            // auto-creating a junk label. Keep in sync with .github/labeler.yml.
+            const AREAS = new Set(["api", "ui", "worker", "checks", "db", "ci"]);
+
+            // 1. Labels from the "type(scope):" title prefix
+            const m = (item.title || "").match(/^([a-z]+)(?:\(([^)]+)\))?!?:/i);
+            const labels = [];
+            if (m) {
+              const type = TYPE_LABELS[m[1].toLowerCase()];
+              if (type) labels.push(type);
+              const scope = (m[2] || "").toLowerCase().trim();
+              if (AREAS.has(scope) && `area:${scope}`.length <= 50) {
+                labels.push(`area:${scope}`);
+              }
+            }
+            if (labels.length) {
+              // Don't let a labelling failure abort assignee/milestone below.
+              try {
+                await github.rest.issues.addLabels({ ...repo, issue_number, labels });
+              } catch (e) {
+                core.warning(`labels skipped: ${e.message}`);
+              }
+            }
+
+            // 2. Assign the author (only if nobody is assigned yet)
+            if (!(item.assignees && item.assignees.length)) {
+              try {
+                const res = await github.rest.issues.addAssignees({ ...repo, issue_number, assignees: [author] });
+                // GitHub silently drops non-assignable users (non-collaborators)
+                // and still returns 201, so confirm the author actually landed.
+                const assigned = (res.data.assignees || []).some((a) => a.login === author);
+                if (!assigned) {
+                  core.warning(`assignee skipped: ${author} is not assignable on this repo`);
+                }
+              } catch (e) {
+                core.warning(`assignee skipped: ${e.message}`);
+              }
+            }
+
+            // 3. Milestone = open milestone with the nearest due date (only if none set)
+            if (!item.milestone) {
+              const ms = await github.rest.issues.listMilestones({ ...repo, state: "open", per_page: 100 });
+              const withDue = ms.data
+                .filter((x) => x.due_on)
+                .sort((a, b) => new Date(a.due_on) - new Date(b.due_on));
+              const pick = withDue[0] || ms.data[0]; // fallback: any open milestone; undefined -> skip
+              if (pick) {
+                await github.rest.issues.update({ ...repo, issue_number, milestone: pick.number });
+              }
+            }
