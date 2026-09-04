@@ -88,6 +88,19 @@ def test_admin_enables_secret_scanning_and_audits(client, db, user):
     assert log.target == "acme/api"
 
 
+def test_bring_your_own_pat_against_an_unconnected_owner_audits_under_the_personal_tenant(client, db, user):
+    # "someone" isn't a connected Clevis org -> BYO-PAT path; the audit row must be
+    # scoped to the caller's personal tenant, never NULL (audit_logs RLS, issue #330).
+    from src.repositories import tenant_repo
+
+    with patch("src.routers.remediation.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = {}
+        resp = client.post(_url(SS, owner="someone"), json={"token": "ghp_byo"})
+    assert resp.status_code == 200
+    log = db.query(AuditLog).filter(AuditLog.action == "security.remediate").one()
+    assert log.tenant_id == tenant_repo.ensure_personal_tenant(db, user.id).id
+
+
 def _not_found() -> httpx.HTTPStatusError:
     return httpx.HTTPStatusError(
         "404", request=httpx.Request("GET", "https://api.github.com"), response=httpx.Response(404)
