@@ -204,16 +204,17 @@ def triage(
                     json={"merge_method": merge_method},
                 )
                 decisions.append(Decision(number, title, "merged"))
-            except httpx.HTTPStatusError as exc:
+            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
                 # The approval already landed on GitHub — record it as its own decision
                 # (so the router audits it) and report the merge failure separately
                 # rather than letting the exception discard the completed approval.
+                if isinstance(exc, httpx.HTTPStatusError):
+                    detail = f"the merge request failed: {exc.response.status_code}"
+                else:
+                    detail = "the merge request could not be sent, so the merge outcome is unknown"
                 decisions.append(Decision(number, title, "approved"))
                 decisions.append(
-                    Decision(
-                        number, title, "merge_failed",
-                        f"approved, but the merge request failed: {exc.response.status_code}",
-                    )
+                    Decision(number, title, "merge_failed", f"approved, but {detail}")
                 )
         else:
             decisions.append(Decision(number, title, "approved"))

@@ -76,12 +76,14 @@ class _FakeClient:
     """Endpoint-aware fake. Order of the checks below matters — the more specific
     suffixes are tested before ``/pulls``."""
 
-    def __init__(self, *, prs, check_runs=_GREEN_RUNS, status=_GREEN_STATUS, reviews=None, merge_status=None):
+    def __init__(self, *, prs, check_runs=_GREEN_RUNS, status=_GREEN_STATUS, reviews=None,
+                 merge_status=None, merge_exc=None):
         self.prs = prs
         self.check_runs = check_runs
         self.status = status
         self.reviews = reviews or []
         self.merge_status = merge_status
+        self.merge_exc = merge_exc
         self.calls = []
 
     def request(self, method, path, params=None, json=None):
@@ -93,6 +95,8 @@ class _FakeClient:
         if path.endswith("/reviews"):
             return {"id": 1} if method == "POST" else self.reviews
         if path.endswith("/merge"):
+            if self.merge_exc is not None:
+                raise self.merge_exc
             if self.merge_status is not None:
                 raise httpx.HTTPStatusError(
                     str(self.merge_status),
@@ -269,6 +273,15 @@ def test_merge_failure_keeps_the_approval_as_its_own_decision():
     assert "approved" in actions and "merge_failed" in actions
     assert not any(d.action == "merged" for d in decisions)
     assert any("/reviews" in c[1] and c[0] == "POST" for c in client.calls)
+
+
+def test_merge_network_error_keeps_the_approval_and_flags_unknown_outcome():
+    client = _FakeClient(prs=[_pr(1)], merge_exc=httpx.ConnectError("boom"))
+    decisions = triage(client, "acme", "api", enabled=True, mode="approve_and_merge")
+    by_action = {d.action: d for d in decisions}
+    assert "approved" in by_action and "merge_failed" in by_action
+    assert not any(d.action == "merged" for d in decisions)
+    assert "unknown" in by_action["merge_failed"].reason
 
 
 def test_dry_run_makes_no_write_calls():

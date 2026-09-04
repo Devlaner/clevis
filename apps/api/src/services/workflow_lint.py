@@ -80,12 +80,16 @@ def _file_relies_on_elevated_token(text: str) -> bool:
     # Conservative: any sign the workflow leans on `pull_request_target`'s elevated token
     # means flipping it to `pull_request` could break it — report only, don't auto-fix.
     #   - `secrets.NAME` and the `secrets['NAME']` / `secrets["NAME"]` index forms;
-    #   - `github.token` / `GITHUB_TOKEN` (the auto-provisioned token, whose default
+    #   - `github.token` and the `github['token']` / `github["token"]` index forms, plus
+    #     the `GITHUB_TOKEN` env name (the auto-provisioned token, whose default
     #     permissions differ between the two triggers).
+    lowered = text.lower()
     return (
         "secrets." in text
         or "secrets[" in text
         or "github.token" in text
+        or "github['token']" in lowered
+        or 'github["token"]' in lowered
         or "GITHUB_TOKEN" in text
     )
 

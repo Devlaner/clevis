@@ -148,6 +148,12 @@ def test_does_not_auto_fix_when_the_workflow_references_github_token():
     assert result.findings and not result.fixable  # relies on the elevated token
 
 
+def test_does_not_auto_fix_when_github_token_uses_the_bracket_index_form():
+    text = _BAD_PRT.replace("npm test", "gh pr comment --token ${{ github['token'] }}")
+    result = lint(WorkflowFile("w.yml", text, "sha1"))
+    assert result.findings and not result.fixable
+
+
 def test_does_not_auto_fix_when_the_workflow_declares_write_permissions():
     text = _BAD_PRT.replace("on: pull_request_target\n", "on: pull_request_target\npermissions:\n  contents: write\n")
     result = lint(WorkflowFile("w.yml", text, "sha1"))
