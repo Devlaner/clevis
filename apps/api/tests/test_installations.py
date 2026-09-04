@@ -753,3 +753,53 @@ def test_delete_org_installation_returns_503_when_github_unreachable(db, acme_or
         resp = _client(db, acme_org["admin"]).delete("/orgs/acme/installations/42")
     assert resp.status_code == 503
     assert installation_repo.get_by_installation_id_for_org(db, org_id=acme_org["org"].id, installation_id=42) is not None
+
+
+# ── Permission drift (GitHub App re-consent) ─────────────────────────────────
+
+def test_sync_org_installation_captures_granted_permissions(db, acme_org):
+    with patch(
+        "src.routers.installations.github_app.get_installation",
+        return_value={
+            "account": {"login": "acme", "type": "Organization"},
+            "permissions": {"issues": "write", "contents": "read", "metadata": "read"},
+        },
+    ):
+        resp = _client(db, acme_org["admin"]).post(
+            "/orgs/acme/installations/sync",
+            json={"account_login": "acme", "account_type": "Organization", "installation_id": 7},
+        )
+    assert resp.status_code == 200
+    row = installation_repo.list_for_org(db, org_id=acme_org["org"].id)[0]
+    assert row.granted_permissions == {"issues": "write", "contents": "read", "metadata": "read"}
+    assert row.permissions_synced_at is not None
+
+
+def test_list_org_installations_reports_blocked_features(db, acme_org):
+    row = installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app",
+        installation_id=42, org_id=acme_org["org"].id,
+    )
+    installation_repo.update_permissions(
+        db, installation_id=42, permissions={"pull_requests": "write", "metadata": "read"}
+    )
+
+    resp = _client(db, acme_org["admin"]).get("/orgs/acme/installations")
+    assert resp.status_code == 200
+    data = resp.json()[0]
+    assert data["permissions_synced_at"] is not None
+    blocked = {b["feature"] for b in data["blocked_features"]}
+    # pull_requests: write is granted -> stale_pr_nudges not blocked; others still are.
+    assert "stale_pr_nudges" not in blocked
+    assert "bulk_branch_protection" in blocked
+
+
+def test_list_installations_never_permission_checked_has_empty_blocked_features(db, acme_org):
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app",
+        installation_id=42, org_id=acme_org["org"].id,
+    )
+    resp = _client(db, acme_org["admin"]).get("/orgs/acme/installations")
+    data = resp.json()[0]
+    assert data["permissions_synced_at"] is None
+    assert data["blocked_features"] == []

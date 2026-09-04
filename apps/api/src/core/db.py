@@ -70,6 +70,11 @@ class GitHubInstallation(Base):
     # installation-creation path.
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # GitHub's installation `permissions` object as last observed (migration 0044), plus when.
+    # NULL = never permission-checked (pre-0044 rows, or installs that predate the first
+    # new_permissions_accepted webhook / reconnect). See src.services.app_permissions.
+    granted_permissions: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    permissions_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuditLog(Base):

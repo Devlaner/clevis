@@ -139,6 +139,98 @@ def test_unrecognized_event_type_returns_200_without_side_effects(webhook_client
     assert resp.status_code == 200
 
 
+def test_installation_new_permissions_accepted_persists_permissions_and_audits(db, webhook_client):
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=77, org_id=org.id
+    )
+
+    perms = {"issues": "write", "contents": "read", "metadata": "read"}
+    resp = _post(
+        webhook_client,
+        "installation",
+        {"action": "new_permissions_accepted", "installation": {"id": 77, "permissions": perms}},
+    )
+
+    assert resp.status_code == 200
+    row = installation_repo.list_for_org(db, org_id=org.id)[0]
+    assert row.granted_permissions == perms
+    assert row.permissions_synced_at is not None
+
+    logs = db.query(AuditLog).filter(AuditLog.action == "installation.permissions_accepted").all()
+    assert len(logs) == 1
+    assert logs[0].actor == "github-webhook"
+    assert logs[0].target == "77"
+
+
+def test_installation_new_permissions_accepted_redelivery_does_not_duplicate_audit_row(db, webhook_client):
+    # GitHub redelivers webhooks on retry (and a redelivery can be triggered manually
+    # from the GitHub UI) -- the same new_permissions_accepted delivery landing twice
+    # must not write a second, duplicate audit entry for what is really one approval.
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=77, org_id=org.id
+    )
+    perms = {"issues": "write", "contents": "read", "metadata": "read"}
+    payload = {"action": "new_permissions_accepted", "installation": {"id": 77, "permissions": perms}}
+
+    first = _post(webhook_client, "installation", payload)
+    second = _post(webhook_client, "installation", payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    logs = db.query(AuditLog).filter(AuditLog.action == "installation.permissions_accepted").all()
+    assert len(logs) == 1
+    # permissions_synced_at still reflects the redelivery even though nothing changed.
+    row = installation_repo.list_for_org(db, org_id=org.id)[0]
+    assert row.granted_permissions == perms
+
+
+def test_installation_new_permissions_accepted_writes_new_audit_row_when_permissions_actually_change(db, webhook_client):
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=77, org_id=org.id
+    )
+
+    _post(
+        webhook_client,
+        "installation",
+        {"action": "new_permissions_accepted", "installation": {"id": 77, "permissions": {"issues": "write"}}},
+    )
+    _post(
+        webhook_client,
+        "installation",
+        {
+            "action": "new_permissions_accepted",
+            "installation": {"id": 77, "permissions": {"issues": "write", "pull_requests": "write"}},
+        },
+    )
+
+    logs = db.query(AuditLog).filter(AuditLog.action == "installation.permissions_accepted").all()
+    assert len(logs) == 2
+
+
+def test_installation_new_permissions_accepted_unknown_install_is_a_noop(db, webhook_client):
+    resp = _post(
+        webhook_client,
+        "installation",
+        {"action": "new_permissions_accepted", "installation": {"id": 12345, "permissions": {"issues": "write"}}},
+    )
+    assert resp.status_code == 200
+    assert db.query(AuditLog).filter(AuditLog.action == "installation.permissions_accepted").count() == 0
+
+
+def test_installation_suspend_and_unsuspend_return_200_without_side_effects(db, webhook_client):
+    org = org_repo.get_or_create(db, github_login="acme")
+    installation_repo.create(
+        db, account_login="acme", account_type="Organization", auth_mode="app", installation_id=88, org_id=org.id
+    )
+    for action in ("suspend", "unsuspend"):
+        resp = _post(webhook_client, "installation", {"action": action, "installation": {"id": 88}})
+        assert resp.status_code == 200
+    assert len(installation_repo.list_for_org(db, org_id=org.id)) == 1
+
+
 def test_malformed_json_body_returns_400(webhook_client):
     body = b"not json"
     resp = webhook_client.post(
