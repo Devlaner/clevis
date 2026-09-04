@@ -22,10 +22,10 @@ from src.core.db import get_db
 from src.core.rbac import (
     OrgContext,
     assert_owner_matches_org,
+    audit_tenant,
     require_org_role,
-    set_tenant_session_context,
 )
-from src.repositories import audit_repo, org_repo, tenant_repo
+from src.repositories import audit_repo
 from src.services import workflow_lint
 from src.services.github_client import GitHubClient, github_error as _github_error
 from src.services.token_resolution import (
@@ -60,21 +60,6 @@ class LintResponse(BaseModel):
     findings: list[FindingOut]
     fixable: bool
     pr_url: str | None = None
-
-
-def _audit_tenant(db: Session, user_id: int, owner: str) -> int:
-    """Tenant the audit row is scoped under: the connected org's tenant when the caller
-    is a member, otherwise the caller's own personal tenant. Never ``None`` —
-    audit_logs' RLS policy rejects a NULL tenant_id (issue #330)."""
-    org = org_repo.get_by_login_ci(db, owner)
-    if org is not None:
-        org = org_repo.ensure_tenant_linked(db, org)
-        if tenant_repo.get_membership(db, org.tenant_id, user_id) is not None:
-            set_tenant_session_context(db, org.tenant_id, user_id)
-            return org.tenant_id
-    tenant_id = tenant_repo.ensure_personal_tenant(db, user_id).id
-    set_tenant_session_context(db, tenant_id, user_id)
-    return tenant_id
 
 
 def _run(
@@ -132,7 +117,7 @@ def workflow_lint_personal(
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    tenant_id = _audit_tenant(db, user.id, owner)
+    tenant_id = audit_tenant(db, user.id, owner)
     return _run(db, user.email, tenant_id, GitHubClient(token), owner, repo, body.open_pr)
 
 

@@ -47,6 +47,28 @@ def set_tenant_session_context(db: Session, tenant_id: int, user_id: int) -> Non
     db.execute(text(f"SET app.user_id = {int(user_id)}"))
 
 
+def audit_tenant(db: Session, user_id: int, owner: str) -> int:
+    """The tenant an audit row for a ``/me/repos/{owner}/...`` write should be scoped
+    under, and set as the session context. If ``owner`` is a connected Clevis org the
+    caller is a member of, that's the org's tenant; otherwise (a bring-your-own-PAT
+    action against an account with no Clevis org) it's the caller's own personal tenant.
+
+    Never ``None``: ``audit_logs``' RLS policy is strict equality against
+    ``app.tenant_id`` with no OR-NULL escape (issue #330), so a NULL-tenant insert fails
+    outright under the constrained API role — and the action still belongs in the trail
+    either way.
+    """
+    org = org_repo.get_by_login_ci(db, owner)
+    if org is not None:
+        org = org_repo.ensure_tenant_linked(db, org)
+        if tenant_repo.get_membership(db, org.tenant_id, user_id) is not None:
+            set_tenant_session_context(db, org.tenant_id, user_id)
+            return org.tenant_id
+    tenant_id = tenant_repo.ensure_personal_tenant(db, user_id).id
+    set_tenant_session_context(db, tenant_id, user_id)
+    return tenant_id
+
+
 def resolve_org_role(db: Session, org_login: str, user_id: int, min_role: Literal["member", "admin"]) -> OrgContext | None:
     """Same resolution logic require_org_role's dependency raises on, but returns None
     instead of raising when org_login doesn't exist or the membership doesn't meet

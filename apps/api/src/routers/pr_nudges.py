@@ -21,10 +21,10 @@ from src.core.db import get_db
 from src.core.rbac import (
     OrgContext,
     assert_owner_matches_org,
+    audit_tenant,
     require_org_role,
-    set_tenant_session_context,
 )
-from src.repositories import audit_repo, org_repo, tenant_repo
+from src.repositories import audit_repo
 from src.services import pr_nudge
 from src.services.github_client import GitHubClient, github_error as _github_error
 from src.services.token_resolution import (
@@ -93,23 +93,6 @@ def _run(client: GitHubClient, owner: str, repo: str) -> NudgeResponse:
     )
 
 
-def _audit_tenant(db: Session, user_id: int, owner: str) -> int:
-    """Tenant the audit row is scoped under. If ``owner`` is a connected Clevis org the
-    caller is a member of, that's the org's tenant; otherwise (a bring-your-own-PAT sweep
-    against an account with no Clevis org) it's the caller's own personal tenant. Never
-    ``None``: audit_logs' RLS policy rejects a NULL ``tenant_id`` outright (issue #330),
-    and the sweep still belongs in the trail either way."""
-    org = org_repo.get_by_login_ci(db, owner)
-    if org is not None:
-        org = org_repo.ensure_tenant_linked(db, org)
-        if tenant_repo.get_membership(db, org.tenant_id, user_id) is not None:
-            set_tenant_session_context(db, org.tenant_id, user_id)
-            return org.tenant_id
-    tenant_id = tenant_repo.ensure_personal_tenant(db, user_id).id
-    set_tenant_session_context(db, tenant_id, user_id)
-    return tenant_id
-
-
 @router.post("/me/repos/{owner}/{repo}/pr-nudges", response_model=NudgeResponse)
 def nudge_stale_prs(
     owner: str,
@@ -129,7 +112,7 @@ def nudge_stale_prs(
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    tenant_id = _audit_tenant(db, user.id, owner)
+    tenant_id = audit_tenant(db, user.id, owner)
     audit_repo.write(
         db, user.email, "pr_nudge.sweep", f"{owner}/{repo}", {}, tenant_id=tenant_id
     )
