@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import random
 import threading
 
 import pytest
@@ -12,7 +13,16 @@ from pydantic import SecretStr
 from sqlalchemy import text
 
 from src.core.config import settings
-from src.core.db import AuditLog, GitHubInstallation, SessionLocal, WebhookDelivery, get_db, set_session_tenant
+from src.core.db import (
+    AuditLog,
+    GitHubInstallation,
+    Org,
+    SessionLocal,
+    Tenant,
+    WebhookDelivery,
+    get_db,
+    set_session_tenant,
+)
 from src.core.rbac import set_tenant_session_context
 from src.core.redis_client import get_redis_client
 from src.repositories import installation_repo, org_repo
@@ -205,9 +215,16 @@ def test_update_permissions_serializes_concurrent_redeliveries():
     -- since A already wrote the exact permissions B is about to write -- B's own
     comparison must see no change.
     """
+    # A generated id, not a fixed constant -- installation_id is unique, and a fixed
+    # value could collide with a leftover row from a previous failed run of this same
+    # test (it commits for real, outside the rollback-scoped `db` fixture) or with a
+    # concurrent run of the suite.
+    installation_id = random.randint(10_000_000, 2_000_000_000)
+    login = f"acme-lock-test-{installation_id}"
+
     setup = SessionLocal()
     try:
-        org = org_repo.get_or_create(setup, github_login="acme-lock-test")
+        org = org_repo.get_or_create(setup, github_login=login)
         # A genuinely separate SessionLocal() commits for real (unlike the savepoint-per-test
         # `db` fixture, where a nested db.commit() never actually ends the outer transaction,
         # so a SET LOCAL from an earlier commit -- ensure_tenant_linked's own -- stays in
@@ -221,11 +238,12 @@ def test_update_permissions_serializes_concurrent_redeliveries():
         # means to exercise. Nothing after this needs the row's server-generated defaults.
         setup.add(
             GitHubInstallation(
-                account_login="acme-lock-test", account_type="Organization", auth_mode="app",
-                installation_id=9001, token_ref="tok_acme-lock-test", org_id=org.id, tenant_id=org.tenant_id,
+                account_login=login, account_type="Organization", auth_mode="app",
+                installation_id=installation_id, token_ref=f"tok_{login}", org_id=org.id, tenant_id=org.tenant_id,
             )
         )
         setup.commit()
+        org_id = org.id
     finally:
         setup.close()
 
@@ -234,6 +252,7 @@ def test_update_permissions_serializes_concurrent_redeliveries():
     session_a = SessionLocal()
     lock_held = threading.Event()
     release_lock = threading.Event()
+    b_query_started = threading.Event()
     b_result: dict[str, tuple[int, bool]] = {}
 
     def hold_lock_in_session_a():
@@ -242,25 +261,30 @@ def test_update_permissions_serializes_concurrent_redeliveries():
         # would see zero rows and take no lock at all, making the test pass for the wrong
         # reason (or flake) instead of genuinely exercising the row lock.
         tenant_id = session_a.execute(
-            text("SELECT resolve_installation_tenant_id(:iid)"), {"iid": 9001}
+            text("SELECT resolve_installation_tenant_id(:iid)"), {"iid": installation_id}
         ).scalar()
         set_session_tenant(session_a, tenant_id)
         session_a.execute(
             text("SELECT * FROM github_installations WHERE installation_id = :iid FOR UPDATE"),
-            {"iid": 9001},
+            {"iid": installation_id},
         )
         lock_held.set()
         assert release_lock.wait(timeout=5), "test never released session A's lock"
-        session_a.query(GitHubInstallation).filter(GitHubInstallation.installation_id == 9001).update(
-            {GitHubInstallation.granted_permissions: perms}
-        )
+        session_a.query(GitHubInstallation).filter(
+            GitHubInstallation.installation_id == installation_id
+        ).update({GitHubInstallation.granted_permissions: perms})
         session_a.commit()
 
     def run_update_permissions_in_session_b():
         session_b = SessionLocal()
         try:
+            # Signal right before making the call that issues update_permissions' own
+            # FOR UPDATE query -- the main thread waits on this so it knows session B has
+            # actually reached the locked-query path before checking it's still blocked,
+            # rather than merely being delayed by thread-scheduling jitter.
+            b_query_started.set()
             b_result["value"] = installation_repo.update_permissions(
-                session_b, installation_id=9001, permissions=perms
+                session_b, installation_id=installation_id, permissions=perms
             )
         finally:
             session_b.close()
@@ -272,6 +296,7 @@ def test_update_permissions_serializes_concurrent_redeliveries():
 
         b_thread = threading.Thread(target=run_update_permissions_in_session_b)
         b_thread.start()
+        assert b_query_started.wait(timeout=5), "session B never reached its FOR UPDATE query"
         b_thread.join(timeout=0.3)
         assert not b_result, "update_permissions must block while another delivery holds the row lock"
 
@@ -282,6 +307,27 @@ def test_update_permissions_serializes_concurrent_redeliveries():
         assert b_result.get("value") == (1, False)
     finally:
         session_a.close()
+        # This test uses real committing connections (not the savepoint-per-test `db`
+        # fixture), so the rows it creates persist unless cleaned up explicitly here.
+        cleanup = SessionLocal()
+        try:
+            cleanup.query(GitHubInstallation).filter(
+                GitHubInstallation.installation_id == installation_id
+            ).delete()
+            tenant = cleanup.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+            if tenant is not None:
+                # orgs.tenant_id and tenants.org_id reference each other (composite
+                # reciprocal FK) -- null the org side first so either row can then be
+                # deleted freely.
+                org_row = cleanup.query(Org).filter(Org.id == org_id).first()
+                if org_row is not None:
+                    org_row.tenant_id = None
+                    cleanup.commit()
+                cleanup.query(Tenant).filter(Tenant.id == tenant.id).delete()
+            cleanup.query(Org).filter(Org.id == org_id).delete()
+            cleanup.commit()
+        finally:
+            cleanup.close()
 
 
 def test_installation_new_permissions_accepted_writes_new_audit_row_when_permissions_actually_change(db, webhook_client):
