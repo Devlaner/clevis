@@ -69,7 +69,38 @@ def test_degrades_to_empty_when_login_unresolvable(http, path):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"items": [], "total_count": 0, "page": 1, "per_page": 25}
+    assert body == {"items": [], "total_count": 0, "page": 1, "per_page": 25, "identity_unresolved": True}
+
+
+def test_falls_back_to_users_github_login_when_user_endpoint_unresolvable(app, http):
+    """A GitHub App installation token can't call GET /user, but if the signed-in Clevis
+    user linked their own GitHub identity via OAuth, my-prs should use that login rather
+    than degrading to empty."""
+    app.dependency_overrides[require_auth] = lambda: UserOut(
+        id=1, email="myitems@example.com", name=None, is_workspace_admin=False, github_login="octocat"
+    )
+
+    def _request_side_effect(method, path, params=None):
+        if path == "/user":
+            raise httpx.HTTPStatusError(
+                "boom",
+                request=httpx.Request("GET", "https://api.github.com/user"),
+                response=httpx.Response(403, request=httpx.Request("GET", "https://api.github.com/user")),
+            )
+        if path == "/search/issues":
+            assert "author:octocat" in params["q"]
+            return {"items": [], "total_count": 0}
+        return {}
+
+    with (
+        patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+        patch("src.routers.analytics.GitHubClient") as mock_client,
+    ):
+        mock_client.return_value.request.side_effect = _request_side_effect
+        resp = http.get("/me/github/my-prs?owner=acme")
+
+    assert resp.status_code == 200
+    assert resp.json()["identity_unresolved"] is False
 
 
 def test_my_prs_success_returns_pagination_fields(http):
@@ -177,7 +208,7 @@ def test_page_times_per_page_over_1000_returns_empty_without_calling_github(http
     body = resp.json()
     # total_count is capped at the reachable max (not 0) so page/lastPage math on the
     # client stays consistent instead of regressing once paging crosses GitHub's window.
-    assert body == {"items": [], "total_count": 1000, "page": 11, "per_page": 100}
+    assert body == {"items": [], "total_count": 1000, "page": 11, "per_page": 100, "identity_unresolved": False}
 
 
 def test_search_failure_degrades_to_empty_not_500(http):

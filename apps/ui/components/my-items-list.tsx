@@ -16,6 +16,10 @@ interface MyItemsListProps {
   page: number
   perPage: number
   onPageChange: (page: number) => void
+  /** True when the backend couldn't resolve who the signed-in user is on GitHub (an
+   * installation/App token can't call GET /user, and this account has no GitHub-OAuth
+   * login on file) -- render a distinct message instead of implying zero items exist. */
+  identityUnresolved?: boolean
 }
 
 // Full-page generalization of the Overview widget's MyViewRow — same row shape
@@ -34,6 +38,7 @@ export function MyItemsList({
   page,
   perPage,
   onPageChange,
+  identityUnresolved = false,
 }: MyItemsListProps) {
   const lastPage = Math.max(1, Math.ceil(totalCount / perPage))
 
@@ -45,6 +50,14 @@ export function MyItemsList({
         </div>
       ) : isError ? (
         <SectionError message={errorMessage} onRetry={onRetry} retrying={retrying} />
+      ) : identityUnresolved ? (
+        <div className="px-4 py-8 border-t border-border/60">
+          <p className="text-sm text-muted-foreground">
+            Clevis can’t tell who you are on GitHub for this account — the connected access
+            doesn’t carry a personal identity. Sign in with GitHub (or add a personal access
+            token) to see your {emptyNoun} here.
+          </p>
+        </div>
       ) : items.length === 0 ? (
         <EmptyStateInline noun={emptyNoun} />
       ) : (

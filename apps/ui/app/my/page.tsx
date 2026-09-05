@@ -129,6 +129,7 @@ export default function MyWorkPage() {
           page={page}
           perPage={PER_PAGE}
           onPageChange={setPage}
+          identityUnresolved={itemsQuery.data?.identity_unresolved}
         />
       )}
     </>

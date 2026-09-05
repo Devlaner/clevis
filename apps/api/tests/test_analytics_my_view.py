@@ -53,8 +53,9 @@ def test_my_view_no_token_available_returns_400(http):
 
 
 def test_my_view_degrades_to_empty_when_login_unresolvable(http):
-    """An installation (App) token can't call GET /user -- this should degrade to an
-    empty MyViewResponse, not 500 the page."""
+    """An installation (App) token can't call GET /user, and this mock_user has no
+    GitHub-OAuth-linked login to fall back on either -- this should degrade to an empty
+    MyViewResponse flagged identity_unresolved, not 500 the page."""
     with (
         patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
         patch("src.routers.analytics.GitHubClient") as mock_client,
@@ -68,7 +69,57 @@ def test_my_view_degrades_to_empty_when_login_unresolvable(http):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"my_open_prs": [], "review_requests": [], "assigned_issues": [], "my_recent_runs": []}
+    assert body == {
+        "my_open_prs": [],
+        "review_requests": [],
+        "assigned_issues": [],
+        "my_recent_runs": [],
+        "identity_unresolved": True,
+    }
+
+
+def test_my_view_falls_back_to_users_github_login_when_user_endpoint_unresolvable(app, http):
+    """A GitHub App installation token can't call GET /user, but if the signed-in Clevis
+    user linked their own GitHub identity via OAuth, my-view should use that login rather
+    than degrading to empty -- an App-connected org shouldn't silently hide a real user's
+    PRs/issues just because the *org's* token isn't a personal one."""
+    app.dependency_overrides[require_auth] = lambda: UserOut(
+        id=1, email="myview@example.com", name=None, is_workspace_admin=False, github_login="octocat"
+    )
+
+    def _request_side_effect(method, path, params=None):
+        if path == "/user":
+            raise httpx.HTTPStatusError(
+                "boom",
+                request=httpx.Request("GET", "https://api.github.com/user"),
+                response=httpx.Response(403, request=httpx.Request("GET", "https://api.github.com/user")),
+            )
+        if path == "/search/issues":
+            q = params["q"]
+            if "author:octocat" in q:
+                return {"items": [{
+                    "number": 12,
+                    "title": "Fix bug",
+                    "repository_url": "https://api.github.com/repos/acme/api",
+                    "html_url": "https://github.com/acme/api/pull/12",
+                    "updated_at": "2026-07-20T00:00:00Z",
+                }]}
+            return {"items": []}
+        return {}
+
+    with (
+        patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+        patch("src.routers.analytics.GitHubClient") as mock_client,
+    ):
+        mock_client.return_value.request.side_effect = _request_side_effect
+        mock_client.return_value.request_paginated.return_value = []
+        resp = http.get("/me/github/my-view?owner=acme")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["identity_unresolved"] is False
+    assert len(body["my_open_prs"]) == 1
+    assert body["my_open_prs"][0]["repository"] == "acme/api"
 
 
 def test_my_view_success(http):

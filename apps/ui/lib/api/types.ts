@@ -481,6 +481,10 @@ export interface MyViewResponse {
   review_requests: MyViewPRSummary[]
   assigned_issues: MyViewIssueSummary[]
   my_recent_runs: MyViewRunSummary[]
+  // True when GitHub couldn't tell Clevis who the signed-in user is on GitHub (an
+  // installation/App token can't call GET /user, and this user has no GitHub-OAuth-linked
+  // login to fall back on) -- distinguishes that from "you really have zero open items."
+  identity_unresolved: boolean
 }
 
 export interface MyPrListResponse {
@@ -488,6 +492,7 @@ export interface MyPrListResponse {
   total_count: number
   page: number
   per_page: number
+  identity_unresolved: boolean
 }
 
 export interface MyIssueListResponse {
@@ -495,6 +500,7 @@ export interface MyIssueListResponse {
   total_count: number
   page: number
   per_page: number
+  identity_unresolved: boolean
 }
 
 export interface WorkflowSummary {

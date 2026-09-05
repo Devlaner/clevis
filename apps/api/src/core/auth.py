@@ -63,6 +63,10 @@ class UserOut(BaseModel):
     email: str
     name: str | None
     is_workspace_admin: bool
+    # Set when the user linked/signed in via GitHub OAuth; None otherwise. Read fresh from
+    # the DB in require_auth below (not carried in the JWT), same as this function already
+    # re-checks token_version against the DB rather than trusting a stale claim.
+    github_login: str | None = None
 
 
 def create_access_token(
@@ -130,6 +134,7 @@ def require_auth(
         email=email,
         name=payload.get("name"),
         is_workspace_admin=bool(payload.get("is_workspace_admin", False)),
+        github_login=db_user.github_login,
     )
 
 
