@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from sqlalchemy import func, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -187,3 +189,62 @@ def delete_by_installation_id(db: Session, installation_id: int) -> tuple[int, i
     count = db.query(GitHubInstallation).filter(GitHubInstallation.installation_id == installation_id).delete()
     db.commit()
     return count, resolved_tenant_id
+
+
+def update_permissions(
+    db: Session, *, installation_id: int, permissions: dict, synced_at: datetime | None = None
+) -> tuple[int, bool]:
+    """Record GitHub's installation `permissions` object on every row for `installation_id`.
+
+    Returns `(rows_updated, changed)`. `rows_updated` is 0 if the installation isn't
+    connected in Clevis (e.g. a new_permissions_accepted webhook for an install nobody has
+    synced yet). `changed` is True if any updated row's `granted_permissions` differed from
+    `permissions` beforehand -- callers that log an audit entry on change (the webhook
+    handler) use this so a GitHub webhook redelivery of the same new_permissions_accepted
+    event (retries, or a manual redelivery from the GitHub UI) re-confirms
+    `permissions_synced_at` without writing a second identical audit row. `synced_at` is
+    still bumped either way, since "we just reconfirmed this" is true regardless.
+
+    Reuses the same RLS handling as delete_by_installation_id: this is called from the
+    unauthenticated webhook receiver, which never sets app.tenant_id, so resolve the
+    tenant via the SECURITY DEFINER function first, then set the session context the
+    tenant_isolation policy expects before the UPDATE runs. Updating an already-connected
+    row's permissions column is safe from the webhook — the row's ownership was
+    established by the authenticated sync flow; only *creating* rows from a webhook would
+    cross a trust boundary (see webhooks.py's installation.created comment).
+
+    The compare-then-update below is made atomic with `with_for_update()`: without it, two
+    overlapping calls for the same installation_id (GitHub redelivers webhooks on retry,
+    and a redelivery can also be triggered manually from the GitHub UI) could both read the
+    same pre-update `granted_permissions`, both compute `changed=True`, and both commit --
+    writing two audit rows for what the webhook handler intends to treat as one. Locking the
+    row here means the second call blocks until the first's transaction commits, then reads
+    the now-current (already-updated) value, so its own comparison correctly yields False.
+    """
+    tenant_id = db.execute(
+        text("SELECT resolve_installation_tenant_id(:installation_id)"), {"installation_id": installation_id}
+    ).scalar()
+    if tenant_id is not None:
+        set_session_tenant(db, tenant_id)
+
+    rows = (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.installation_id == installation_id)
+        .with_for_update()
+        .all()
+    )
+    changed = any(r.granted_permissions != permissions for r in rows)
+
+    count = (
+        db.query(GitHubInstallation)
+        .filter(GitHubInstallation.installation_id == installation_id)
+        .update(
+            {
+                GitHubInstallation.granted_permissions: permissions,
+                GitHubInstallation.permissions_synced_at: synced_at or datetime.now(timezone.utc),
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    return count, changed

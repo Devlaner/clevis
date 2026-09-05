@@ -15,6 +15,7 @@ import { BranchProtectionCard } from "@/components/automation/branch-protection-
 import { DependabotTriageCard } from "@/components/automation/dependabot-triage-card"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { WorkflowLintCard } from "@/components/automation/workflow-lint-card"
+import { PermissionDriftNotice } from "@/components/permission-drift-notice"
 import { relativeTime } from "@/lib/format"
 import type { InstallationMeta, RunSummary, WorkflowSummary } from "@/lib/api/types"
 
@@ -141,6 +142,17 @@ export default function AutomationPage() {
     return () => clearTimeout(timer)
   }, [dispatchArmed])
 
+  // Installs covering the current owner (personal + org-scoped), so the page can flag
+  // when a blocked automation is blocked because the App is missing a permission rather
+  // than for some other reason.
+  const ownerInstalls: InstallationMeta[] = [
+    ...installs.filter((i) => i.account_login === owner.trim()),
+    ...(orgInstallsQuery.data ?? []),
+  ]
+  const driftInstalls = ownerInstalls.filter(
+    (i) => (i.blocked_features?.length ?? 0) > 0 || i.permissions_synced_at === null,
+  )
+
   const isLoading = loadMutation.isPending
   const workflows = loadMutation.data?.workflows.workflows ?? []
   const runs = loadMutation.data?.runs.runs ?? []
@@ -157,6 +169,14 @@ export default function AutomationPage() {
         title="Automation"
         description="Trigger GitHub Actions workflows and review run history — dispatch is audit-logged and requires org admin."
       />
+
+      {driftInstalls.length > 0 && (
+        <div className="mb-4 flex flex-col gap-2">
+          {driftInstalls.map((i) => (
+            <PermissionDriftNotice key={i.id} install={i} />
+          ))}
+        </div>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Config panel */}

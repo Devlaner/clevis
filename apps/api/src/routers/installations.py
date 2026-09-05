@@ -37,12 +37,13 @@ from src.core.db import Org, User, get_db
 from src.core.rbac import OrgContext, require_org_role, resolve_org_role, set_tenant_session_context
 from src.repositories import audit_repo, installation_repo, org_membership_repo, org_repo, tenant_repo
 from src.schemas.installation import (
+    BlockedFeatureOut,
     InstallationLookupOut,
     InstallationOut,
     SyncInstallationsInput,
     SyncInstallationsResponse,
 )
-from src.services import backfill_service, github_app
+from src.services import app_permissions, backfill_service, github_app
 from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token, resolve_personal_token
 
 logger = logging.getLogger(__name__)
@@ -68,12 +69,13 @@ def _fetch_installation(installation_id: int) -> dict:
         raise HTTPException(status_code=503, detail="GitHub API unreachable")
 
 
-def _verify_installation(installation_id: int | None, account_login: str, account_type: str) -> None:
+def _verify_installation(installation_id: int | None, account_login: str, account_type: str) -> dict | None:
     """Confirm a client-supplied installation_id genuinely belongs to the claimed
-    account before it's persisted as trusted data. No-op if installation_id wasn't
-    supplied — there's nothing to verify in that case."""
+    account before it's persisted as trusted data. Returns the GitHub installation
+    object (so the caller can persist its `permissions` dict) or None if installation_id
+    wasn't supplied — there's nothing to verify in that case."""
     if installation_id is None:
-        return
+        return None
     installation = _fetch_installation(installation_id)
 
     account = installation.get("account") or {}
@@ -87,6 +89,23 @@ def _verify_installation(installation_id: int | None, account_login: str, accoun
                 f"'{actual_login}', not {account_type} '{account_login}'"
             ),
         )
+    return installation
+
+
+def _capture_permissions_best_effort(db: Session, installation_id: int | None, installation: dict | None) -> None:
+    """Opportunistically persist GitHub's `permissions` dict for a just-synced install.
+    Best-effort: the install already succeeded and this is enrichment, so a failure here
+    must not fail the response."""
+    if installation_id is None or not isinstance(installation, dict):
+        return
+    permissions = installation.get("permissions")
+    if not isinstance(permissions, dict):
+        return
+    try:
+        installation_repo.update_permissions(db, installation_id=installation_id, permissions=permissions)
+    except Exception:
+        db.rollback()
+        logger.exception("failed to capture permissions for installation %s", installation_id)
 
 
 def _enqueue_backfill_best_effort(db: Session, *, tenant_id: int, account_login: str, account_type: str, resolve_token) -> None:
@@ -110,6 +129,31 @@ def _enqueue_backfill_best_effort(db: Session, *, tenant_id: int, account_login:
         logger.exception("failed to enqueue activity backfill for %s", account_login)
 
 
+def _to_installation_out(row) -> InstallationOut:
+    """Map a GitHubInstallation row to the API shape, computing which optional write
+    automations are currently blocked by a missing permission."""
+    # Only report blocked features once we've actually observed the install's permissions.
+    # A never-checked row (pre-tracking, or before the first accept webhook / reconnect)
+    # would otherwise show every feature as blocked; the UI renders a "not yet checked"
+    # state off permissions_synced_at instead.
+    blocked = (
+        app_permissions.blocked_features(row.granted_permissions)
+        if row.permissions_synced_at is not None
+        else []
+    )
+    return InstallationOut(
+        id=row.id,
+        account_login=row.account_login,
+        account_type=row.account_type,
+        installation_id=row.installation_id,
+        created_at=row.created_at,
+        permissions_synced_at=row.permissions_synced_at,
+        blocked_features=[
+            BlockedFeatureOut(feature=b.feature, label=b.label, missing=b.missing) for b in blocked
+        ],
+    )
+
+
 @router.get("/me/installations/lookup/{installation_id}", response_model=InstallationLookupOut)
 def lookup_installation(
     installation_id: int,
@@ -128,7 +172,7 @@ def list_org_installations(
     ctx: OrgContext = Depends(require_org_role(min_role="member")),
     db: Session = Depends(get_db),
 ):
-    return installation_repo.list_for_org(db, org_id=ctx.org.id)
+    return [_to_installation_out(r) for r in installation_repo.list_for_org(db, org_id=ctx.org.id)]
 
 
 def _uninstall_on_github(installation_id: int) -> None:
@@ -241,7 +285,7 @@ def sync_org_installation(
         if payload.installation_id is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Org not found")
 
-    _verify_installation(payload.installation_id, payload.account_login, payload.account_type)
+    installation = _verify_installation(payload.installation_id, payload.account_login, payload.account_type)
 
     if not is_known_admin:
         org = _bootstrap_org_admin_from_installation(db, db_user, org_login, payload.installation_id)
@@ -268,6 +312,7 @@ def sync_org_installation(
         payload={"account_type": payload.account_type, "installation_id": payload.installation_id},
         tenant_id=org.tenant_id,
     )
+    _capture_permissions_best_effort(db, payload.installation_id, installation)
     _enqueue_backfill_best_effort(
         db,
         tenant_id=org.tenant_id,
@@ -283,7 +328,7 @@ def list_personal_installations(
     user: UserOut = Depends(require_auth),
     db: Session = Depends(get_db),
 ):
-    return installation_repo.list_for_user(db, owner_user_id=user.id)
+    return [_to_installation_out(r) for r in installation_repo.list_for_user(db, owner_user_id=user.id)]
 
 
 @router.delete("/me/installations/{installation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -333,7 +378,7 @@ def sync_personal_installation(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="account_login must match your own GitHub account",
         )
-    _verify_installation(payload.installation_id, payload.account_login, payload.account_type)
+    installation = _verify_installation(payload.installation_id, payload.account_login, payload.account_type)
     row = installation_repo.create(
         db,
         account_login=payload.account_login,
@@ -351,6 +396,7 @@ def sync_personal_installation(
         payload={"account_type": payload.account_type, "installation_id": payload.installation_id},
         tenant_id=personal_tenant.id,
     )
+    _capture_permissions_best_effort(db, payload.installation_id, installation)
     _enqueue_backfill_best_effort(
         db,
         tenant_id=personal_tenant.id,

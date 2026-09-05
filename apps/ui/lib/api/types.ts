@@ -254,12 +254,25 @@ export interface SavedTokenMeta {
   updated_at: string
 }
 
+export interface BlockedFeature {
+  feature: string
+  label: string
+  missing: Record<string, string>
+}
+
 export interface InstallationMeta {
   id: number
   account_login: string
   account_type: string
   installation_id: number | null
   created_at: string
+  // Permission-drift fields. `permissions_synced_at` is null for installs whose
+  // permissions have never been observed (pre-tracking, or before the first
+  // permission-accept webhook / a reconnect) — `blocked_features` is empty then too.
+  // Optional so older callers/fixtures that don't set them still typecheck; the API
+  // always includes them.
+  permissions_synced_at?: string | null
+  blocked_features?: BlockedFeature[]
 }
 
 export interface InstallationLookup {
