@@ -14,7 +14,7 @@ import { shouldApplyResolvedToken } from "@/lib/token-resolve"
 import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { formatBytes, relativeTime, classifyStaleness, stalenessColor } from "@/lib/format"
-import type { CacheEntry, InstallationMeta } from "@/lib/api/types"
+import type { CacheEntry, InstallationMeta, JobOut } from "@/lib/api/types"
 
 interface CachePanelProps {
   owner: string
@@ -32,8 +32,10 @@ interface CachePanelProps {
 export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
   const [token, setToken] = useState("")
   const [tokenSaved, setTokenSaved] = useState(false)
-  const [actor, setActor] = useState("")
   const [confirmOpen, setConfirmOpen] = useState(false)
+  // Set to the enqueued job's id after a real (non-dry-run) clear, so we can poll its
+  // status and report the actual outcome instead of declaring success on enqueue.
+  const [jobId, setJobId] = useState<number | null>(null)
   // null = clearing every cache for this repo (the existing global buttons); set to a
   // specific { key, ref } when the user clicks a row's own "Clear" action instead.
   const [clearTarget, setClearTarget] = useState<{ key: string; ref: string } | null>(null)
@@ -102,6 +104,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
     clearMutation.reset()
     setConfirmOpen(false)
     setClearTarget(null)
+    setJobId(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [owner, repo])
 
@@ -119,7 +122,6 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
     mutationFn: (dryRun: boolean) =>
       api.cache.clear(owner, repo, {
         token,
-        actor,
         dry_run: dryRun,
         key: clearTarget?.key,
         ref: clearTarget?.ref,
@@ -129,7 +131,8 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
       if (data.dry_run) {
         toast.info("Dry run complete — no caches were deleted.")
       } else if (data.job_id) {
-        toast.success(`Cache clear queued — Job #${data.job_id}`)
+        setJobId(data.job_id)
+        toast.info(`Cache clear queued — Job #${data.job_id}`)
       }
     },
     onError: (error) => {
@@ -137,6 +140,43 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
       toast.error(error.message)
     },
   })
+
+  // Poll the enqueued job until it reaches a terminal state, so the panel shows what
+  // actually happened on GitHub's side (the clear runs in the worker, not in the request
+  // that enqueued it). Stops polling once done/failed.
+  const jobQuery = useQuery<JobOut>({
+    queryKey: ["job", jobId],
+    queryFn: () => api.jobs.get(jobId as number),
+    enabled: jobId != null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === "done" || status === "failed" ? false : 2000
+    },
+  })
+
+  const job = jobId != null ? jobQuery.data : undefined
+  const clearedCount = (() => {
+    if (job?.status !== "done" || !job.result) return null
+    try {
+      const parsed = JSON.parse(job.result) as { deleted?: number }
+      return typeof parsed.deleted === "number" ? parsed.deleted : null
+    } catch {
+      return null
+    }
+  })()
+
+  useEffect(() => {
+    if (job?.status === "done") {
+      toast.success(
+        clearedCount != null
+          ? `Cache cleared — ${clearedCount} ${clearedCount === 1 ? "entry" : "entries"} deleted.`
+          : "Cache cleared.",
+      )
+    } else if (job?.status === "failed") {
+      toast.error(`Cache clear failed — ${job.result ?? "unknown error"}`)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.status])
 
   const isLoading = listMutation.isPending || clearMutation.isPending
   const caches: CacheEntry[] = listMutation.data?.actions_caches ?? []
@@ -200,14 +240,6 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
               {saveTokenMutation.error.message}
             </p>
           )}
-          <div>
-            <label className="text-xs font-medium text-foreground block mb-1.5">Actor</label>
-            <Input
-              placeholder="actor"
-              value={actor}
-              onChange={(e) => setActor(e.target.value)}
-            />
-          </div>
           <Button
             onClick={() => listMutation.mutate()}
             disabled={isLoading}
@@ -229,7 +261,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
             <Button
               variant="outline"
               onClick={() => { setClearTarget(null); clearMutation.mutate(true) }}
-              disabled={isLoading || !actor}
+              disabled={isLoading}
             >
               <Eye className="size-3.5" />
               Dry run
@@ -237,7 +269,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
             <Button
               variant="destructive"
               onClick={() => { setClearTarget(null); setConfirmOpen(true) }}
-              disabled={isLoading || !actor}
+              disabled={isLoading}
             >
               <Trash className="size-3.5" />
               Clear
@@ -346,7 +378,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                         <Button
                           variant="outline"
                           className="h-6 px-2 text-[0.6875rem]"
-                          disabled={isLoading || !actor}
+                          disabled={isLoading}
                           onClick={() => { setClearTarget({ key: c.key, ref: c.ref }); setConfirmOpen(true) }}
                         >
                           <Trash className="size-3" />
@@ -364,35 +396,44 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
     </div>
 
     {/* Clear result card */}
-    {clearMutation.data && (
+    {(clearMutation.data?.dry_run || jobId != null) && (
       <div className="card mt-4">
         <div className="px-4 py-3 border-b border-border flex items-center justify-between">
           <span className="section-label">Result</span>
-          {clearMutation.data.dry_run && (
+          {clearMutation.data?.dry_run && (
             <span className="stat-chip text-yellow-400 border-yellow-500/30">dry run</span>
           )}
         </div>
         <div className="p-4">
-          {clearMutation.data.dry_run ? (
+          {clearMutation.data?.dry_run ? (
             <p className="text-sm text-yellow-400/80">
               Dry run complete — no caches were deleted.
             </p>
-          ) : clearMutation.data.job_id ? (
+          ) : (
             <div className="flex items-center gap-3">
-              <p className="text-sm text-green-400">
-                Cache clear queued — Job #{clearMutation.data.job_id}
-              </p>
+              {job?.status === "done" ? (
+                <p className="text-sm text-green-400">
+                  {clearedCount != null
+                    ? `Cache cleared — ${clearedCount} ${clearedCount === 1 ? "entry" : "entries"} deleted.`
+                    : "Cache cleared."}
+                </p>
+              ) : job?.status === "failed" ? (
+                <p className="text-sm text-destructive">
+                  Cache clear failed — {job.result ?? "unknown error"}
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground flex items-center gap-2">
+                  <CircleNotch className="size-3.5 animate-spin" />
+                  {job?.status === "processing" ? "Clearing caches…" : "Queued…"} (Job #{jobId})
+                </p>
+              )}
               <Link
-                href={`/audit?job_id=${clearMutation.data.job_id}`}
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                href={`/audit?job_id=${jobId}`}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap"
               >
                 View in Audit Log →
               </Link>
             </div>
-          ) : (
-            <pre className="font-mono text-xs text-muted-foreground leading-relaxed overflow-auto bg-muted/30 rounded-md p-3 border border-border/50">
-              {JSON.stringify(clearMutation.data, null, 2)}
-            </pre>
           )}
         </div>
       </div>
