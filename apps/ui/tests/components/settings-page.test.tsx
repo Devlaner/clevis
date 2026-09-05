@@ -14,6 +14,15 @@ const configUpdateMock = vi.fn();
 const routerReplace = vi.fn();
 let searchParams = new URLSearchParams();
 
+// AuthProvider (wrapping SettingsPage below) calls the real global `fetch` directly
+// (not the mocked api client) to confirm the session against /auth/me. Left unmocked,
+// every test attempts a real network call to localhost:8080; on the first failure it
+// waits a real 2s before retrying (see auth-context.tsx's checkMe), which is slow and,
+// worse, timing-dependent on this machine's TCP-refusal latency -- rendering
+// `waitFor`'s default 1s timeout unreliable for anything else the test is waiting on.
+// Stub it to resolve immediately so tests don't pay for or depend on that retry.
+const fetchMock = vi.fn();
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: routerReplace }),
   useSearchParams: () => searchParams,
@@ -99,11 +108,20 @@ describe("SettingsPage", () => {
     searchParams = new URLSearchParams();
     localStorage.clear();
     localStorage.setItem(TOKEN_KEY, makeAdminJwt());
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ id: 1, email: "admin@example.com", name: "Admin", is_workspace_admin: true }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("renders the profile section and surfaces a retry when a section errors, and shows instance config for admins", async () => {
@@ -368,14 +386,17 @@ describe("SettingsPage", () => {
 
     renderPage();
 
+    // "acme" also appears in the separate "Your organizations" membership card (which
+    // resolves independently, from orgsMineMock alone) -- waiting on that text alone
+    // would race ahead of the "Connected GitHub accounts" table's own org-scoped
+    // installation row, which only appears once orgInstallQueries (chained after
+    // membershipsQuery) settles. Wait on the actual two Disconnect buttons instead.
     await waitFor(() => {
-      expect(screen.getByText("shabnam")).toBeInTheDocument();
-      expect(screen.getByText("acme")).toBeInTheDocument();
+      expect(screen.getAllByRole("button", { name: /disconnect/i })).toHaveLength(2);
     });
     expect(installationsListForOrgMock).toHaveBeenCalledWith("acme");
 
     const disconnectButtons = screen.getAllByRole("button", { name: /disconnect/i });
-    expect(disconnectButtons).toHaveLength(2);
 
     fireEvent.click(disconnectButtons[0]);
     expect(installationsRemoveMock).not.toHaveBeenCalled();
