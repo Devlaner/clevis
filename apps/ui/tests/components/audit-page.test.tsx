@@ -155,6 +155,59 @@ describe("AuditPage", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
   });
 
+  it("sorts rows by clicking a sortable column header", async () => {
+    auditListMock.mockResolvedValue([
+      { id: 1, actor: "bravo@e.com", action: "installation.connected", target: "acme", payload: "{}", created_at: "2026-01-01T00:00:00Z" },
+      { id: 2, actor: "alpha@e.com", action: "installation.connected", target: "acme", payload: "{}", created_at: "2026-01-02T00:00:00Z" },
+    ]);
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("2 entries")).toBeInTheDocument());
+    const rowsBefore = screen.getAllByRole("row").slice(1);
+    expect(rowsBefore[0]).toHaveTextContent("bravo@e.com");
+
+    fireEvent.click(screen.getByText("Actor"));
+
+    const rowsAfterAsc = screen.getAllByRole("row").slice(1);
+    expect(rowsAfterAsc[0]).toHaveTextContent("alpha@e.com");
+
+    fireEvent.click(screen.getByText("Actor"));
+
+    const rowsAfterDesc = screen.getAllByRole("row").slice(1);
+    expect(rowsAfterDesc[0]).toHaveTextContent("bravo@e.com");
+  });
+
+  it("shows a Load more button when the result hits the current limit, and requests a bigger one", async () => {
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({
+      id: i + 1,
+      actor: "u@e.com",
+      action: "installation.connected",
+      target: "acme",
+      payload: "{}",
+      created_at: "2026-01-01T00:00:00Z",
+    }));
+    auditListMock.mockResolvedValue(fullPage);
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("100 entries")).toBeInTheDocument());
+    const loadMore = screen.getByRole("button", { name: /load more/i });
+
+    fireEvent.click(loadMore);
+
+    await waitFor(() => expect(auditListMock).toHaveBeenCalledWith(undefined, 200));
+  });
+
+  it("does not show a Load more button when fewer rows than the limit come back", async () => {
+    auditListMock.mockResolvedValue([
+      { id: 1, actor: "u@e.com", action: "installation.connected", target: "acme", payload: "{}", created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("1 entries")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /load more/i })).not.toBeInTheDocument();
+  });
+
   it("highlights the row matching a ?job_id= deep link, e.g. from the cache panel's 'View in Audit Log' link", async () => {
     mockSearchParams = new URLSearchParams("job_id=42");
     auditListMock.mockResolvedValue([

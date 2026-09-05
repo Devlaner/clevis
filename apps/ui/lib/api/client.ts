@@ -414,8 +414,15 @@ export const api = {
       }),
   },
   audit: {
-    list: (action?: string) =>
-      get<AuditLogOut[]>(`/audit${action ? `?action=${encodeURIComponent(action)}` : ""}`),
+    // limit mirrors the backend's own default/cap (Query(default=100, le=500)) --
+    // callers bump it to page further back through recent history rather than the
+    // backend supporting a true offset/cursor (it only ever returns the N most recent
+    // rows, filtered by action).
+    list: (action?: string, limit = 100) => {
+      const params = new URLSearchParams({ limit: String(limit) })
+      if (action) params.set("action", action)
+      return get<AuditLogOut[]>(`/audit?${params.toString()}`)
+    },
   },
   installations: {
     list: () => get<InstallationMeta[]>("/me/installations"),
