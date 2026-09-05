@@ -529,6 +529,20 @@ describe("OverviewPage cockpit", () => {
     expect(screen.queryByText("Fix bug")).not.toBeInTheDocument();
   });
 
+  it("shows a distinct message (not 'Nothing here right now') when My View's identity is unresolved", async () => {
+    localStorage.setItem("default_org", "acme");
+    tokensResolveMock.mockResolvedValue({ token: "ghp_test" });
+    cockpitMock.mockResolvedValue(EMPTY_COCKPIT);
+    myViewMock.mockResolvedValue({ ...EMPTY_MY_VIEW, identity_unresolved: true });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/can’t tell who you are on GitHub/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Nothing here right now")).not.toBeInTheDocument();
+  });
+
   it("shows empty states for release cadence and PR cycle time when all values are zero", async () => {
     localStorage.setItem("default_org", "acme");
     tokensResolveMock.mockResolvedValue({ token: "ghp_test" });

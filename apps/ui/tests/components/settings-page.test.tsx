@@ -7,6 +7,7 @@ const installationsListMock = vi.fn();
 const installationsListForOrgMock = vi.fn();
 const installationsRemoveMock = vi.fn();
 const tokensListMock = vi.fn();
+const tokensUpsertMock = vi.fn();
 const configGetAllMock = vi.fn();
 const patchMeMock = vi.fn();
 const revokeSessionsMock = vi.fn();
@@ -36,7 +37,10 @@ vi.mock("@/lib/api/client", () => ({
       listForOrg: (...args: unknown[]) => installationsListForOrgMock(...args),
       remove: (...args: unknown[]) => installationsRemoveMock(...args),
     },
-    tokens: { list: (...args: unknown[]) => tokensListMock(...args) },
+    tokens: {
+      list: (...args: unknown[]) => tokensListMock(...args),
+      upsert: (...args: unknown[]) => tokensUpsertMock(...args),
+    },
     config: {
       getAll: (...args: unknown[]) => configGetAllMock(...args),
       update: (...args: unknown[]) => configUpdateMock(...args),
@@ -100,6 +104,7 @@ describe("SettingsPage", () => {
     installationsListForOrgMock.mockReset();
     installationsRemoveMock.mockReset();
     tokensListMock.mockReset();
+    tokensUpsertMock.mockReset();
     configGetAllMock.mockReset();
     patchMeMock.mockReset();
     revokeSessionsMock.mockReset();
@@ -523,6 +528,46 @@ describe("SettingsPage", () => {
     expect(screen.getByText("shabnam")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("closes the disconnect confirm dialog without disconnecting when Cancel is clicked", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "shabnam", account_type: "User", installation_id: 7, created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^cancel$/i }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(installationsRemoveMock).not.toHaveBeenCalled();
+    expect(screen.getByText("shabnam")).toBeInTheDocument();
+  });
+
+  it("adds a saved token via the Add token form", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+    tokensUpsertMock.mockResolvedValue({ org: "acme", label: "ci", created_at: "", updated_at: "" });
+
+    renderPage();
+
+    await waitFor(() => expect(tokensListMock).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByPlaceholderText("Org or owner"), { target: { value: " acme " } });
+    fireEvent.change(screen.getByPlaceholderText("ghp_… token"), { target: { value: " ghp_manual_token " } });
+    fireEvent.change(screen.getByPlaceholderText("Label (optional)"), { target: { value: " ci " } });
+    fireEvent.click(screen.getByRole("button", { name: /save token/i }));
+
+    await waitFor(() =>
+      expect(tokensUpsertMock).toHaveBeenCalledWith("acme", "ghp_manual_token", "ci"),
+    );
   });
 
 });
