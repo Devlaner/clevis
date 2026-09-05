@@ -543,6 +543,38 @@ def test_global_clear_fails_when_the_list_call_is_forbidden():
     assert "Resource not accessible by integration" in params[0]
 
 
+def test_clear_retries_on_a_429_rate_limit():
+    """A primary rate limit (429) is transient — requeue, don't mark the job failed."""
+    conn = _FakeConn()
+
+    delete = MagicMock(return_value=_resp(429))
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(delete=delete)
+        process_job(conn, 26, "github.clear_actions_cache", _payload(), retry_count=0)
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+    assert params[0] == 1  # new retry_count
+
+
+def test_clear_retries_on_a_secondary_rate_limit_403():
+    """GitHub's secondary/abuse rate limit is a 403 with a Retry-After header — transient,
+    not a permission denial."""
+    conn = _FakeConn()
+
+    resp = MagicMock()
+    resp.status_code = 403
+    resp.text = ""
+    resp.headers = {"Retry-After": "1"}
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(delete=MagicMock(return_value=resp))
+        process_job(conn, 27, "github.clear_actions_cache", _payload(), retry_count=0)
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+
+
 def test_process_job_dispatches_known_job_type_to_its_handler():
     conn = _FakeConn()
 

@@ -166,6 +166,22 @@ describe("CachePage", () => {
     expect(await screen.findByText(/cache clear failed — .*not accessible/i)).toBeInTheDocument();
   });
 
+  it("shows a retryable error when polling the job status fails", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    jobsGetMock.mockRejectedValue(new Error("Unknown job"));
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText(/couldn't check job status — unknown job/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^retry$/i })).toBeInTheDocument();
+  });
+
   it("closes the confirm dialog without clearing when Cancel is clicked", async () => {
     renderPage();
 

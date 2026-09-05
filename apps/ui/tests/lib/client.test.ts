@@ -75,7 +75,8 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
     stubOkJson({ queued: false, dry_run: true });
     await api.cache.clear("acme", "demo", { token: "", dry_run: true });
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(JSON.parse(init.body as string)).toEqual({ token: undefined, dry_run: true });
+    // JSON.stringify drops the undefined token property entirely.
+    expect(JSON.parse(init.body as string)).toEqual({ dry_run: true });
   });
 
   it("POSTs branch-protection/bulk with the org in the path and drops an empty token", async () => {

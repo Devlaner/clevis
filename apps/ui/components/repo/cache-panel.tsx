@@ -149,6 +149,9 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
     queryFn: () => api.jobs.get(jobId as number),
     enabled: jobId != null,
     refetchInterval: (query) => {
+      // Stop polling once the job is terminal, or once the status request itself has
+      // exhausted its retries — otherwise a persistently failing GET would poll forever.
+      if (query.state.status === "error") return false
       const status = query.state.data?.status
       return status === "done" || status === "failed" ? false : 2000
     },
@@ -420,6 +423,17 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
               ) : job?.status === "failed" ? (
                 <p className="text-sm text-destructive">
                   Cache clear failed — {job.result ?? "unknown error"}
+                </p>
+              ) : jobQuery.isError ? (
+                <p className="text-sm text-destructive flex items-center gap-2">
+                  Couldn&apos;t check job status — {jobQuery.error?.message ?? "request failed"}
+                  <Button
+                    variant="outline"
+                    className="h-6 px-2 text-[0.6875rem]"
+                    onClick={() => jobQuery.refetch()}
+                  >
+                    Retry
+                  </Button>
                 </p>
               ) : (
                 <p className="text-sm text-muted-foreground flex items-center gap-2">

@@ -187,8 +187,12 @@ def _github_response_is_error(conn: psycopg.Connection, job_id: int, retry_count
     """Apply the shared transient/permanent split to one GitHub response. Returns True
     (and marks the job requeued or failed) when the response is an error; False when the
     caller should keep going."""
-    if resp.status_code >= 500:
-        # 5xx is presumed transient (GitHub-side issue) — worth retrying, unlike 4xx.
+    rate_limited = resp.status_code == 429 or membership_reconcile._is_secondary_rate_limit(resp)
+    if resp.status_code >= 500 or rate_limited:
+        # 5xx is presumed transient (GitHub-side issue); a 429 or a secondary-rate-limit
+        # 403 (403 + Retry-After / X-RateLimit-Remaining: 0) means back off and retry
+        # later, not that the request is invalid -- same split as
+        # _handle_reconcile_org_membership.
         log.warning("job %d got a %d from GitHub (attempt %d)", job_id, resp.status_code, retry_count + 1)
         _requeue_for_retry(conn, job_id, retry_count, sanitize_error(_github_error_message(resp)))
         return True
