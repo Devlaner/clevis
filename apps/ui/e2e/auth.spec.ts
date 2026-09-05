@@ -59,8 +59,9 @@ test.describe("Mid-session 401", () => {
     // Force the next API call to look like an expired/revoked session. /audit auto-fetches
     // GET /audit on mount (see app/audit/page.tsx), so navigating there reliably triggers it.
     // Scoped to the API host specifically — a bare "**/audit" pattern would also match the
-    // UI's own page navigation request to http://localhost:3000/audit.
-    await page.route(`${E2E_API_BASE}/audit`, (route) => route.fulfill({ status: 401, body: "{}" }))
+    // UI's own page navigation request to http://localhost:3000/audit. Trailing "**" so this
+    // still matches once query params (e.g. ?limit=100) are appended to the request.
+    await page.route(`${E2E_API_BASE}/audit**`, (route) => route.fulfill({ status: 401, body: "{}" }))
     await page.goto("/audit")
 
     // Regression check for #75/#115: AuthGuard must call logout() (clearing local auth state)

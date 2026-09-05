@@ -7,9 +7,12 @@ import { Trash, Plus, CircleNotch, Check, ArrowSquareOut, CheckCircle } from "@p
 import { PageHeader } from "@/components/page-header"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { Field, FieldLabel, FieldDescription } from "@/components/ui/field"
 import { SectionError } from "@/components/section-error"
 import { EmptyStatePage } from "@/components/empty-state"
 import { PermissionDriftNotice } from "@/components/permission-drift-notice"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
+import { toast } from "@/components/ui/toast"
 import Link from "next/link"
 import { api } from "@/lib/api/client"
 import { initialConfigValues, mergeSavedConfigValue } from "@/lib/config-values"
@@ -72,19 +75,19 @@ function ProfileSection() {
         <span className="section-label">Profile</span>
       </div>
       <div className="p-4 flex flex-col gap-3 max-w-sm">
-        <div>
-          <label className="text-xs font-medium text-foreground block mb-1.5">Display name</label>
+        <Field>
+          <FieldLabel>Display name</FieldLabel>
           <Input
             placeholder="Your name"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-        </div>
-        <div>
-          <label className="text-xs font-medium text-foreground block mb-1.5">Email</label>
+        </Field>
+        <Field>
+          <FieldLabel>Email</FieldLabel>
           <Input value={user?.email || ""} disabled className="opacity-60 cursor-not-allowed" />
-          <p className="text-xs text-muted-foreground mt-1">Email cannot be changed.</p>
-        </div>
+          <FieldDescription>Email cannot be changed.</FieldDescription>
+        </Field>
         <p className="text-xs text-muted-foreground -mt-1">
           Switch between your organizations and personal GitHub account from the profile menu in the sidebar.
         </p>
@@ -248,15 +251,7 @@ type ConnectedInstallation = InstallationMeta & (
 
 function ConnectedOrgsSection() {
   const queryClient = useQueryClient()
-  const [confirmingKey, setConfirmingKey] = useState<string | null>(null)
-
-  // Auto-disarm if the user doesn't confirm within a few seconds, same pattern as
-  // ProfileSection's "Sign out of all devices" above.
-  useEffect(() => {
-    if (!confirmingKey) return
-    const timer = setTimeout(() => setConfirmingKey(null), 4000)
-    return () => clearTimeout(timer)
-  }, [confirmingKey])
+  const [confirmRow, setConfirmRow] = useState<ConnectedInstallation | null>(null)
 
   const personalQuery = useQuery<InstallationMeta[]>({
     queryKey: ["installations", "me"],
@@ -296,11 +291,15 @@ function ConnectedOrgsSection() {
       if (row.installation_id == null) return Promise.reject(new Error("This connection has no GitHub installation to disconnect."))
       return api.installations.remove(row.scope === "me" ? { scope: "me" } : { scope: "org", orgLogin: row.orgLogin }, row.installation_id)
     },
-    onSuccess: () => {
+    onSuccess: (_data, row) => {
       queryClient.invalidateQueries({ queryKey: ["installations"] })
-      setConfirmingKey(null)
+      setConfirmRow(null)
+      toast.success(`Disconnected ${row.account_login}.`)
     },
-    onError: () => setConfirmingKey(null),
+    onError: (error) => {
+      setConfirmRow(null)
+      toast.error(error instanceof Error ? error.message : "Disconnect failed.")
+    },
   })
 
   const rowKey = (row: ConnectedInstallation) => `${row.scope}:${row.id}`
@@ -347,7 +346,6 @@ function ConnectedOrgsSection() {
             <tbody className="divide-y divide-border">
               {rows.map((row) => {
                 const key = rowKey(row)
-                const isConfirming = confirmingKey === key
                 const isThisRowMutating = disconnect.isPending && disconnect.variables && rowKey(disconnect.variables) === key
                 const showDrift = (row.blocked_features?.length ?? 0) > 0 || row.permissions_synced_at === null
                 return (
@@ -366,18 +364,10 @@ function ConnectedOrgsSection() {
                         variant="destructive"
                         size="sm"
                         disabled={disconnect.isPending}
-                        onClick={() => {
-                          if (isConfirming) {
-                            disconnect.mutate(row)
-                          } else {
-                            setConfirmingKey(key)
-                          }
-                        }}
+                        onClick={() => setConfirmRow(row)}
                       >
                         {isThisRowMutating ? (
                           <CircleNotch className="size-3 animate-spin" />
-                        ) : isConfirming ? (
-                          "Confirm disconnect"
                         ) : (
                           <><Trash className="size-3" />Disconnect</>
                         )}
@@ -411,6 +401,20 @@ function ConnectedOrgsSection() {
           </p>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmRow !== null}
+        onOpenChange={(open) => { if (!open) setConfirmRow(null) }}
+        title="Disconnect this account?"
+        description={
+          confirmRow
+            ? `Clevis will stop being able to access ${confirmRow.account_login} until it's reinstalled.`
+            : ""
+        }
+        confirmLabel="Disconnect"
+        onConfirm={() => confirmRow && disconnect.mutate(confirmRow)}
+        pending={disconnect.isPending}
+      />
     </div>
   )
 }
@@ -514,23 +518,32 @@ function SavedTokensSection() {
       <div className="border-t border-border p-4">
         <p className="text-xs font-medium text-foreground mb-3">Add token</p>
         <div className="grid gap-2 sm:grid-cols-3">
-          <Input
-            placeholder="Org or owner"
-            value={addOrg}
-            onChange={(e) => setAddOrg(e.target.value)}
-          />
-          <Input
-            placeholder="ghp_… token"
-            type="password"
-            value={addToken}
-            onChange={(e) => setAddToken(e.target.value)}
-            className="font-mono"
-          />
-          <Input
-            placeholder="Label (optional)"
-            value={addLabel}
-            onChange={(e) => setAddLabel(e.target.value)}
-          />
+          <Field>
+            <FieldLabel className="sr-only">Org or owner</FieldLabel>
+            <Input
+              placeholder="Org or owner"
+              value={addOrg}
+              onChange={(e) => setAddOrg(e.target.value)}
+            />
+          </Field>
+          <Field>
+            <FieldLabel className="sr-only">Token</FieldLabel>
+            <Input
+              placeholder="ghp_… token"
+              type="password"
+              value={addToken}
+              onChange={(e) => setAddToken(e.target.value)}
+              className="font-mono"
+            />
+          </Field>
+          <Field>
+            <FieldLabel className="sr-only">Label (optional)</FieldLabel>
+            <Input
+              placeholder="Label (optional)"
+              value={addLabel}
+              onChange={(e) => setAddLabel(e.target.value)}
+            />
+          </Field>
         </div>
         <Button
           onClick={() => upsert.mutate()}

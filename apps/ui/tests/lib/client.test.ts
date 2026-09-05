@@ -407,6 +407,38 @@ describe("api.repos", () => {
   });
 });
 
+describe("api.audit", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function stubOkJson(body: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))),
+    );
+  }
+
+  it("defaults to limit=100 and omits action when not given", async () => {
+    stubOkJson([]);
+    await api.audit.list();
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const parsed = new URL(String(url));
+    expect(parsed.searchParams.get("limit")).toBe("100");
+    expect(parsed.searchParams.has("action")).toBe(false);
+  });
+
+  it("passes a custom limit and action through as query params", async () => {
+    stubOkJson([]);
+    await api.audit.list("cache.clear", 200);
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const parsed = new URL(String(url));
+    expect(parsed.searchParams.get("limit")).toBe("200");
+    expect(parsed.searchParams.get("action")).toBe("cache.clear");
+  });
+});
+
 describe("api.collab", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

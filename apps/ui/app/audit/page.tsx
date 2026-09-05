@@ -6,8 +6,10 @@ import { useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
 import { EmptyStateInline } from "@/components/empty-state"
 import { SectionError } from "@/components/section-error"
+import { Button } from "@/components/ui/button"
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table"
 import { api } from "@/lib/api/client"
-import type { JobOut } from "@/lib/api/types"
+import type { AuditLogOut, JobOut } from "@/lib/api/types"
 
 const ACTION_TYPES = [
   "",
@@ -25,6 +27,13 @@ const JOB_STATUS_COLOR: Record<JobOut["status"], string> = {
   failed:     "text-destructive",
 }
 
+// The backend has no true offset/cursor pagination -- /audit only ever returns the N
+// most recent rows (Query(default=100, le=500)) -- so "Load more" re-fetches with a
+// bigger limit rather than requesting a next page.
+const INITIAL_LIMIT = 100
+const LIMIT_STEP = 100
+const MAX_LIMIT = 500
+
 // audit_logs.payload embeds job_id for cache-clear rows (a deliberate cross-reference,
 // not duplicate data -- see #281) so a row's live job status can be shown inline instead
 // of sending the user to a separate Job Queue page for exactly one operation type.
@@ -40,12 +49,19 @@ function parseJobId(payload: string): number | null {
 
 export default function AuditPage() {
   const [actionFilter, setActionFilter] = useState("")
+  const [limit, setLimit] = useState(INITIAL_LIMIT)
   const searchParams = useSearchParams()
   const highlightJobId = Number(searchParams.get("job_id")) || null
 
+  // A new filter starts back at the default window -- an old "load more" bump for a
+  // different (or no) filter isn't a meaningful limit for this one.
+  useEffect(() => {
+    setLimit(INITIAL_LIMIT)
+  }, [actionFilter])
+
   const { data: logs = [], isLoading, isError, error, isFetching, refetch } = useQuery({
-    queryKey: ["audit", actionFilter],
-    queryFn: () => api.audit.list(actionFilter || undefined),
+    queryKey: ["audit", actionFilter, limit],
+    queryFn: () => api.audit.list(actionFilter || undefined, limit),
     refetchInterval: 30_000,
   })
 
@@ -64,6 +80,54 @@ export default function AuditPage() {
       highlightRef.current.scrollIntoView({ block: "center", behavior: "smooth" })
     }
   }, [highlightJobId, logs.length])
+
+  const columns: DataTableColumn<AuditLogOut>[] = [
+    {
+      key: "actor",
+      header: "Actor",
+      sortValue: (log) => log.actor,
+      cellClassName: "font-mono text-foreground/80",
+      render: (log) => log.actor,
+    },
+    {
+      key: "action",
+      header: "Action",
+      sortValue: (log) => log.action,
+      cellClassName: "text-primary font-mono",
+      render: (log) => log.action,
+    },
+    {
+      key: "target",
+      header: "Target",
+      sortValue: (log) => log.target,
+      cellClassName: "text-muted-foreground max-w-[14rem] truncate",
+      render: (log) => log.target,
+    },
+    {
+      key: "job_status",
+      header: "Job status",
+      cellClassName: "font-mono",
+      render: (log) => {
+        const jobId = parseJobId(log.payload)
+        const job = jobId !== null ? jobsById.get(jobId) : undefined
+        return job ? (
+          <span className={`font-medium ${JOB_STATUS_COLOR[job.status]}`}>{job.status}</span>
+        ) : jobId !== null && isJobsError ? (
+          <span className="text-destructive" title="Failed to load job status">failed to load</span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )
+      },
+    },
+    {
+      key: "created_at",
+      header: "Time",
+      align: "right",
+      sortValue: (log) => new Date(log.created_at).getTime(),
+      cellClassName: "font-mono text-muted-foreground whitespace-nowrap",
+      render: (log) => new Date(log.created_at).toLocaleString(),
+    },
+  ]
 
   return (
     <>
@@ -100,52 +164,42 @@ export default function AuditPage() {
         ) : logs.length === 0 ? (
           <EmptyStateInline noun="audit events" qualifier={actionFilter || undefined} />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left section-label px-4 py-2">Actor</th>
-                  <th className="text-left section-label px-4 py-2">Action</th>
-                  <th className="text-left section-label px-4 py-2">Target</th>
-                  <th className="text-left section-label px-4 py-2">Job status</th>
-                  <th className="text-right section-label px-4 py-2">Time</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {logs.map((log) => {
-                  const jobId = parseJobId(log.payload)
-                  const job = jobId !== null ? jobsById.get(jobId) : undefined
-                  const isHighlighted = highlightJobId !== null && jobId === highlightJobId
-                  return (
-                    <tr
-                      key={log.id}
-                      ref={isHighlighted ? highlightRef : null}
-                      className={[
-                        "hover:bg-elevated transition-colors",
-                        isHighlighted ? "ring-1 ring-inset ring-primary/40 bg-primary/5" : "",
-                      ].join(" ")}
-                    >
-                      <td className="px-4 py-2.5 font-mono text-foreground/80">{log.actor}</td>
-                      <td className="px-4 py-2.5 text-primary font-mono">{log.action}</td>
-                      <td className="px-4 py-2.5 text-muted-foreground max-w-[14rem] truncate">{log.target}</td>
-                      <td className="px-4 py-2.5 font-mono">
-                        {job ? (
-                          <span className={`font-medium ${JOB_STATUS_COLOR[job.status]}`}>{job.status}</span>
-                        ) : jobId !== null && isJobsError ? (
-                          <span className="text-destructive" title="Failed to load job status">failed to load</span>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono text-muted-foreground whitespace-nowrap">
-                        {new Date(log.created_at).toLocaleString()}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <>
+            <DataTable
+              columns={columns}
+              data={logs}
+              getRowKey={(log) => log.id}
+              // Set high enough that this table's own pagination never triggers (the
+              // backend already caps rows at MAX_LIMIT) -- "Load more" below, not
+              // client-side paging, is what lets a highlighted row past the current
+              // window stay reachable instead of hiding behind an unrelated page click.
+              pageSize={MAX_LIMIT}
+              getRowRef={(log) => {
+                const jobId = parseJobId(log.payload)
+                return highlightJobId !== null && jobId === highlightJobId ? highlightRef : undefined
+              }}
+              rowClassName={(log) => {
+                const jobId = parseJobId(log.payload)
+                const isHighlighted = highlightJobId !== null && jobId === highlightJobId
+                return [
+                  "hover:bg-elevated transition-colors",
+                  isHighlighted ? "ring-1 ring-inset ring-primary/40 bg-primary/5" : "",
+                ].join(" ")
+              }}
+            />
+            {logs.length >= limit && limit < MAX_LIMIT && (
+              <div className="px-4 py-3 border-t border-border flex justify-center">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={isFetching}
+                  onClick={() => setLimit((l) => Math.min(l + LIMIT_STEP, MAX_LIMIT))}
+                >
+                  {isFetching ? "Loading…" : "Load more"}
+                </Button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </>

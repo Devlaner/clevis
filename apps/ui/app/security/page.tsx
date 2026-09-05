@@ -4,6 +4,7 @@ import { useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
+import { EmptyStateNoAccount } from "@/components/empty-state"
 import { CheckCard } from "@/components/check-card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Input } from "@/components/ui/input"
@@ -105,6 +106,14 @@ export default function SecurityPage() {
   useEffect(() => {
     setOwner(scopeOrgLogin)
   }, [scopeOrgLogin])
+
+  // Same pattern as the other pages that gate on useActiveScope() (see app/page.tsx,
+  // app/repos/page.tsx, etc.) -- deferred a tick so this doesn't flash before
+  // useActiveScope's first read of localStorage resolves.
+  const [scopeChecked, setScopeChecked] = useState(false)
+  useEffect(() => {
+    setScopeChecked(true)
+  }, [])
 
   const { data: installs = [] } = useQuery<InstallationMeta[]>({
     queryKey: ["installations"],
@@ -257,6 +266,10 @@ export default function SecurityPage() {
         title="Health & Security"
         description="Run security checks against a GitHub organization."
       />
+
+      {scopeChecked && !scope && (
+        <EmptyStateNoAccount message="No account selected — pick an organization from the profile menu to prefill the scan below, or just type one in directly." />
+      )}
 
       <div className="grid gap-4 lg:grid-cols-3">
         {/* Config */}

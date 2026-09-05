@@ -2,6 +2,7 @@ import "@/app/globals.css"
 import { Geist, Archivo, JetBrains_Mono } from "next/font/google"
 import { cn } from "@/lib/utils"
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { Toaster } from "@/components/ui/toast"
 import { QueryProvider } from "@/components/query-provider"
 import { AuthProvider } from "@/lib/auth-context"
 import { AuthGuard } from "@/components/auth-guard"
@@ -59,6 +60,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <AuthProvider>
                 <AuthGuard>
                   <ShellRouter>{children}</ShellRouter>
+                  <Toaster />
                 </AuthGuard>
               </AuthProvider>
             </IconProvider>

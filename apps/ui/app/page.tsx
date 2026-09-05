@@ -53,8 +53,9 @@ const quickActions = [
   { label: "View Collaborators", href: "/collaborators" },
 ]
 
-function LiveStatCard({ label, loading, configured, value, trend }: {
+function LiveStatCard({ label, href, loading, configured, value, trend }: {
   label: string
+  href: string
   loading: boolean
   configured: boolean
   value: number | undefined
@@ -62,7 +63,7 @@ function LiveStatCard({ label, loading, configured, value, trend }: {
 }) {
   if (!configured) {
     return (
-      <Link href="/security" className="card px-4 py-4 block hover:bg-elevated transition-colors">
+      <Link href={href} className="card px-4 py-4 block hover:bg-elevated transition-colors">
         <p className="telemetry-label mb-2 block">
           {label}
         </p>
@@ -194,18 +195,21 @@ export default function OverviewPage() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-px mb-6 border border-border bg-border">
         <LiveStatCard
           label="Repositories"
+          href="/repos"
           loading={cockpitQuery.isLoading}
           configured={configured}
           value={cockpit?.repo_count}
         />
         <LiveStatCard
           label="Open PRs"
+          href="/pulls"
           loading={cockpitQuery.isLoading}
           configured={configured}
           value={cockpit?.open_pr_count}
         />
         <LiveStatCard
           label="Security Score"
+          href="/security"
           loading={cockpitQuery.isLoading}
           configured={configured}
           value={cockpit?.latest_score ?? undefined}
@@ -213,6 +217,7 @@ export default function OverviewPage() {
         />
         <LiveStatCard
           label="Team Members"
+          href="/collaborators"
           loading={cockpitQuery.isLoading}
           configured={configured}
           value={cockpit?.member_count}
@@ -438,6 +443,11 @@ export default function OverviewPage() {
           </div>
           {myViewQuery.isLoading ? (
             <p className="p-4 text-sm text-muted-foreground">Loading…</p>
+          ) : myView?.identity_unresolved ? (
+            <p className="p-4 text-sm text-muted-foreground">
+              Clevis can’t tell who you are on GitHub for this account — sign in with GitHub
+              (or add a personal access token) to see this.
+            </p>
           ) : myViewItems.length === 0 ? (
             <p className="p-4 text-sm text-muted-foreground">Nothing here right now</p>
           ) : (

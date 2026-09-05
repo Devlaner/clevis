@@ -110,6 +110,29 @@ describe("GithubRoster (Collaborators page)", () => {
     expect(screen.getByText("Members without 2FA: 1")).toBeInTheDocument();
   });
 
+  it("sorts the members table by clicking a sortable column header", async () => {
+    membersMock.mockResolvedValue({
+      org: "acme",
+      members: [
+        { login: "zoe", avatar_url: "", role: "member", site_admin: false, two_factor_enabled: true },
+        { login: "alice", avatar_url: "", role: "admin", site_admin: false, two_factor_enabled: true },
+      ],
+      two_factor_overlay_available: true,
+    });
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("zoe")).toBeInTheDocument());
+    let rows = screen.getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("zoe");
+
+    fireEvent.click(screen.getByRole("columnheader", { name: "Member" }));
+
+    rows = screen.getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("alice");
+    expect(rows[1]).toHaveTextContent("zoe");
+  });
+
   it("omits the 2FA chip and footer when the overlay is unavailable", async () => {
     membersMock.mockResolvedValue({
       org: "acme",

@@ -69,7 +69,71 @@ def test_degrades_to_empty_when_login_unresolvable(http, path):
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body == {"items": [], "total_count": 0, "page": 1, "per_page": 25}
+    assert body == {"items": [], "total_count": 0, "page": 1, "per_page": 25, "identity_unresolved": True}
+
+
+@pytest.mark.parametrize("path", ["/me/github/my-prs", "/me/github/my-reviews", "/me/github/my-issues"])
+def test_propagates_unexpected_user_endpoint_error(http, path):
+    """A non-403 failure calling GET /user (a real auth/server problem, not the expected
+    "installation token can't call /user" case) must propagate rather than being silently
+    swallowed as identity_unresolved."""
+    with (
+        patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+        patch("src.routers.analytics.GitHubClient") as mock_client,
+    ):
+        mock_client.return_value.request.side_effect = httpx.HTTPStatusError(
+            "boom",
+            request=httpx.Request("GET", "https://api.github.com/user"),
+            response=httpx.Response(500, request=httpx.Request("GET", "https://api.github.com/user")),
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            http.get(f"{path}?owner=acme")
+
+
+@pytest.mark.parametrize("path", ["/me/github/my-prs", "/me/github/my-reviews", "/me/github/my-issues"])
+def test_propagates_network_error_from_user_endpoint(http, path):
+    """A network-level failure (timeout, DNS, connection reset) calling GET /user must
+    also propagate rather than being treated as the expected App-token case."""
+    with (
+        patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+        patch("src.routers.analytics.GitHubClient") as mock_client,
+    ):
+        mock_client.return_value.request.side_effect = httpx.RequestError(
+            "boom", request=httpx.Request("GET", "https://api.github.com/user")
+        )
+        with pytest.raises(httpx.RequestError):
+            http.get(f"{path}?owner=acme")
+
+
+def test_falls_back_to_users_github_login_when_user_endpoint_unresolvable(app, http):
+    """A GitHub App installation token can't call GET /user, but if the signed-in Clevis
+    user linked their own GitHub identity via OAuth, my-prs should use that login rather
+    than degrading to empty."""
+    app.dependency_overrides[require_auth] = lambda: UserOut(
+        id=1, email="myitems@example.com", name=None, is_workspace_admin=False, github_login="octocat"
+    )
+
+    def _request_side_effect(method, path, params=None):
+        if path == "/user":
+            raise httpx.HTTPStatusError(
+                "boom",
+                request=httpx.Request("GET", "https://api.github.com/user"),
+                response=httpx.Response(403, request=httpx.Request("GET", "https://api.github.com/user")),
+            )
+        if path == "/search/issues":
+            assert "author:octocat" in params["q"]
+            return {"items": [], "total_count": 0}
+        return {}
+
+    with (
+        patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+        patch("src.routers.analytics.GitHubClient") as mock_client,
+    ):
+        mock_client.return_value.request.side_effect = _request_side_effect
+        resp = http.get("/me/github/my-prs?owner=acme")
+
+    assert resp.status_code == 200
+    assert resp.json()["identity_unresolved"] is False
 
 
 def test_my_prs_success_returns_pagination_fields(http):
@@ -177,7 +241,7 @@ def test_page_times_per_page_over_1000_returns_empty_without_calling_github(http
     body = resp.json()
     # total_count is capped at the reachable max (not 0) so page/lastPage math on the
     # client stays consistent instead of regressing once paging crosses GitHub's window.
-    assert body == {"items": [], "total_count": 1000, "page": 11, "per_page": 100}
+    assert body == {"items": [], "total_count": 1000, "page": 11, "per_page": 100, "identity_unresolved": False}
 
 
 def test_search_failure_degrades_to_empty_not_500(http):
@@ -228,7 +292,15 @@ def test_non_dict_search_response_degrades_to_empty(http):
 
 def test_falls_back_to_client_supplied_token_header(http):
     with patch("src.routers.analytics.GitHubClient") as mock_client:
-        mock_client.return_value.request.side_effect = httpx.RequestError("boom")
+        # 403 (not a bare network error) -- this test is exercising the client-supplied
+        # X-GitHub-Token header path (no 400 from a missing token), not /user's error
+        # handling, so it uses the "expected" degrade-to-empty case rather than a
+        # network failure that would now (correctly) propagate.
+        mock_client.return_value.request.side_effect = httpx.HTTPStatusError(
+            "boom",
+            request=httpx.Request("GET", "https://api.github.com/user"),
+            response=httpx.Response(403, request=httpx.Request("GET", "https://api.github.com/user")),
+        )
         resp = http.get("/me/github/my-prs?owner=acme", headers={"X-GitHub-Token": "ghp_client"})
 
     assert resp.status_code == 200

@@ -168,6 +168,12 @@ class MyViewResponse(BaseModel):
     review_requests: list[PRSummary] = []
     assigned_issues: list[IssueSummary] = []
     my_recent_runs: list[RunSummaryLite] = []
+    # True when GitHub's /user (the source of "who am I") couldn't be resolved -- an
+    # installation (App) token can't call it, and the signed-in Clevis user has no
+    # GitHub-OAuth-linked login to fall back on either. Distinguishes "we don't know who
+    # you are on GitHub" from "you genuinely have zero open PRs/reviews/issues", which
+    # would otherwise render identically as an empty list.
+    identity_unresolved: bool = False
 
 
 class MyPrListResponse(BaseModel):
@@ -175,6 +181,7 @@ class MyPrListResponse(BaseModel):
     total_count: int = 0
     page: int = 1
     per_page: int = 25
+    identity_unresolved: bool = False
 
 
 class MyIssueListResponse(BaseModel):
@@ -182,6 +189,7 @@ class MyIssueListResponse(BaseModel):
     total_count: int = 0
     page: int = 1
     per_page: int = 25
+    identity_unresolved: bool = False
 
 
 class ActionsUsageResponse(BaseModel):

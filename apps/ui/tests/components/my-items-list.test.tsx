@@ -164,6 +164,27 @@ describe("MyItemsList", () => {
     expect(onPageChange).toHaveBeenCalledWith(1);
   });
 
+  it("shows a distinct message (not the generic empty state) when identityUnresolved is set", () => {
+    render(
+      <MyItemsList
+        items={[]}
+        isLoading={false}
+        isError={false}
+        errorMessage=""
+        onRetry={() => {}}
+        retrying={false}
+        emptyNoun="pull requests"
+        totalCount={0}
+        page={1}
+        perPage={25}
+        onPageChange={() => {}}
+        identityUnresolved={true}
+      />,
+    );
+    expect(screen.getByText(/can’t tell who you are on GitHub/)).toBeInTheDocument();
+    expect(screen.queryByText(/No pull requests/)).not.toBeInTheDocument();
+  });
+
   it("shows a retrying spinner state on the retry button", () => {
     render(
       <MyItemsList

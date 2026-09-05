@@ -7,12 +7,22 @@ const installationsListMock = vi.fn();
 const installationsListForOrgMock = vi.fn();
 const installationsRemoveMock = vi.fn();
 const tokensListMock = vi.fn();
+const tokensUpsertMock = vi.fn();
 const configGetAllMock = vi.fn();
 const patchMeMock = vi.fn();
 const revokeSessionsMock = vi.fn();
 const configUpdateMock = vi.fn();
 const routerReplace = vi.fn();
 let searchParams = new URLSearchParams();
+
+// AuthProvider (wrapping SettingsPage below) calls the real global `fetch` directly
+// (not the mocked api client) to confirm the session against /auth/me. Left unmocked,
+// every test attempts a real network call to localhost:8080; on the first failure it
+// waits a real 2s before retrying (see auth-context.tsx's checkMe), which is slow and,
+// worse, timing-dependent on this machine's TCP-refusal latency -- rendering
+// `waitFor`'s default 1s timeout unreliable for anything else the test is waiting on.
+// Stub it to resolve immediately so tests don't pay for or depend on that retry.
+const fetchMock = vi.fn();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: routerReplace }),
@@ -27,7 +37,10 @@ vi.mock("@/lib/api/client", () => ({
       listForOrg: (...args: unknown[]) => installationsListForOrgMock(...args),
       remove: (...args: unknown[]) => installationsRemoveMock(...args),
     },
-    tokens: { list: (...args: unknown[]) => tokensListMock(...args) },
+    tokens: {
+      list: (...args: unknown[]) => tokensListMock(...args),
+      upsert: (...args: unknown[]) => tokensUpsertMock(...args),
+    },
     config: {
       getAll: (...args: unknown[]) => configGetAllMock(...args),
       update: (...args: unknown[]) => configUpdateMock(...args),
@@ -91,6 +104,7 @@ describe("SettingsPage", () => {
     installationsListForOrgMock.mockReset();
     installationsRemoveMock.mockReset();
     tokensListMock.mockReset();
+    tokensUpsertMock.mockReset();
     configGetAllMock.mockReset();
     patchMeMock.mockReset();
     revokeSessionsMock.mockReset();
@@ -99,11 +113,20 @@ describe("SettingsPage", () => {
     searchParams = new URLSearchParams();
     localStorage.clear();
     localStorage.setItem(TOKEN_KEY, makeAdminJwt());
+    fetchMock.mockReset();
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({ id: 1, email: "admin@example.com", name: "Admin", is_workspace_admin: true }),
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("renders the profile section and surfaces a retry when a section errors, and shows instance config for admins", async () => {
@@ -368,20 +391,24 @@ describe("SettingsPage", () => {
 
     renderPage();
 
+    // "acme" also appears in the separate "Your organizations" membership card (which
+    // resolves independently, from orgsMineMock alone) -- waiting on that text alone
+    // would race ahead of the "Connected GitHub accounts" table's own org-scoped
+    // installation row, which only appears once orgInstallQueries (chained after
+    // membershipsQuery) settles. Wait on the actual two Disconnect buttons instead.
     await waitFor(() => {
-      expect(screen.getByText("shabnam")).toBeInTheDocument();
-      expect(screen.getByText("acme")).toBeInTheDocument();
+      expect(screen.getAllByRole("button", { name: /disconnect/i })).toHaveLength(2);
     });
     expect(installationsListForOrgMock).toHaveBeenCalledWith("acme");
 
     const disconnectButtons = screen.getAllByRole("button", { name: /disconnect/i });
-    expect(disconnectButtons).toHaveLength(2);
 
     fireEvent.click(disconnectButtons[0]);
     expect(installationsRemoveMock).not.toHaveBeenCalled();
-    expect(await screen.findByRole("button", { name: /confirm disconnect/i })).toBeInTheDocument();
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/shabnam/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /confirm disconnect/i }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(installationsRemoveMock).toHaveBeenCalledWith({ scope: "me" }, 7);
@@ -402,7 +429,8 @@ describe("SettingsPage", () => {
 
     const disconnectButton = await screen.findByRole("button", { name: /disconnect/i });
     fireEvent.click(disconnectButton);
-    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(installationsRemoveMock).toHaveBeenCalledWith({ scope: "org", orgLogin: "acme" }, 42);
@@ -460,15 +488,16 @@ describe("SettingsPage", () => {
 
     const disconnectButton = await screen.findByRole("button", { name: /disconnect/i });
     fireEvent.click(disconnectButton);
-    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(installationsRemoveMock).toHaveBeenCalled();
     });
-    // Neither "Disconnect" nor "Confirm disconnect" text remains while the mutation is
-    // in flight -- the row shows a spinner instead.
+    // The row's own button goes back to plain "Disconnect" while the confirm dialog
+    // shows a busy state instead of a second confirm click.
     expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Confirm disconnect" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /working/i })).toBeDisabled();
 
     await act(async () => {
       removeGate.resolve();
@@ -488,15 +517,57 @@ describe("SettingsPage", () => {
     renderPage();
 
     fireEvent.click(await screen.findByRole("button", { name: /disconnect/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveTextContent("GitHub API unreachable");
     });
     // The row is still there (not silently removed) and can be retried immediately --
-    // confirmingKey was cleared on error, not left stuck on "Confirm disconnect".
+    // the dialog was closed on error, not left stuck open.
     expect(screen.getByText("shabnam")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("closes the disconnect confirm dialog without disconnecting when Cancel is clicked", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([
+      { id: 1, account_login: "shabnam", account_type: "User", installation_id: 7, created_at: "2026-01-01T00:00:00Z" },
+    ]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^cancel$/i }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(installationsRemoveMock).not.toHaveBeenCalled();
+    expect(screen.getByText("shabnam")).toBeInTheDocument();
+  });
+
+  it("adds a saved token via the Add token form", async () => {
+    orgsMineMock.mockResolvedValue([]);
+    installationsListMock.mockResolvedValue([]);
+    tokensListMock.mockResolvedValue([]);
+    configGetAllMock.mockResolvedValue({ worker_poll_seconds: "5", registration_enabled: "true" });
+    tokensUpsertMock.mockResolvedValue({ org: "acme", label: "ci", created_at: "", updated_at: "" });
+
+    renderPage();
+
+    await waitFor(() => expect(tokensListMock).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByPlaceholderText("Org or owner"), { target: { value: " acme " } });
+    fireEvent.change(screen.getByPlaceholderText("ghp_… token"), { target: { value: " ghp_manual_token " } });
+    fireEvent.change(screen.getByPlaceholderText("Label (optional)"), { target: { value: " ci " } });
+    fireEvent.click(screen.getByRole("button", { name: /save token/i }));
+
+    await waitFor(() =>
+      expect(tokensUpsertMock).toHaveBeenCalledWith("acme", "ghp_manual_token", "ci"),
+    );
   });
 
 });

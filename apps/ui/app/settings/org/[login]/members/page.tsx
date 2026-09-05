@@ -6,11 +6,58 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { PageHeader } from "@/components/page-header"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table"
 import { CircleNotch, EnvelopeSimple, Warning, X } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
 import { addRevokingId, isRevoking, removeRevokingId } from "@/lib/revoke-pending"
 import { relativeTime } from "@/lib/format"
-import type { InvitationOut } from "@/lib/api/types"
+import type { GithubOrgMember, InvitationOut } from "@/lib/api/types"
+
+const MEMBER_COLUMNS: DataTableColumn<GithubOrgMember>[] = [
+  {
+    key: "login",
+    header: "Member",
+    sortValue: (m) => m.login.toLowerCase(),
+    render: (m) => (
+      <div className="flex items-center gap-2">
+        {/* Decorative: the member login is the adjacent link text, so an empty alt
+            avoids a duplicate screen-reader announcement. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={m.avatar_url} alt="" className="size-5 rounded-full" />
+        <a
+          href={`https://github.com/${m.login}`}
+          target="_blank"
+          rel="noreferrer"
+          className="text-foreground/80 hover:text-foreground"
+        >
+          {m.login}
+        </a>
+      </div>
+    ),
+  },
+  {
+    key: "role",
+    header: "Role",
+    sortValue: (m) => m.role,
+    cellClassName: "text-muted-foreground capitalize",
+    render: (m) => m.role,
+  },
+  {
+    key: "two_factor_enabled",
+    header: "2FA",
+    // Groups unknown (null) between the two known states rather than sorting it to an
+    // arbitrary end -- there's no natural "less/more 2FA" ordering for "we don't know".
+    sortValue: (m) => (m.two_factor_enabled === true ? 1 : m.two_factor_enabled === false ? -1 : 0),
+    render: (m) => (
+      <>
+        {m.two_factor_enabled === true && <span className="stat-chip">✓ 2FA</span>}
+        {m.two_factor_enabled === false && (
+          <span className="stat-chip text-red-400 border-red-500/30">No 2FA</span>
+        )}
+      </>
+    ),
+  },
+]
 
 const ROSTER_TABS = [
   { id: "members", label: "Members" },
@@ -180,46 +227,7 @@ function GithubRoster({ orgLogin }: { orgLogin: string }) {
           </div>
         ) : (
           <>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left text-muted-foreground font-medium px-4 py-2">Member</th>
-                    <th className="text-left text-muted-foreground font-medium px-4 py-2">Role</th>
-                    <th className="text-left text-muted-foreground font-medium px-4 py-2">2FA</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {filteredMembers.map((m) => (
-                    <tr key={m.login}>
-                      <td className="px-4 py-2.5">
-                        <div className="flex items-center gap-2">
-                          {/* Decorative: the member login is the adjacent link text, so an
-                              empty alt avoids a duplicate screen-reader announcement. */}
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={m.avatar_url} alt="" className="size-5 rounded-full" />
-                          <a
-                            href={`https://github.com/${m.login}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-foreground/80 hover:text-foreground"
-                          >
-                            {m.login}
-                          </a>
-                        </div>
-                      </td>
-                      <td className="px-4 py-2.5 text-muted-foreground capitalize">{m.role}</td>
-                      <td className="px-4 py-2.5">
-                        {m.two_factor_enabled === true && <span className="stat-chip">✓ 2FA</span>}
-                        {m.two_factor_enabled === false && (
-                          <span className="stat-chip text-red-400 border-red-500/30">No 2FA</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable columns={MEMBER_COLUMNS} data={filteredMembers} getRowKey={(m) => m.login} />
             {membersQuery.data?.two_factor_overlay_available && (
               <div className="px-4 py-2.5 border-t border-border">
                 <span className="text-xs text-muted-foreground">Members without 2FA: {membersWithout2fa}</span>
