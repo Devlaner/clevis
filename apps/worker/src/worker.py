@@ -183,6 +183,22 @@ def _github_error_message(resp: httpx.Response) -> str:
     return f"GitHub API error: {resp.status_code}"
 
 
+def _github_response_is_error(conn: psycopg.Connection, job_id: int, retry_count: int, resp: httpx.Response) -> bool:
+    """Apply the shared transient/permanent split to one GitHub response. Returns True
+    (and marks the job requeued or failed) when the response is an error; False when the
+    caller should keep going."""
+    if resp.status_code >= 500:
+        # 5xx is presumed transient (GitHub-side issue) — worth retrying, unlike 4xx.
+        log.warning("job %d got a %d from GitHub (attempt %d)", job_id, resp.status_code, retry_count + 1)
+        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(_github_error_message(resp)))
+        return True
+    if resp.status_code >= 300:
+        log.error("job %d failed: GitHub API error %d", job_id, resp.status_code)
+        _mark_failed(conn, job_id, sanitize_error(_github_error_message(resp)), retry_count)
+        return True
+    return False
+
+
 def _handle_clear_actions_cache(conn: psycopg.Connection, job_id: int, payload_raw: str, retry_count: int) -> None:
     try:
         payload = ClearActionsCachePayload.model_validate_json(payload_raw)
@@ -199,7 +215,7 @@ def _handle_clear_actions_cache(conn: psycopg.Connection, job_id: int, payload_r
         return
 
     base = settings.github_api_base
-    params = {k: v for k, v in (("key", payload.key), ("ref", payload.ref)) if v}
+    repo_path = f"{base}/repos/{payload.owner}/{payload.repo}/actions/caches"
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -208,29 +224,48 @@ def _handle_clear_actions_cache(conn: psycopg.Connection, job_id: int, payload_r
 
     try:
         with httpx.Client(timeout=20) as client:
-            resp = client.delete(
-                f"{base}/repos/{payload.owner}/{payload.repo}/actions/caches",
-                headers=headers,
-                params=params,
-            )
+            if payload.key:
+                # Targeted clear: GitHub's DELETE-by-key does the work in one call.
+                params = {k: v for k, v in (("key", payload.key), ("ref", payload.ref)) if v}
+                resp = client.delete(repo_path, headers=headers, params=params)
+                if _github_response_is_error(conn, job_id, retry_count, resp):
+                    return
+                _mark_done(conn, job_id, {"ok": True, "status": resp.status_code}, retry_count)
+                log.info("job %d done", job_id)
+                return
+
+            # Global "clear everything": GitHub has no bulk-delete endpoint, so list every
+            # cache entry (paginated) then delete each by id. A keyless DELETE on the
+            # collection is a 422 — which is why this path used to fail every time.
+            cache_ids: list[int] = []
+            page = 1
+            while True:
+                resp = client.get(repo_path, headers=headers, params={"per_page": 100, "page": page})
+                if _github_response_is_error(conn, job_id, retry_count, resp):
+                    return
+                batch = (resp.json() or {}).get("actions_caches", [])
+                cache_ids.extend(entry["id"] for entry in batch if entry.get("id") is not None)
+                if len(batch) < 100:
+                    break
+                page += 1
+
+            deleted = 0
+            for cache_id in cache_ids:
+                resp = client.delete(f"{repo_path}/{cache_id}", headers=headers)
+                if resp.status_code == 404:
+                    # Already gone — e.g. a retry re-running after a partial success, or a
+                    # concurrent clear. Not an error; just skip it.
+                    continue
+                if _github_response_is_error(conn, job_id, retry_count, resp):
+                    return
+                deleted += 1
     except httpx.RequestError as error:
         log.warning("job %d hit a network error (attempt %d): %s", job_id, retry_count + 1, error)
         _requeue_for_retry(conn, job_id, retry_count, sanitize_error(error))
         return
 
-    if resp.status_code >= 500:
-        # 5xx is presumed transient (GitHub-side issue) — worth retrying, unlike 4xx.
-        log.warning("job %d got a %d from GitHub (attempt %d)", job_id, resp.status_code, retry_count + 1)
-        _requeue_for_retry(conn, job_id, retry_count, sanitize_error(_github_error_message(resp)))
-        return
-
-    if resp.status_code >= 300:
-        log.error("job %d failed: GitHub API error %d", job_id, resp.status_code)
-        _mark_failed(conn, job_id, sanitize_error(_github_error_message(resp)), retry_count)
-        return
-
-    _mark_done(conn, job_id, {"ok": True, "status": resp.status_code}, retry_count)
-    log.info("job %d done", job_id)
+    _mark_done(conn, job_id, {"ok": True, "deleted": deleted}, retry_count)
+    log.info("job %d done (%d cache entries deleted)", job_id, deleted)
 
 
 def _handle_backfill_repo_events(conn: psycopg.Connection, job_id: int, payload_raw: str, retry_count: int) -> None:
