@@ -243,7 +243,7 @@ def test_update_permissions_serializes_concurrent_redeliveries():
             )
         )
         setup.commit()
-        org_id = org.id
+        org_id, tenant_id = org.id, org.tenant_id
     finally:
         setup.close()
 
@@ -311,6 +311,11 @@ def test_update_permissions_serializes_concurrent_redeliveries():
         # fixture), so the rows it creates persist unless cleaned up explicitly here.
         cleanup = SessionLocal()
         try:
+            # Under RLS (the CI job's constrained clevis_api role), deletes without tenant
+            # context set first would silently match zero rows -- not raise -- leaving the
+            # installation row (and its FK to tenants) behind for the later tenant delete
+            # to trip over.
+            set_tenant_session_context(cleanup, tenant_id, 0)
             cleanup.query(GitHubInstallation).filter(
                 GitHubInstallation.installation_id == installation_id
             ).delete()
