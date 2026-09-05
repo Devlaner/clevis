@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth-context"
 import { api } from "@/lib/api/client"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { Field, FieldLabel } from "@/components/ui/field"
 import { CircleNotch, Warning } from "@phosphor-icons/react"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080"
@@ -113,8 +114,8 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <div>
-            <label className="text-xs font-medium text-foreground block mb-1.5">Email</label>
+          <Field>
+            <FieldLabel>Email</FieldLabel>
             <Input
               type="email"
               placeholder="you@example.com"
@@ -123,9 +124,9 @@ export default function LoginPage() {
               required
               autoComplete="email"
             />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-foreground block mb-1.5">Password</label>
+          </Field>
+          <Field>
+            <FieldLabel>Password</FieldLabel>
             <Input
               type="password"
               placeholder="Password"
@@ -134,7 +135,7 @@ export default function LoginPage() {
               required
               autoComplete="current-password"
             />
-          </div>
+          </Field>
 
           {error && (
             <p className="text-xs text-destructive">{error}</p>

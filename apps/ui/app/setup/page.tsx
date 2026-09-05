@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth-context"
 import { api } from "@/lib/api/client"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { Field, FieldLabel } from "@/components/ui/field"
 import { CircleNotch } from "@phosphor-icons/react"
 
 export default function SetupPage() {
@@ -72,17 +73,17 @@ export default function SetupPage() {
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          <div>
-            <label className="text-xs font-medium text-foreground block mb-1.5">Name (optional)</label>
+          <Field>
+            <FieldLabel>Name (optional)</FieldLabel>
             <Input
               placeholder="Your name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               autoComplete="name"
             />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-foreground block mb-1.5">Email</label>
+          </Field>
+          <Field>
+            <FieldLabel>Email</FieldLabel>
             <Input
               type="email"
               placeholder="you@example.com"
@@ -91,9 +92,9 @@ export default function SetupPage() {
               required
               autoComplete="email"
             />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-foreground block mb-1.5">Password</label>
+          </Field>
+          <Field>
+            <FieldLabel>Password</FieldLabel>
             <Input
               type="password"
               placeholder="At least 12 characters"
@@ -102,9 +103,9 @@ export default function SetupPage() {
               required
               autoComplete="new-password"
             />
-          </div>
-          <div>
-            <label className="text-xs font-medium text-foreground block mb-1.5">Confirm password</label>
+          </Field>
+          <Field>
+            <FieldLabel>Confirm password</FieldLabel>
             <Input
               type="password"
               placeholder="Repeat password"
@@ -113,7 +114,7 @@ export default function SetupPage() {
               required
               autoComplete="new-password"
             />
-          </div>
+          </Field>
 
           {error && (
             <p className="text-xs text-destructive">{error}</p>

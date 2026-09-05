@@ -7,6 +7,7 @@ import { Trash, Plus, CircleNotch, Check, ArrowSquareOut, CheckCircle } from "@p
 import { PageHeader } from "@/components/page-header"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { Field, FieldLabel, FieldDescription } from "@/components/ui/field"
 import { SectionError } from "@/components/section-error"
 import { EmptyStatePage } from "@/components/empty-state"
 import { PermissionDriftNotice } from "@/components/permission-drift-notice"
@@ -74,19 +75,19 @@ function ProfileSection() {
         <span className="section-label">Profile</span>
       </div>
       <div className="p-4 flex flex-col gap-3 max-w-sm">
-        <div>
-          <label className="text-xs font-medium text-foreground block mb-1.5">Display name</label>
+        <Field>
+          <FieldLabel>Display name</FieldLabel>
           <Input
             placeholder="Your name"
             value={name}
             onChange={(e) => setName(e.target.value)}
           />
-        </div>
-        <div>
-          <label className="text-xs font-medium text-foreground block mb-1.5">Email</label>
+        </Field>
+        <Field>
+          <FieldLabel>Email</FieldLabel>
           <Input value={user?.email || ""} disabled className="opacity-60 cursor-not-allowed" />
-          <p className="text-xs text-muted-foreground mt-1">Email cannot be changed.</p>
-        </div>
+          <FieldDescription>Email cannot be changed.</FieldDescription>
+        </Field>
         <p className="text-xs text-muted-foreground -mt-1">
           Switch between your organizations and personal GitHub account from the profile menu in the sidebar.
         </p>
@@ -517,23 +518,32 @@ function SavedTokensSection() {
       <div className="border-t border-border p-4">
         <p className="text-xs font-medium text-foreground mb-3">Add token</p>
         <div className="grid gap-2 sm:grid-cols-3">
-          <Input
-            placeholder="Org or owner"
-            value={addOrg}
-            onChange={(e) => setAddOrg(e.target.value)}
-          />
-          <Input
-            placeholder="ghp_… token"
-            type="password"
-            value={addToken}
-            onChange={(e) => setAddToken(e.target.value)}
-            className="font-mono"
-          />
-          <Input
-            placeholder="Label (optional)"
-            value={addLabel}
-            onChange={(e) => setAddLabel(e.target.value)}
-          />
+          <Field>
+            <FieldLabel className="sr-only">Org or owner</FieldLabel>
+            <Input
+              placeholder="Org or owner"
+              value={addOrg}
+              onChange={(e) => setAddOrg(e.target.value)}
+            />
+          </Field>
+          <Field>
+            <FieldLabel className="sr-only">Token</FieldLabel>
+            <Input
+              placeholder="ghp_… token"
+              type="password"
+              value={addToken}
+              onChange={(e) => setAddToken(e.target.value)}
+              className="font-mono"
+            />
+          </Field>
+          <Field>
+            <FieldLabel className="sr-only">Label (optional)</FieldLabel>
+            <Input
+              placeholder="Label (optional)"
+              value={addLabel}
+              onChange={(e) => setAddLabel(e.target.value)}
+            />
+          </Field>
         </div>
         <Button
           onClick={() => upsert.mutate()}
