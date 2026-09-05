@@ -379,9 +379,10 @@ describe("SettingsPage", () => {
 
     fireEvent.click(disconnectButtons[0]);
     expect(installationsRemoveMock).not.toHaveBeenCalled();
-    expect(await screen.findByRole("button", { name: /confirm disconnect/i })).toBeInTheDocument();
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/shabnam/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /confirm disconnect/i }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(installationsRemoveMock).toHaveBeenCalledWith({ scope: "me" }, 7);
@@ -402,7 +403,8 @@ describe("SettingsPage", () => {
 
     const disconnectButton = await screen.findByRole("button", { name: /disconnect/i });
     fireEvent.click(disconnectButton);
-    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(installationsRemoveMock).toHaveBeenCalledWith({ scope: "org", orgLogin: "acme" }, 42);
@@ -460,15 +462,16 @@ describe("SettingsPage", () => {
 
     const disconnectButton = await screen.findByRole("button", { name: /disconnect/i });
     fireEvent.click(disconnectButton);
-    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(installationsRemoveMock).toHaveBeenCalled();
     });
-    // Neither "Disconnect" nor "Confirm disconnect" text remains while the mutation is
-    // in flight -- the row shows a spinner instead.
+    // The row's own button goes back to plain "Disconnect" while the confirm dialog
+    // shows a busy state instead of a second confirm click.
     expect(screen.queryByRole("button", { name: "Disconnect" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Confirm disconnect" })).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /working/i })).toBeDisabled();
 
     await act(async () => {
       removeGate.resolve();
@@ -488,15 +491,17 @@ describe("SettingsPage", () => {
     renderPage();
 
     fireEvent.click(await screen.findByRole("button", { name: /disconnect/i }));
-    fireEvent.click(await screen.findByRole("button", { name: /confirm disconnect/i }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^disconnect$/i }));
 
     await waitFor(() => {
       expect(screen.getByRole("alert")).toHaveTextContent("GitHub API unreachable");
     });
     // The row is still there (not silently removed) and can be retried immediately --
-    // confirmingKey was cleared on error, not left stuck on "Confirm disconnect".
+    // the dialog was closed on error, not left stuck open.
     expect(screen.getByText("shabnam")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
 });

@@ -6,6 +6,8 @@ import Link from "next/link"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
+import { ConfirmDialog } from "@/components/ui/confirm-dialog"
+import { toast } from "@/components/ui/toast"
 import { Warning, Eye, Key, CircleNotch, Trash } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
 import { shouldApplyResolvedToken } from "@/lib/token-resolve"
@@ -31,7 +33,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
   const [token, setToken] = useState("")
   const [tokenSaved, setTokenSaved] = useState(false)
   const [actor, setActor] = useState("")
-  const [clearArmed, setClearArmed] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
   // null = clearing every cache for this repo (the existing global buttons); set to a
   // specific { key, ref } when the user clicks a row's own "Clear" action instead.
   const [clearTarget, setClearTarget] = useState<{ key: string; ref: string } | null>(null)
@@ -92,24 +94,16 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [owner, active])
 
-  // Reset stale cache-table/clear-result data and any armed "Confirm clear" state
-  // whenever the owner/repo this panel is scoped to changes (route navigation, or a
-  // tab switch back to a differently-scoped repo).
+  // Reset stale cache-table/clear-result data and any open confirm dialog whenever the
+  // owner/repo this panel is scoped to changes (route navigation, or a tab switch back
+  // to a differently-scoped repo).
   useEffect(() => {
     listMutation.reset()
     clearMutation.reset()
-    setClearArmed(false)
+    setConfirmOpen(false)
     setClearTarget(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [owner, repo])
-
-  // Auto-disarm if the user doesn't confirm within a few seconds, so a stray
-  // later click on the same button spot can't be mistaken for a confirmation.
-  useEffect(() => {
-    if (!clearArmed) return
-    const timer = setTimeout(() => setClearArmed(false), 4000)
-    return () => clearTimeout(timer)
-  }, [clearArmed])
 
 
   const saveTokenMutation = useMutation({
@@ -130,6 +124,18 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
         key: clearTarget?.key,
         ref: clearTarget?.ref,
       }),
+    onSuccess: (data) => {
+      setConfirmOpen(false)
+      if (data.dry_run) {
+        toast.info("Dry run complete — no caches were deleted.")
+      } else if (data.job_id) {
+        toast.success(`Cache clear queued — Job #${data.job_id}`)
+      }
+    },
+    onError: (error) => {
+      setConfirmOpen(false)
+      toast.error(error.message)
+    },
   })
 
   const isLoading = listMutation.isPending || clearMutation.isPending
@@ -199,11 +205,11 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
             <Input
               placeholder="actor"
               value={actor}
-              onChange={(e) => { setActor(e.target.value); setClearArmed(false) }}
+              onChange={(e) => setActor(e.target.value)}
             />
           </div>
           <Button
-            onClick={() => { setClearArmed(false); listMutation.mutate() }}
+            onClick={() => listMutation.mutate()}
             disabled={isLoading}
             className="mt-1"
           >
@@ -222,7 +228,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
           <div className="grid grid-cols-2 gap-2">
             <Button
               variant="outline"
-              onClick={() => { setClearArmed(false); setClearTarget(null); clearMutation.mutate(true) }}
+              onClick={() => { setClearTarget(null); clearMutation.mutate(true) }}
               disabled={isLoading || !actor}
             >
               <Eye className="size-3.5" />
@@ -230,29 +236,13 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => {
-                if (clearArmed && clearTarget === null) {
-                  setClearArmed(false)
-                  clearMutation.mutate(false)
-                } else {
-                  setClearTarget(null)
-                  setClearArmed(true)
-                }
-              }}
+              onClick={() => { setClearTarget(null); setConfirmOpen(true) }}
               disabled={isLoading || !actor}
             >
               <Trash className="size-3.5" />
-              {clearArmed && clearTarget === null ? "Confirm clear" : "Clear"}
+              Clear
             </Button>
           </div>
-          {clearArmed && (
-            <p className="text-xs text-yellow-400/80 flex items-center gap-1.5">
-              <Warning className="size-3 shrink-0" />
-              {clearTarget
-                ? <>Click the row&rsquo;s confirm action again to permanently delete <span className="font-mono">{clearTarget.key}</span> — this can&rsquo;t be undone.</>
-                : "Click again to permanently delete these caches — this can’t be undone."}
-            </p>
-          )}
           {clearMutation.isError && (
             <p className="text-xs text-destructive flex items-center gap-1.5">
               <Warning className="size-3 shrink-0" />
@@ -336,7 +326,6 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                 {caches.map((c) => {
                   const staleness = classifyStaleness(c.last_accessed_at)
                   const { text: staleText, dot: staleDot } = stalenessColor[staleness]
-                  const isThisRowArmed = clearArmed && clearTarget?.key === c.key && clearTarget?.ref === c.ref
                   return (
                     <tr key={c.id} className="hover:bg-muted/40 transition-colors">
                       <td className="px-4 py-2.5 font-mono text-foreground/80 max-w-[14rem] truncate">{c.key}</td>
@@ -358,18 +347,10 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                           variant="outline"
                           className="h-6 px-2 text-[0.6875rem]"
                           disabled={isLoading || !actor}
-                          onClick={() => {
-                            if (isThisRowArmed) {
-                              setClearArmed(false)
-                              clearMutation.mutate(false)
-                            } else {
-                              setClearTarget({ key: c.key, ref: c.ref })
-                              setClearArmed(true)
-                            }
-                          }}
+                          onClick={() => { setClearTarget({ key: c.key, ref: c.ref }); setConfirmOpen(true) }}
                         >
                           <Trash className="size-3" />
-                          {isThisRowArmed ? "Confirm clear key" : "Clear key"}
+                          Clear key
                         </Button>
                       </td>
                     </tr>
@@ -416,6 +397,20 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
         </div>
       </div>
     )}
+
+    <ConfirmDialog
+      open={confirmOpen}
+      onOpenChange={setConfirmOpen}
+      title="Delete cache?"
+      description={
+        clearTarget
+          ? `This permanently deletes the "${clearTarget.key}" cache entry (ref ${clearTarget.ref}) — this can't be undone.`
+          : "This permanently deletes every Actions cache entry for this repo — this can't be undone."
+      }
+      confirmLabel="Delete"
+      onConfirm={() => clearMutation.mutate(false)}
+      pending={clearMutation.isPending}
+    />
     </>
   )
 }
