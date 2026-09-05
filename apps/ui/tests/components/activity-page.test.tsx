@@ -107,7 +107,7 @@ describe("ActivityPage", () => {
 
     expect(await screen.findByText(/pushed 3 commits to main/)).toBeInTheDocument();
     expect(await screen.findByText("#1")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByText(/auto-refreshes every \d+s/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("auto-refreshes every 30s")).toBeInTheDocument());
   });
 
   it("resolves a short (1-2 character) org login instead of getting stuck unconfigured", async () => {
