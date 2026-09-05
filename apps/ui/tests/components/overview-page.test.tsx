@@ -65,6 +65,7 @@ const EMPTY_MY_VIEW = {
   review_requests: [],
   assigned_issues: [],
   my_recent_runs: [],
+  identity_unresolved: false,
 };
 
 describe("OverviewPage cockpit", () => {
@@ -96,9 +97,20 @@ describe("OverviewPage cockpit", () => {
     expect(tokensResolveMock).not.toHaveBeenCalled();
     expect(cockpitMock).not.toHaveBeenCalled();
 
-    const configureLinks = screen.getAllByRole("link", { name: /Configure →/i });
-    for (const link of configureLinks) {
-      expect(link).toHaveAttribute("href", "/security");
+    // Each card's "Configure →" must route to the page it actually represents, not all
+    // four piling onto Health & Security (a prior bug: LiveStatCard hardcoded /security).
+    const expectedHrefs: Record<string, string> = {
+      Repositories: "/repos",
+      "Open PRs": "/pulls",
+      "Security Score": "/security",
+      "Team Members": "/collaborators",
+    };
+    for (const [label, href] of Object.entries(expectedHrefs)) {
+      // getByRole (not getByText) since "Security Score" also appears as a plain
+      // <span> chart heading further down the page -- the stat card's <a> is the only
+      // element whose accessible name (label + "Configure →") matches this regex.
+      const card = screen.getByRole("link", { name: new RegExp(label) });
+      expect(card).toHaveAttribute("href", href);
     }
   });
 
