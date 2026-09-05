@@ -78,6 +78,38 @@ def test_my_view_degrades_to_empty_when_login_unresolvable(http):
     }
 
 
+def test_my_view_propagates_unexpected_user_endpoint_error(http):
+    """A non-403 failure calling GET /user (a real auth/server problem, not the expected
+    "installation token can't call /user" case) must not be silently swallowed as
+    identity_unresolved -- it should propagate so the failure stays visible to the caller
+    instead of masquerading as "this user has zero PRs/issues"."""
+    with (
+        patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+        patch("src.routers.analytics.GitHubClient") as mock_client,
+    ):
+        mock_client.return_value.request.side_effect = httpx.HTTPStatusError(
+            "boom",
+            request=httpx.Request("GET", "https://api.github.com/user"),
+            response=httpx.Response(500, request=httpx.Request("GET", "https://api.github.com/user")),
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            http.get("/me/github/my-view?owner=acme")
+
+
+def test_my_view_propagates_network_error_from_user_endpoint(http):
+    """A network-level failure (timeout, DNS, connection reset) calling GET /user must
+    also propagate rather than being treated as the expected App-token case."""
+    with (
+        patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"),
+        patch("src.routers.analytics.GitHubClient") as mock_client,
+    ):
+        mock_client.return_value.request.side_effect = httpx.RequestError(
+            "boom", request=httpx.Request("GET", "https://api.github.com/user")
+        )
+        with pytest.raises(httpx.RequestError):
+            http.get("/me/github/my-view?owner=acme")
+
+
 def test_my_view_falls_back_to_users_github_login_when_user_endpoint_unresolvable(app, http):
     """A GitHub App installation token can't call GET /user, but if the signed-in Clevis
     user linked their own GitHub identity via OAuth, my-view should use that login rather
@@ -173,7 +205,15 @@ def test_my_view_success(http):
 
 def test_my_view_falls_back_to_client_supplied_token_header(http):
     with patch("src.routers.analytics.GitHubClient") as mock_client:
-        mock_client.return_value.request.side_effect = httpx.RequestError("boom")
+        # 403 (not a bare network error) -- this test is exercising the client-supplied
+        # X-GitHub-Token header path (no 400 from a missing token), not /user's error
+        # handling, so it uses the "expected" degrade-to-empty case rather than a
+        # network failure that would now (correctly) propagate.
+        mock_client.return_value.request.side_effect = httpx.HTTPStatusError(
+            "boom",
+            request=httpx.Request("GET", "https://api.github.com/user"),
+            response=httpx.Response(403, request=httpx.Request("GET", "https://api.github.com/user")),
+        )
         resp = http.get("/me/github/my-view?owner=acme", headers={"X-GitHub-Token": "ghp_client"})
 
     assert resp.status_code == 200

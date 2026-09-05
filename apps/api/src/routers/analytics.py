@@ -871,8 +871,13 @@ def _my_login(client: GitHubClient, fallback_login: str | None = None) -> str | 
     try:
         data = client.request("GET", "/user")
         return data.get("login") if isinstance(data, dict) else None
-    except (httpx.HTTPStatusError, httpx.RequestError):
-        # Installation (App) tokens aren't user-to-server tokens and can't call /user --
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 403:
+            # Not the expected "installation token can't call /user" case -- a real
+            # auth/server failure (401/404/5xx). Let it propagate rather than silently
+            # masquerading as "this user has zero PRs/issues".
+            raise
+        # Installation (App) tokens aren't user-to-server tokens and get a 403 here --
         # fall back to the signed-in Clevis user's own GitHub OAuth-linked login (if any)
         # instead of silently returning zero PRs/issues for someone who really has some.
         # Still None (caller degrades to an empty response) if the user never linked
