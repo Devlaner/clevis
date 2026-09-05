@@ -3,7 +3,7 @@
   POST /webhooks/github   verifies X-Hub-Signature-256, then handles installation
                            lifecycle events to keep github_installations in sync, and
                            durably queues a bounded set of event types (issue #191/S3)
-                           for a future event-processor fleet (S4, not built yet).
+                           for the event-processor fleet (S4, apps/worker/src/event_consumer.py).
 """
 
 import hashlib

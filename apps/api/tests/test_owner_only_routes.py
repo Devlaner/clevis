@@ -43,6 +43,27 @@ def test_jobs_non_owner_forbidden(db):
     assert resp.status_code == 403
 
 
+def test_single_job_readable_by_any_authenticated_user(db):
+    # GET /jobs/{id} is only require_auth (the cache-clear panel polls it) -- a non-owner
+    # must be able to read a job's status, unlike the workspace-admin-only list.
+    db.execute(
+        text(
+            "INSERT INTO jobs (id, job_type, payload, status, result) "
+            "VALUES (9991, 'github.clear_actions_cache', '{}', 'done', '{\"ok\": true, \"deleted\": 2}')"
+        )
+    )
+    resp = _client(jobs_router, db, _NON_OWNER, prefix="/jobs").get("/jobs/9991")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "done"
+    assert body["job_type"] == "github.clear_actions_cache"
+
+
+def test_single_job_unknown_id_is_404(db):
+    resp = _client(jobs_router, db, _NON_OWNER, prefix="/jobs").get("/jobs/424242")
+    assert resp.status_code == 404
+
+
 # ── audit ─────────────────────────────────────────────────────────────────────
 
 def test_audit_owner_ok(db):

@@ -30,6 +30,10 @@ def list_jobs(db: Session, limit: int = 50) -> list[dict]:
     ]
 
 
+def get_job(db: Session, job_id: int) -> Job | None:
+    return db.query(Job).filter(Job.id == job_id).one_or_none()
+
+
 def list_recent_by_type(db: Session, job_type: str, limit: int = 20) -> list[dict]:
     rows = (
         db.query(Job)
