@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect } from "react"
 import Link from "next/link"
 import { useQuery } from "@tanstack/react-query"
 import { PageHeader } from "@/components/page-header"
@@ -17,25 +17,6 @@ import { useActiveScope } from "@/lib/active-scope"
 
 const EVENTS_REFRESH_SECONDS = 30
 const HEATMAP_COLOR_SCALE = [CHART_COLORS.grid, "#1d4ed8", "#3b82f6", "#60a5fa", "#93c5fd"]
-
-// Isolated into its own component so the 1s tick only re-renders this small chip,
-// not the whole page (and the feed/job lists below it).
-function RefreshCountdown({ resetKey, seconds }: { resetKey: number; seconds: number }) {
-  const [remaining, setRemaining] = useState(seconds)
-
-  useEffect(() => {
-    setRemaining(seconds)
-  }, [resetKey, seconds])
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setRemaining((r) => (r > 0 ? r - 1 : 0))
-    }, 1000)
-    return () => clearInterval(interval)
-  }, [])
-
-  return <span className="stat-chip">refreshes in {remaining}s</span>
-}
 
 export default function ActivityPage() {
   // Marks all cockpit-sourced events as read so the sidebar's unread badge
@@ -77,10 +58,6 @@ export default function ActivityPage() {
     retry: false,
     refetchInterval: EVENTS_REFRESH_SECONDS * 1000,
   })
-
-  // Reset the countdown on either a successful fetch OR a failed one, so it always
-  // tracks the real refetchInterval cadence instead of sticking at 0 after an error.
-  const lastAttemptAt = Math.max(eventsQuery.dataUpdatedAt, eventsQuery.errorUpdatedAt)
 
   // Heatmap data rides on the personal cockpit endpoint (commit_heatmap_52w) --
   // that endpoint is personal-scoped (no OrgMembership needed), unlike the
@@ -127,7 +104,7 @@ export default function ActivityPage() {
         <div className="lg:col-span-2 card">
           <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
             <span className="section-label">Activity Feed</span>
-            {hasOrg && <RefreshCountdown resetKey={lastAttemptAt} seconds={EVENTS_REFRESH_SECONDS} />}
+            {hasOrg && <span className="stat-chip">auto-refreshes every {EVENTS_REFRESH_SECONDS}s</span>}
           </div>
           {!hasOrg ? (
             <EmptyStateNoAccount bare />
