@@ -38,8 +38,36 @@ class _FakeConn:
 
 
 def _payload(**kwargs):
+    """A targeted (single-key) clear payload — exercises GitHub's DELETE-by-key path."""
+    enc = encrypt_job_token("secret", settings.job_secret_key.get_secret_value())
+    return json.dumps(
+        {"owner": "acme", "repo": "demo", "token": enc, "key": "build-cache", "ref": "refs/heads/main", **kwargs}
+    )
+
+
+def _global_payload(**kwargs):
+    """A global clear payload (no key) — exercises the list-then-delete-by-id path."""
     enc = encrypt_job_token("secret", settings.job_secret_key.get_secret_value())
     return json.dumps({"owner": "acme", "repo": "demo", "token": enc, **kwargs})
+
+
+def _mock_client(**methods):
+    """Build a patched httpx.Client context manager whose get/delete are the given mocks."""
+    client = MagicMock()
+    client.__enter__ = MagicMock(return_value=client)
+    client.__exit__ = MagicMock(return_value=False)
+    for name, value in methods.items():
+        setattr(client, name, value)
+    return client
+
+
+def _resp(status_code, json_body=None):
+    r = MagicMock()
+    r.status_code = status_code
+    r.text = ""
+    if json_body is not None:
+        r.json = MagicMock(return_value=json_body)
+    return r
 
 
 def test_process_job_marks_done_on_success():
@@ -409,6 +437,143 @@ def test_process_job_marks_unknown_job_type_failed_without_calling_github():
     assert params[1] == 6
     assert "some.future.job_type" in params[0]
     assert conn.committed is True
+
+
+def test_global_clear_lists_then_deletes_each_cache_by_id():
+    """A global clear (no key) must enumerate caches and DELETE each by id — never issue
+    a keyless DELETE on the collection (GitHub 422s that, which is the original bug)."""
+    conn = _FakeConn()
+
+    get = MagicMock(return_value=_resp(200, {"actions_caches": [{"id": 1}, {"id": 2}]}))
+    delete = MagicMock(return_value=_resp(204))
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(get=get, delete=delete)
+        process_job(conn, 20, "github.clear_actions_cache", _global_payload())
+
+    deleted_urls = [c.args[0] for c in delete.call_args_list]
+    assert deleted_urls == [
+        "https://api.github.com/repos/acme/demo/actions/caches/1",
+        "https://api.github.com/repos/acme/demo/actions/caches/2",
+    ]
+    assert all(not url.endswith("/actions/caches") for url in deleted_urls)
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='done'" in sql
+    result = json.loads(params[0])
+    assert result == {"ok": True, "deleted": 2}
+
+
+def test_global_clear_with_no_caches_marks_done_with_zero_deleted():
+    conn = _FakeConn()
+
+    get = MagicMock(return_value=_resp(200, {"actions_caches": []}))
+    delete = MagicMock()
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(get=get, delete=delete)
+        process_job(conn, 21, "github.clear_actions_cache", _global_payload())
+
+    delete.assert_not_called()
+    sql, params = conn._cursor.calls[0]
+    assert "status='done'" in sql
+    assert json.loads(params[0]) == {"ok": True, "deleted": 0}
+
+
+def test_global_clear_paginates_past_a_full_page():
+    conn = _FakeConn()
+
+    first = _resp(200, {"actions_caches": [{"id": i} for i in range(100)]})
+    second = _resp(200, {"actions_caches": [{"id": 100}]})
+    get = MagicMock(side_effect=[first, second])
+    delete = MagicMock(return_value=_resp(204))
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(get=get, delete=delete)
+        process_job(conn, 22, "github.clear_actions_cache", _global_payload())
+
+    assert get.call_count == 2
+    assert delete.call_count == 101
+    assert json.loads(conn._cursor.calls[0][1][0]) == {"ok": True, "deleted": 101}
+
+
+def test_global_clear_skips_a_cache_that_is_already_gone():
+    conn = _FakeConn()
+
+    get = MagicMock(return_value=_resp(200, {"actions_caches": [{"id": 1}, {"id": 2}]}))
+    delete = MagicMock(side_effect=[_resp(404), _resp(204)])
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(get=get, delete=delete)
+        process_job(conn, 23, "github.clear_actions_cache", _global_payload())
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='done'" in sql
+    assert json.loads(params[0]) == {"ok": True, "deleted": 1}
+
+
+def test_global_clear_requeues_when_a_delete_returns_5xx():
+    conn = _FakeConn()
+
+    get = MagicMock(return_value=_resp(200, {"actions_caches": [{"id": 1}]}))
+    delete = MagicMock(return_value=_resp(503))
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(get=get, delete=delete)
+        process_job(conn, 24, "github.clear_actions_cache", _global_payload(), retry_count=0)
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+    assert params[0] == 1  # new retry_count
+
+
+def test_global_clear_fails_when_the_list_call_is_forbidden():
+    conn = _FakeConn()
+
+    get = MagicMock(return_value=_resp(403, {"message": "Resource not accessible by integration"}))
+    delete = MagicMock()
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(get=get, delete=delete)
+        process_job(conn, 25, "github.clear_actions_cache", _global_payload())
+
+    delete.assert_not_called()
+    sql, params = conn._cursor.calls[0]
+    assert "status='failed'" in sql
+    assert "Resource not accessible by integration" in params[0]
+
+
+def test_clear_retries_on_a_429_rate_limit():
+    """A primary rate limit (429) is transient — requeue, don't mark the job failed."""
+    conn = _FakeConn()
+
+    delete = MagicMock(return_value=_resp(429))
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(delete=delete)
+        process_job(conn, 26, "github.clear_actions_cache", _payload(), retry_count=0)
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+    assert params[0] == 1  # new retry_count
+
+
+def test_clear_retries_on_a_secondary_rate_limit_403():
+    """GitHub's secondary/abuse rate limit is a 403 with a Retry-After header — transient,
+    not a permission denial."""
+    conn = _FakeConn()
+
+    resp = MagicMock()
+    resp.status_code = 403
+    resp.text = ""
+    resp.headers = {"Retry-After": "1"}
+
+    with patch("worker.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _mock_client(delete=MagicMock(return_value=resp))
+        process_job(conn, 27, "github.clear_actions_cache", _payload(), retry_count=0)
+
+    sql, params = conn._cursor.calls[0]
+    assert "status='queued'" in sql
+    assert params[0] == 1  # new retry_count
 
 
 def test_process_job_dispatches_known_job_type_to_its_handler():

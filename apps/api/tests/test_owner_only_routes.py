@@ -43,6 +43,48 @@ def test_jobs_non_owner_forbidden(db):
     assert resp.status_code == 403
 
 
+def test_single_clear_job_readable_by_the_user_who_enqueued_it(db):
+    # GET /jobs/{id} is only require_auth (the cache-clear panel polls it), but scoped to
+    # the job's own `actor` -- a non-workspace-admin who enqueued the clear can read it.
+    db.execute(
+        text(
+            "INSERT INTO jobs (id, job_type, payload, status, result) VALUES "
+            "(9991, 'github.clear_actions_cache', '{\"actor\": \"member@example.com\"}', "
+            "'done', '{\"ok\": true, \"deleted\": 2}')"
+        )
+    )
+    resp = _client(jobs_router, db, _NON_OWNER, prefix="/jobs").get("/jobs/9991")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "done"
+
+
+def test_single_job_hidden_from_a_different_user(db):
+    db.execute(
+        text(
+            "INSERT INTO jobs (id, job_type, payload, status) VALUES "
+            "(9992, 'github.clear_actions_cache', '{\"actor\": \"someone-else@example.com\"}', 'done')"
+        )
+    )
+    resp = _client(jobs_router, db, _NON_OWNER, prefix="/jobs").get("/jobs/9992")
+    assert resp.status_code == 404
+
+
+def test_single_job_of_a_non_self_readable_type_is_404(db):
+    db.execute(
+        text(
+            "INSERT INTO jobs (id, job_type, payload, status) VALUES "
+            "(9993, 'github.backfill_repo_events', '{\"actor\": \"member@example.com\"}', 'done')"
+        )
+    )
+    resp = _client(jobs_router, db, _NON_OWNER, prefix="/jobs").get("/jobs/9993")
+    assert resp.status_code == 404
+
+
+def test_single_job_unknown_id_is_404(db):
+    resp = _client(jobs_router, db, _NON_OWNER, prefix="/jobs").get("/jobs/424242")
+    assert resp.status_code == 404
+
+
 # ── audit ─────────────────────────────────────────────────────────────────────
 
 def test_audit_owner_ok(db):

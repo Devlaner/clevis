@@ -73,9 +73,19 @@ describe("optional token coercion (GitHub App installation fallback)", () => {
 
   it("sends token: undefined for cache.clear when the token field is empty", async () => {
     stubOkJson({ queued: false, dry_run: true });
-    await api.cache.clear("acme", "demo", { token: "", actor: "me", dry_run: true });
+    await api.cache.clear("acme", "demo", { token: "", dry_run: true });
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(JSON.parse(init.body as string)).toEqual({ token: undefined, actor: "me", dry_run: true });
+    // JSON.stringify drops the undefined token property entirely.
+    expect(JSON.parse(init.body as string)).toEqual({ dry_run: true });
+  });
+
+  it("GETs a single job by id for the cache-clear status poll", async () => {
+    stubOkJson({ id: 42, job_type: "github.clear_actions_cache", status: "done", result: null, created_at: "", updated_at: "" });
+    await api.jobs.get(42);
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(url).toContain("/jobs/42");
+    expect(init?.method ?? "GET").toBe("GET");
+    expect(init?.body).toBeUndefined();
   });
 
   it("POSTs branch-protection/bulk with the org in the path and drops an empty token", async () => {

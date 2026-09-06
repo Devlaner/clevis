@@ -401,6 +401,23 @@ def test_events_falls_back_to_live_github_when_the_installation_has_no_installat
     assert resp.json()["events"][0]["actor"] == "alice"
 
 
+def test_events_fall_back_to_live_github_when_installation_connected_but_repo_events_empty(
+    events_client, db, acme_org_with_installation
+):
+    # An App-connected org whose repo_events table is still empty (webhooks not yet
+    # subscribed, or the install-time backfill aged out). Instead of a permanently blank
+    # feed, org_events must fall through to the live-GitHub read.
+    with patch("src.routers.github.GitHubClient") as mock_client:
+        mock_client.return_value.request.return_value = [_PUSH_EVENT]
+        resp = events_client.post(
+            "/github/orgs/acme/events", json={"token": "ghp_testtoken123456789012345678901234"}
+        )
+
+    assert resp.status_code == 200
+    mock_client.assert_called_once()
+    assert resp.json()["events"][0]["actor"] == "alice"
+
+
 def test_events_falls_back_to_live_github_when_no_installation_is_connected(events_client, acme_org):
     # acme_org (no installation fixture) -- confirms the hybrid still uses the unchanged
     # live-GitHub path for a legacy PAT-only org, not an empty feed.

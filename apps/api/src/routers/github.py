@@ -217,7 +217,14 @@ def org_events(
     # call site instead of baking the check into the shared repository function.
     installation = installation_repo.get_for_org(db, org_id=ctx.org.id, account_login=org_login)
     if installation is not None and installation.installation_id is not None:
-        return _fetch_events_from_repo_events(db, org_login, ctx.org.tenant_id, payload.per_page)
+        from_db = _fetch_events_from_repo_events(db, org_login, ctx.org.tenant_id, payload.per_page)
+        if from_db.events:
+            return from_db
+        # repo_events is empty for this tenant. That normally means the GitHub App isn't
+        # subscribed to the push/pull_request/issues/release/create webhooks yet (see
+        # docs/self-hosting.md), or the one-time install backfill has aged out. Rather
+        # than show a permanently blank feed, fall through to the live-GitHub read below
+        # -- resolve_org_token already prefers the installation token.
 
     client_token = payload.token.get_secret_value() if payload.token else None
     try:

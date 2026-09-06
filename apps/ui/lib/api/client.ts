@@ -288,7 +288,7 @@ export const api = {
     clear: (
       owner: string,
       repo: string,
-      body: { token: string; actor: string; dry_run: boolean; key?: string; ref?: string },
+      body: { token: string; dry_run: boolean; key?: string; ref?: string },
     ) =>
       post<CacheClearResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions-caches/clear`,
@@ -316,6 +316,7 @@ export const api = {
   },
   jobs: {
     list: () => get<JobOut[]>("/jobs"),
+    get: (jobId: number) => get<JobOut>(`/jobs/${jobId}`),
   },
   automation: {
     // token is optional — same App-or-PAT fallback as the rest of the API, carried

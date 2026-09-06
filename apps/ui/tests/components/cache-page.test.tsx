@@ -6,6 +6,7 @@ const tokensResolveMock = vi.fn();
 const tokensUpsertMock = vi.fn();
 const cacheListMock = vi.fn();
 const cacheClearMock = vi.fn();
+const jobsGetMock = vi.fn();
 
 let currentRepoParam = "acme~demo";
 
@@ -22,6 +23,9 @@ vi.mock("@/lib/api/client", () => ({
     cache: {
       list: (...args: unknown[]) => cacheListMock(...args),
       clear: (...args: unknown[]) => cacheClearMock(...args),
+    },
+    jobs: {
+      get: (...args: unknown[]) => jobsGetMock(...args),
     },
   },
 }));
@@ -55,7 +59,16 @@ describe("CachePage", () => {
     tokensUpsertMock.mockReset();
     cacheListMock.mockReset();
     cacheClearMock.mockReset();
+    jobsGetMock.mockReset();
     tokensResolveMock.mockRejectedValue(new Error("no saved token"));
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "done",
+      result: JSON.stringify({ ok: true, deleted: 3 }),
+      created_at: "",
+      updated_at: "",
+    });
   });
 
   afterEach(() => {
@@ -63,12 +76,13 @@ describe("CachePage", () => {
     vi.restoreAllMocks();
   });
 
-  it("allows a dry-run clear with an actor but no token entered", async () => {
+  it("allows a dry-run clear without a token or an actor field", async () => {
     cacheClearMock.mockResolvedValue({ queued: false, dry_run: true });
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
+    // The Actor field is gone — the API attributes the action to the signed-in user.
+    expect(screen.queryByPlaceholderText("actor")).not.toBeInTheDocument();
 
     const dryRunButton = screen.getByRole("button", { name: /dry run/i });
     await waitFor(() => expect(dryRunButton).not.toBeDisabled());
@@ -78,15 +92,14 @@ describe("CachePage", () => {
     await waitFor(() =>
       expect(cacheClearMock).toHaveBeenCalledWith("acme", "demo", {
         token: "",
-        actor: "me@example.com",
         dry_run: true,
       }),
     );
   });
 
-  it("keeps the Clear button disabled until an actor is entered", async () => {
+  it("enables the Clear button without needing an actor entered", async () => {
     renderPage();
-    expect(screen.getByRole("button", { name: /^clear$/i })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^clear$/i })).not.toBeDisabled());
   });
 
   it("requires confirming in a dialog before actually clearing caches", async () => {
@@ -94,7 +107,6 @@ describe("CachePage", () => {
 
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
     const clearButton = screen.getByRole("button", { name: /^clear$/i });
     await waitFor(() => expect(clearButton).not.toBeDisabled());
 
@@ -110,7 +122,6 @@ describe("CachePage", () => {
     await waitFor(() =>
       expect(cacheClearMock).toHaveBeenCalledWith("acme", "demo", {
         token: "",
-        actor: "me@example.com",
         dry_run: false,
       }),
     );
@@ -118,10 +129,185 @@ describe("CachePage", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
   });
 
+  it("polls the enqueued job and reports the real terminal outcome", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => expect(jobsGetMock).toHaveBeenCalledWith(42));
+    expect(await screen.findByText(/cache cleared — 3 entries deleted/i)).toBeInTheDocument();
+  });
+
+  it("surfaces a job that fails on GitHub's side", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "failed",
+      result: "GitHub API error: 403 - Resource not accessible by integration",
+      created_at: "",
+      updated_at: "",
+    });
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText(/cache clear failed — .*not accessible/i)).toBeInTheDocument();
+  });
+
+  it("shows a generic 'Cache cleared.' when the job result has no deleted count", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    // A key-scoped clear's result is {ok, status}, with no `deleted` field.
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "done",
+      result: JSON.stringify({ ok: true, status: 204 }),
+      created_at: "",
+      updated_at: "",
+    });
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText("Cache cleared.")).toBeInTheDocument();
+  });
+
+  it("tolerates a non-JSON job result", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "done",
+      result: "not json at all",
+      created_at: "",
+      updated_at: "",
+    });
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText("Cache cleared.")).toBeInTheDocument();
+  });
+
+  it("shows a progress indicator while the job is still running", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "processing",
+      result: null,
+      created_at: "",
+      updated_at: "",
+    });
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText(/clearing caches…/i)).toBeInTheDocument();
+  });
+
+  it("shows a queued indicator before the worker picks the job up", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "queued",
+      result: null,
+      created_at: "",
+      updated_at: "",
+    });
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText(/queued…/i)).toBeInTheDocument();
+  });
+
+  it("shows a retryable error when polling the job status fails", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    jobsGetMock.mockRejectedValue(new Error("Unknown job"));
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText(/couldn't check job status — unknown job/i)).toBeInTheDocument();
+
+    // Recover on the next attempt when Retry is clicked.
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "done",
+      result: JSON.stringify({ ok: true, deleted: 1 }),
+      created_at: "",
+      updated_at: "",
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^retry$/i }));
+
+    expect(await screen.findByText("Cache cleared — 1 entry deleted.")).toBeInTheDocument();
+  });
+
+  it("surfaces a job whose failure result is empty", async () => {
+    cacheClearMock.mockResolvedValue({ queued: true, dry_run: false, job_id: 42 });
+    jobsGetMock.mockResolvedValue({
+      id: 42,
+      job_type: "github.clear_actions_cache",
+      status: "failed",
+      result: null,
+      created_at: "",
+      updated_at: "",
+    });
+
+    renderPage();
+
+    const clearButton = screen.getByRole("button", { name: /^clear$/i });
+    await waitFor(() => expect(clearButton).not.toBeDisabled());
+    fireEvent.click(clearButton);
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
+
+    expect(await screen.findByText(/cache clear failed — unknown error/i)).toBeInTheDocument();
+  });
+
   it("closes the confirm dialog without clearing when Cancel is clicked", async () => {
     renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
     const clearButton = screen.getByRole("button", { name: /^clear$/i });
     await waitFor(() => expect(clearButton).not.toBeDisabled());
 
@@ -137,16 +323,12 @@ describe("CachePage", () => {
   it("closes the confirm dialog when the route's repo param changes", async () => {
     const { rerenderSamePage } = renderPage();
 
-    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
     const clearButton = screen.getByRole("button", { name: /^clear$/i });
     await waitFor(() => expect(clearButton).not.toBeDisabled());
 
     fireEvent.click(clearButton);
     await screen.findByRole("alertdialog");
 
-    // Navigate to a different repo — same component instance, new route params
-    // (in-place rerender, not unmount/remount, so this actually exercises the
-    // params.repo-keyed reset effect rather than trivially passing).
     currentRepoParam = "acme~other";
     rerenderSamePage();
 
@@ -208,7 +390,6 @@ describe("CachePage", () => {
     cacheClearMock.mockRejectedValue(new Error("Could not clear caches"));
 
     renderPage();
-    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
     fireEvent.click(screen.getByRole("button", { name: /^clear$/i }));
     const dialog = await screen.findByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
@@ -236,7 +417,6 @@ describe("CachePage", () => {
     fireEvent.click(screen.getByRole("button", { name: /load caches/i }));
     await waitFor(() => expect(screen.getByText("api-cache-key")).toBeInTheDocument());
 
-    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
     const clearKeyButton = screen.getByRole("button", { name: /^clear key$/i });
     await waitFor(() => expect(clearKeyButton).not.toBeDisabled());
     fireEvent.click(clearKeyButton);
@@ -249,7 +429,6 @@ describe("CachePage", () => {
     await waitFor(() =>
       expect(cacheClearMock).toHaveBeenCalledWith("acme", "demo", {
         token: "",
-        actor: "me@example.com",
         dry_run: false,
         key: "api-cache-key",
         ref: "refs/heads/main",
@@ -277,22 +456,19 @@ describe("CachePage", () => {
 
     const { rerenderSamePage } = renderPage();
 
-    // Load caches and queue a real clear for acme/demo.
     fireEvent.click(screen.getByRole("button", { name: /load caches/i }));
     await waitFor(() => expect(screen.getByText("api-cache-key")).toBeInTheDocument());
 
-    fireEvent.change(screen.getByPlaceholderText("actor"), { target: { value: "me@example.com" } });
     fireEvent.click(screen.getByRole("button", { name: /^clear$/i }));
     const dialog = await screen.findByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
-    await waitFor(() => expect(screen.getByText(/job #42/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/cache cleared/i)).toBeInTheDocument());
 
-    // Navigate to a different repo under the same owner — same component instance, new params.
     currentRepoParam = "acme~other";
     rerenderSamePage();
 
     await waitFor(() => expect(screen.getByText(/acme\/other/i)).toBeInTheDocument());
     expect(screen.queryByText("api-cache-key")).not.toBeInTheDocument();
-    expect(screen.queryByText(/job #42/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cache cleared/i)).not.toBeInTheDocument();
   });
 });
