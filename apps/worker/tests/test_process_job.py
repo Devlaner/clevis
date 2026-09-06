@@ -573,6 +573,7 @@ def test_clear_retries_on_a_secondary_rate_limit_403():
 
     sql, params = conn._cursor.calls[0]
     assert "status='queued'" in sql
+    assert params[0] == 1  # new retry_count
 
 
 def test_process_job_dispatches_known_job_type_to_its_handler():
