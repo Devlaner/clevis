@@ -164,7 +164,8 @@ def _list_all_workflows(client: GitHubClient, owner: str, repo: str) -> list[dic
     ``{total_count, workflows}`` object (not a bare array), so request_paginated's
     Link-following can't be reused -- page through it explicitly instead."""
     workflows: list[dict] = []
-    for page in range(1, 11):  # hard stop at 1000 workflows -- far past any real repo
+    page = 1
+    while True:
         data = client.request(
             "GET",
             f"/repos/{owner}/{repo}/actions/workflows",
@@ -172,8 +173,12 @@ def _list_all_workflows(client: GitHubClient, owner: str, repo: str) -> list[dic
         )
         batch = data.get("workflows", [])
         workflows.extend(batch)
-        if len(batch) < 100:
+        total = data.get("total_count")
+        # Stop on an empty page (guards against a misbehaving API and infinite loops),
+        # a short page, or once total_count says we've seen everything.
+        if not batch or len(batch) < 100 or (total is not None and len(workflows) >= total):
             break
+        page += 1
     return workflows
 
 
