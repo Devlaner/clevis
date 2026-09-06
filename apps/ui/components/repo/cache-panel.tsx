@@ -424,9 +424,9 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                 <p className="text-sm text-destructive">
                   Cache clear failed — {job.result ?? "unknown error"}
                 </p>
-              ) : jobQuery.isError ? (
+              ) : jobQuery.error ? (
                 <p className="text-sm text-destructive flex items-center gap-2">
-                  Couldn&apos;t check job status — {jobQuery.error?.message ?? "request failed"}
+                  Couldn&apos;t check job status — {jobQuery.error.message}
                   <Button
                     variant="outline"
                     className="h-6 px-2 text-[0.6875rem]"

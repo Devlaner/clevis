@@ -18,7 +18,10 @@ class _StopLoop(Exception):
 
 def _insert_queued_job(conn, created_ids) -> int:
     enc = encrypt_job_token("secret", settings.job_secret_key.get_secret_value())
-    payload = json.dumps({"owner": "acme", "repo": "demo", "token": enc})
+    # A key-scoped clear takes the single-DELETE path, which the mocked httpx.Client below
+    # stubs; a keyless (global) clear would first GET the cache list, which this test
+    # doesn't mock.
+    payload = json.dumps({"owner": "acme", "repo": "demo", "token": enc, "key": "build-cache"})
     with conn.cursor() as cur:
         cur.execute(
             """
