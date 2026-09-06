@@ -425,7 +425,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                   Cache clear failed — {job.result ?? "unknown error"}
                 </p>
               ) : jobQuery.error ? (
-                <p className="text-sm text-destructive flex items-center gap-2">
+                <div className="text-sm text-destructive flex items-center gap-2">
                   Couldn&apos;t check job status — {jobQuery.error.message}
                   <Button
                     variant="outline"
@@ -434,7 +434,7 @@ export function CachePanel({ owner, repo, active = true }: CachePanelProps) {
                   >
                     Retry
                   </Button>
-                </p>
+                </div>
               ) : (
                 <p className="text-sm text-muted-foreground flex items-center gap-2">
                   <CircleNotch className="size-3.5 animate-spin" />
