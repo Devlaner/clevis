@@ -6,6 +6,7 @@ const tokensResolveMock = vi.fn();
 const workflowsMock = vi.fn();
 const runsMock = vi.fn();
 const dispatchMock = vi.fn();
+const dispatchAllMock = vi.fn();
 const reposListMock = vi.fn();
 const installationsListMock = vi.fn();
 const installationsListForOrgMock = vi.fn();
@@ -20,6 +21,7 @@ vi.mock("@/lib/api/client", () => ({
       workflows: (...args: unknown[]) => workflowsMock(...args),
       runs: (...args: unknown[]) => runsMock(...args),
       dispatch: (...args: unknown[]) => dispatchMock(...args),
+      dispatchAll: (...args: unknown[]) => dispatchAllMock(...args),
     },
     repos: {
       list: (...args: unknown[]) => reposListMock(...args),
@@ -72,6 +74,7 @@ describe("AutomationPage", () => {
     workflowsMock.mockReset();
     runsMock.mockReset();
     dispatchMock.mockReset();
+    dispatchAllMock.mockReset();
     reposListMock.mockReset();
     reposListMock.mockResolvedValue({ org: "acme", total: 1, repos: [DEMO_REPO] });
     installationsListMock.mockReset();
@@ -286,6 +289,82 @@ describe("AutomationPage", () => {
     await waitFor(() => {
       expect(dispatchMock).toHaveBeenCalledWith("acme", "demo", 1, { token: "", ref: "main" });
     });
+  });
+
+  it("hides the 'Dispatch all' toolbar action when a repo has one workflow", async () => {
+    workflowsMock.mockResolvedValue({
+      repository: "acme/demo",
+      workflows: [{ id: 1, name: "CI", path: "p", state: "active", last_run_status: null, last_run_conclusion: null, last_run_at: null }],
+    });
+    runsMock.mockResolvedValue({ repository: "acme/demo", runs: [] });
+
+    renderPage();
+    await enterOwnerAndSelectRepo("acme", "demo");
+    fireEvent.click(screen.getByText("Load workflows"));
+
+    await waitFor(() => expect(screen.getByText("CI")).toBeInTheDocument());
+    expect(screen.queryByText("Dispatch all")).not.toBeInTheDocument();
+  });
+
+  it("arms then confirms 'Dispatch all', showing the result summary", async () => {
+    workflowsMock.mockResolvedValue({
+      repository: "acme/demo",
+      workflows: [
+        { id: 1, name: "CI", path: "p", state: "active", last_run_status: null, last_run_conclusion: null, last_run_at: null },
+        { id: 2, name: "Release", path: "p", state: "active", last_run_status: null, last_run_conclusion: null, last_run_at: null },
+      ],
+    });
+    runsMock.mockResolvedValue({ repository: "acme/demo", runs: [] });
+    dispatchAllMock.mockResolvedValue({
+      ref: "main",
+      results: [
+        { workflow_id: 1, name: "CI", status: "dispatched", message: null },
+        { workflow_id: 2, name: "Release", status: "failed", message: "Resource not accessible by integration" },
+      ],
+      dispatched_count: 1,
+      skipped_count: 0,
+      failed_count: 1,
+    });
+
+    renderPage();
+    await enterOwnerAndSelectRepo("acme", "demo");
+    fireEvent.click(screen.getByText("Load workflows"));
+    await waitFor(() => expect(screen.getByText("CI")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Dispatch all"));
+    expect(dispatchAllMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Confirm — dispatch all"));
+
+    await waitFor(() => expect(dispatchAllMock).toHaveBeenCalledWith("acme", "demo", { token: "", ref: "main" }));
+    await waitFor(() => expect(screen.getByText("1 dispatched")).toBeInTheDocument());
+    expect(screen.getByText("Release: Resource not accessible by integration")).toBeInTheDocument();
+
+    // Reloading workflows clears the previous bulk-dispatch summary.
+    fireEvent.click(screen.getByText("Load workflows"));
+    await waitFor(() => expect(screen.queryByText("1 dispatched")).not.toBeInTheDocument());
+  });
+
+  it("clears an armed 'Dispatch all' confirmation when the ref is edited", async () => {
+    workflowsMock.mockResolvedValue({
+      repository: "acme/demo",
+      workflows: [
+        { id: 1, name: "CI", path: "p", state: "active", last_run_status: null, last_run_conclusion: null, last_run_at: null },
+        { id: 2, name: "Release", path: "p", state: "active", last_run_status: null, last_run_conclusion: null, last_run_at: null },
+      ],
+    });
+    runsMock.mockResolvedValue({ repository: "acme/demo", runs: [] });
+
+    renderPage();
+    await enterOwnerAndSelectRepo("acme", "demo");
+    fireEvent.click(screen.getByText("Load workflows"));
+    await waitFor(() => expect(screen.getByText("CI")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Dispatch all"));
+    expect(screen.getByText("Confirm — dispatch all")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Ref for bulk dispatch"), { target: { value: "release" } });
+    expect(screen.getByText("Dispatch all")).toBeInTheDocument();
+    expect(screen.queryByText("Confirm — dispatch all")).not.toBeInTheDocument();
   });
 
   it("surfaces an error message when loading workflows fails", async () => {

@@ -42,8 +42,18 @@ def test_blocked_features_full_write_grant_unblocks_all():
         "pull_requests": "write",
         "contents": "write",
         "workflows": "write",
+        "actions": "write",
     }
     assert app_permissions.blocked_features(granted) == []
+
+
+def test_workflow_dispatch_needs_actions_write():
+    # Actions: read (enough to list workflows) does not satisfy the dispatch write need.
+    blocked = {b.feature: b.missing for b in app_permissions.blocked_features({"actions": "read"})}
+    assert blocked["workflow_dispatch"] == {"actions": "write"}
+    assert "workflow_dispatch" not in {
+        b.feature for b in app_permissions.blocked_features({"actions": "write"})
+    }
 
 
 def test_blocked_features_order_is_stable():

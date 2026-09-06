@@ -11,8 +11,8 @@ strings in each write-feature router. Centralising it here lets us:
 The permission keys and levels are GitHub's own (see the REST "Get an installation"
 response ``permissions`` object): ``administration``/``issues``/``pull_requests``/
 ``contents``/``vulnerability_alerts`` (Dependabot alerts)/``security_events`` (code
-scanning)/``secret_scanning_alerts``/``members`` accept ``read``|``write``; ``workflows``
-is ``write``-only.
+scanning)/``secret_scanning_alerts``/``members``/``actions`` accept ``read``|``write``;
+``workflows`` is ``write``-only.
 """
 
 from __future__ import annotations
@@ -72,6 +72,10 @@ FEATURE_PERMISSIONS: dict[str, FeatureSpec] = {
     "dependabot_triage": FeatureSpec(
         "Dependabot auto-triage",
         {"pull_requests": "write", "contents": "write"},
+    ),
+    "workflow_dispatch": FeatureSpec(
+        "Workflow dispatch (Automation page)",
+        {"actions": "write"},
     ),
 }
 

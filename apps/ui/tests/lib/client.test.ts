@@ -574,6 +574,14 @@ describe("api.automation", () => {
     expect(JSON.parse(init.body as string)).toEqual({ token: undefined, ref: "main" });
     expect(result).toEqual({ dispatched: true, message: "Workflow dispatched." });
   });
+
+  it("POSTs to /me/repos/{owner}/{repo}/workflows/dispatch-all with token: undefined when empty", async () => {
+    stubOkJson({ ref: "main", results: [], dispatched_count: 0, skipped_count: 0, failed_count: 0 });
+    await api.automation.dispatchAll("acme", "demo", { token: "", ref: "main" });
+    const [url, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(url)).toContain("/me/repos/acme/demo/workflows/dispatch-all");
+    expect(JSON.parse(init.body as string)).toEqual({ token: undefined, ref: "main" });
+  });
 });
 
 describe("api.security.remediate (issue #287)", () => {

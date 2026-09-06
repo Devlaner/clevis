@@ -12,6 +12,7 @@ import type {
   CreateIssueResponse,
   DependabotTriageResponse,
   DispatchResponse,
+  DispatchAllResponse,
   FailedRunsResponse,
   GithubMembershipStatus,
   GithubOrgInvitationsResponse,
@@ -339,6 +340,11 @@ export const api = {
     ) =>
       post<DispatchResponse>(
         `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflows/${workflowId}/dispatch`,
+        { ...body, token: body.token || undefined },
+      ),
+    dispatchAll: (owner: string, repo: string, body: { token: string; ref: string }) =>
+      post<DispatchAllResponse>(
+        `/me/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/workflows/dispatch-all`,
         { ...body, token: body.token || undefined },
       ),
   },

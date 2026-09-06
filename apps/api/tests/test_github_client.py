@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, call, patch
 import httpx
 import pytest
 
-from src.services.github_client import GitHubClient
+from src.services.github_client import GitHubClient, github_error
 
 
 @pytest.fixture()
@@ -168,6 +168,30 @@ class TestExhaustedRetries:
 
         mock_sleep.assert_not_called()
         assert mock_ctx.request.call_count == 1
+
+
+class TestGithubError:
+    def test_appends_github_message_body_to_detail(self):
+        resp = _make_response(403, {"message": "Resource not accessible by integration"})
+        exc = httpx.HTTPStatusError("error", request=MagicMock(), response=resp)
+        result = github_error(exc)
+        assert result.status_code == 400
+        assert result.detail == "GitHub API error: 403: Resource not accessible by integration"
+
+    def test_bare_status_when_body_has_no_message(self):
+        resp = _make_response(404, {})
+        exc = httpx.HTTPStatusError("error", request=MagicMock(), response=resp)
+        assert github_error(exc).detail == "GitHub API error: 404"
+
+    def test_bare_status_when_body_is_not_json(self):
+        resp = _make_response(500, text="<html>oops</html>")
+        resp.json.side_effect = ValueError("not json")
+        exc = httpx.HTTPStatusError("error", request=MagicMock(), response=resp)
+        assert github_error(exc).detail == "GitHub API error: 500"
+
+    def test_request_error_maps_to_503(self):
+        result = github_error(httpx.RequestError("boom"))
+        assert result.status_code == 503
 
 
 class TestRequestPaginated:
