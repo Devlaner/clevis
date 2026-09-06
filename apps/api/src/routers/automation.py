@@ -159,6 +159,24 @@ def _github_message(exc: httpx.HTTPStatusError) -> str:
         return ""
 
 
+def _list_all_workflows(client: GitHubClient, owner: str, repo: str) -> list[dict]:
+    """Every workflow across every page. GitHub's `/actions/workflows` returns a
+    ``{total_count, workflows}`` object (not a bare array), so request_paginated's
+    Link-following can't be reused -- page through it explicitly instead."""
+    workflows: list[dict] = []
+    for page in range(1, 11):  # hard stop at 1000 workflows -- far past any real repo
+        data = client.request(
+            "GET",
+            f"/repos/{owner}/{repo}/actions/workflows",
+            params={"per_page": 100, "page": page},
+        )
+        batch = data.get("workflows", [])
+        workflows.extend(batch)
+        if len(batch) < 100:
+            break
+    return workflows
+
+
 def _dispatch_all(
     db: Session,
     owner: str,
@@ -170,11 +188,11 @@ def _dispatch_all(
 ) -> DispatchAllResponse:
     client = GitHubClient(token)
     try:
-        data = client.request("GET", f"/repos/{owner}/{repo}/actions/workflows")
+        all_workflows = _list_all_workflows(client, owner, repo)
     except (httpx.HTTPStatusError, httpx.RequestError) as exc:
         raise _github_error(exc) from exc
 
-    active = [w for w in data.get("workflows", []) if w.get("state") == "active"]
+    active = [w for w in all_workflows if w.get("state") == "active"]
     if len(active) > _BULK_DISPATCH_MAX:
         raise HTTPException(
             status_code=422,

@@ -338,6 +338,33 @@ describe("AutomationPage", () => {
     await waitFor(() => expect(dispatchAllMock).toHaveBeenCalledWith("acme", "demo", { token: "", ref: "main" }));
     await waitFor(() => expect(screen.getByText("1 dispatched")).toBeInTheDocument());
     expect(screen.getByText("Release: Resource not accessible by integration")).toBeInTheDocument();
+
+    // Reloading workflows clears the previous bulk-dispatch summary.
+    fireEvent.click(screen.getByText("Load workflows"));
+    await waitFor(() => expect(screen.queryByText("1 dispatched")).not.toBeInTheDocument());
+  });
+
+  it("clears an armed 'Dispatch all' confirmation when the ref is edited", async () => {
+    workflowsMock.mockResolvedValue({
+      repository: "acme/demo",
+      workflows: [
+        { id: 1, name: "CI", path: "p", state: "active", last_run_status: null, last_run_conclusion: null, last_run_at: null },
+        { id: 2, name: "Release", path: "p", state: "active", last_run_status: null, last_run_conclusion: null, last_run_at: null },
+      ],
+    });
+    runsMock.mockResolvedValue({ repository: "acme/demo", runs: [] });
+
+    renderPage();
+    await enterOwnerAndSelectRepo("acme", "demo");
+    fireEvent.click(screen.getByText("Load workflows"));
+    await waitFor(() => expect(screen.getByText("CI")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("Dispatch all"));
+    expect(screen.getByText("Confirm — dispatch all")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Ref for bulk dispatch"), { target: { value: "release" } });
+    expect(screen.getByText("Dispatch all")).toBeInTheDocument();
+    expect(screen.queryByText("Confirm — dispatch all")).not.toBeInTheDocument();
   });
 
   it("surfaces an error message when loading workflows fails", async () => {

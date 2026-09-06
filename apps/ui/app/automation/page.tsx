@@ -113,21 +113,6 @@ export default function AutomationPage() {
     onSuccess: () => setTokenSaved(true),
   })
 
-  const loadMutation = useMutation({
-    mutationFn: async () => {
-      const [workflows, runs] = await Promise.all([
-        api.automation.workflows(owner.trim(), repo.trim(), token),
-        api.automation.runs(owner.trim(), repo.trim(), token),
-      ])
-      return { workflows, runs }
-    },
-    onSuccess: () => {
-      setSelectedWorkflow(null)
-      setDispatchArmed(false)
-      setDispatchAllArmed(false)
-    },
-  })
-
   const dispatchMutation = useMutation({
     mutationFn: () => {
       if (!selectedWorkflow) throw new Error("No workflow selected")
@@ -140,6 +125,33 @@ export default function AutomationPage() {
     mutationFn: () => api.automation.dispatchAll(owner.trim(), repo.trim(), { token, ref: ref.trim() }),
     onSuccess: () => setDispatchAllArmed(false),
   })
+
+  const loadMutation = useMutation({
+    mutationFn: async () => {
+      const [workflows, runs] = await Promise.all([
+        api.automation.workflows(owner.trim(), repo.trim(), token),
+        api.automation.runs(owner.trim(), repo.trim(), token),
+      ])
+      return { workflows, runs }
+    },
+    onSuccess: () => {
+      setSelectedWorkflow(null)
+      setDispatchArmed(false)
+      setDispatchAllArmed(false)
+      // Drop any prior repo's bulk-dispatch summary so it doesn't render under the
+      // newly loaded workflow list.
+      dispatchMutation.reset()
+      dispatchAllMutation.reset()
+    },
+  })
+
+  // One handler for every ref input: editing the ref invalidates any pending
+  // confirmation, whichever button armed it.
+  const handleRefChange = (value: string) => {
+    setRef(value)
+    setDispatchArmed(false)
+    setDispatchAllArmed(false)
+  }
 
   // Auto-disarm if the user doesn't confirm within a few seconds — same pattern
   // as the Actions Cache "Clear" button (see components/repo/cache-panel.tsx).
@@ -270,7 +282,7 @@ export default function AutomationPage() {
                 <p className="text-xs font-medium text-foreground">Dispatch &ldquo;{selectedWorkflow.name}&rdquo;</p>
                 <div>
                   <label className="text-xs font-medium text-foreground block mb-1.5">Ref (branch/tag)</label>
-                  <Input value={ref} onChange={(e) => { setRef(e.target.value); setDispatchArmed(false) }} />
+                  <Input value={ref} onChange={(e) => handleRefChange(e.target.value)} />
                 </div>
                 <Button
                   onClick={() => {
@@ -319,7 +331,7 @@ export default function AutomationPage() {
                       <Input
                         aria-label="Ref for bulk dispatch"
                         value={ref}
-                        onChange={(e) => { setRef(e.target.value); setDispatchAllArmed(false) }}
+                        onChange={(e) => handleRefChange(e.target.value)}
                         className="h-6 w-24 text-[0.6875rem]"
                       />
                       <Button
