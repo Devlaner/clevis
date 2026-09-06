@@ -359,3 +359,121 @@ def test_org_dispatch_no_token_returns_400(db, acme_org):
     client = _org_client(db, acme_org["admin"].id, email=acme_org["admin"].email)
     resp = client.post("/orgs/acme/repos/acme/demo/workflows/1/dispatch", json={"ref": "main"})
     assert resp.status_code == 400
+
+
+# ── bulk dispatch-all ─────────────────────────────────────────────────────────
+
+_WORKFLOWS_3 = {
+    "workflows": [
+        {"id": 1, "name": "CI", "path": ".github/workflows/ci.yml", "state": "active"},
+        {"id": 2, "name": "Release", "path": ".github/workflows/release.yml", "state": "active"},
+        {"id": 3, "name": "Old", "path": ".github/workflows/old.yml", "state": "disabled_manually"},
+    ]
+}
+
+
+def _no_trigger_422():
+    return httpx.HTTPStatusError(
+        "boom",
+        request=httpx.Request("POST", "https://api.github.com/x"),
+        response=httpx.Response(422, json={"message": "Workflow does not have 'workflow_dispatch' trigger."}),
+    )
+
+
+def test_personal_dispatch_all_mixed_results(automation_client, db):
+    db.add(User(id=_USER.id, email=_USER.email, name=None, password_hash=None, is_workspace_admin=False))
+    db.commit()
+    with patch("src.routers.automation.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = [
+            _WORKFLOWS_3,      # GET workflows
+            {},               # workflow 1 dispatched
+            _no_trigger_422(),  # workflow 2 skipped
+        ]
+        resp = automation_client.post(
+            "/me/repos/acme/demo/workflows/dispatch-all",
+            json={"token": "ghp_testtoken123456789012345678901234", "ref": "main"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["dispatched_count"], body["skipped_count"], body["failed_count"]) == (1, 1, 0)
+    # Only the two *active* workflows are attempted -> two audit rows.
+    logs = db.query(AuditLog).filter(AuditLog.action == "automation.workflow.dispatch").all()
+    assert {log.target for log in logs} == {"acme/demo#1", "acme/demo#2"}
+
+
+def test_personal_dispatch_all_reports_failure_row(automation_client, db):
+    db.add(User(id=_USER.id, email=_USER.email, name=None, password_hash=None, is_workspace_admin=False))
+    db.commit()
+    forbidden = httpx.HTTPStatusError(
+        "boom",
+        request=httpx.Request("POST", "https://api.github.com/x"),
+        response=httpx.Response(403, json={"message": "Resource not accessible by integration"}),
+    )
+    with patch("src.routers.automation.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = [
+            {"workflows": [{"id": 1, "name": "CI", "path": "p", "state": "active"}]},
+            forbidden,
+        ]
+        resp = automation_client.post(
+            "/me/repos/acme/demo/workflows/dispatch-all",
+            json={"token": "ghp_testtoken123456789012345678901234", "ref": "main"},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["failed_count"] == 1
+    assert body["results"][0]["message"] == "Resource not accessible by integration"
+
+
+def test_personal_dispatch_all_no_token_returns_400(automation_client):
+    with patch("src.routers.automation.GitHubClient") as mock_client:
+        resp = automation_client.post("/me/repos/acme/demo/workflows/dispatch-all", json={"ref": "main"})
+    assert resp.status_code == 400
+    mock_client.return_value.request.assert_not_called()
+
+
+def test_personal_dispatch_all_over_cap_returns_422(automation_client, db):
+    db.add(User(id=_USER.id, email=_USER.email, name=None, password_hash=None, is_workspace_admin=False))
+    db.commit()
+    many = {"workflows": [{"id": i, "name": f"w{i}", "path": "p", "state": "active"} for i in range(41)]}
+    with patch("src.routers.automation.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = [many]
+        resp = automation_client.post(
+            "/me/repos/acme/demo/workflows/dispatch-all",
+            json={"token": "ghp_testtoken123456789012345678901234", "ref": "main"},
+        )
+    assert resp.status_code == 422
+
+
+def test_org_dispatch_all_requires_admin(db, acme_org):
+    client = _org_client(db, acme_org["member"].id, email=acme_org["member"].email)
+    resp = client.post(
+        "/orgs/acme/repos/acme/demo/workflows/dispatch-all",
+        json={"token": "ghp_testtoken123456789012345678901234", "ref": "main"},
+    )
+    assert resp.status_code == 403
+
+
+def test_org_dispatch_all_admin_ok(db, acme_org):
+    client = _org_client(db, acme_org["admin"].id, email=acme_org["admin"].email)
+    with patch("src.routers.automation.GitHubClient") as mock_client:
+        mock_client.return_value.request.side_effect = [
+            {"workflows": [{"id": 7, "name": "CI", "path": "p", "state": "active"}]},
+            {},
+        ]
+        resp = client.post(
+            "/orgs/acme/repos/acme/demo/workflows/dispatch-all",
+            json={"token": "ghp_testtoken123456789012345678901234", "ref": "main"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["dispatched_count"] == 1
+    logs = db.query(AuditLog).filter(AuditLog.action == "automation.workflow.dispatch").all()
+    assert logs[0].target == "acme/demo#7"
+
+
+def test_org_dispatch_all_owner_mismatch_forbidden(db, acme_org):
+    client = _org_client(db, acme_org["admin"].id, email=acme_org["admin"].email)
+    resp = client.post(
+        "/orgs/acme/repos/other-owner/demo/workflows/dispatch-all",
+        json={"token": "ghp_testtoken123456789012345678901234", "ref": "main"},
+    )
+    assert resp.status_code == 403

@@ -45,6 +45,7 @@ export default function AutomationPage() {
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowSummary | null>(null)
   const [ref, setRef] = useState("main")
   const [dispatchArmed, setDispatchArmed] = useState(false)
+  const [dispatchAllArmed, setDispatchAllArmed] = useState(false)
 
   const { scope } = useActiveScope()
   const scopeLogin = scope?.login ?? ""
@@ -123,6 +124,7 @@ export default function AutomationPage() {
     onSuccess: () => {
       setSelectedWorkflow(null)
       setDispatchArmed(false)
+      setDispatchAllArmed(false)
     },
   })
 
@@ -134,6 +136,11 @@ export default function AutomationPage() {
     onSuccess: () => setDispatchArmed(false),
   })
 
+  const dispatchAllMutation = useMutation({
+    mutationFn: () => api.automation.dispatchAll(owner.trim(), repo.trim(), { token, ref: ref.trim() }),
+    onSuccess: () => setDispatchAllArmed(false),
+  })
+
   // Auto-disarm if the user doesn't confirm within a few seconds — same pattern
   // as the Actions Cache "Clear" button (see components/repo/cache-panel.tsx).
   useEffect(() => {
@@ -141,6 +148,12 @@ export default function AutomationPage() {
     const timer = setTimeout(() => setDispatchArmed(false), 4000)
     return () => clearTimeout(timer)
   }, [dispatchArmed])
+
+  useEffect(() => {
+    if (!dispatchAllArmed) return
+    const timer = setTimeout(() => setDispatchAllArmed(false), 4000)
+    return () => clearTimeout(timer)
+  }, [dispatchAllArmed])
 
   // Installs covering the current owner (personal + org-scoped), so the page can flag
   // when a blocked automation is blocked because the App is missing a permission rather
@@ -297,10 +310,44 @@ export default function AutomationPage() {
         {(loadMutation.data || isLoading) && (
           <div className="card lg:col-span-2">
             <>
-              <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+              <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
                 <span className="section-title">Workflows</span>
-                {workflows.length > 0 && <span className="stat-chip">{workflows.length} total</span>}
+                <div className="flex items-center gap-2">
+                  {workflows.length > 0 && <span className="stat-chip">{workflows.length} total</span>}
+                  {workflows.length > 1 && (
+                    <>
+                      <Input
+                        aria-label="Ref for bulk dispatch"
+                        value={ref}
+                        onChange={(e) => { setRef(e.target.value); setDispatchAllArmed(false) }}
+                        className="h-6 w-24 text-[0.6875rem]"
+                      />
+                      <Button
+                        variant="outline"
+                        className="h-6 px-2 text-[0.6875rem]"
+                        disabled={dispatchAllMutation.isPending || !ref.trim()}
+                        onClick={() => {
+                          if (dispatchAllArmed) {
+                            setDispatchAllArmed(false)
+                            dispatchAllMutation.mutate()
+                          } else {
+                            setDispatchAllArmed(true)
+                          }
+                        }}
+                      >
+                        <Play className="size-3" />
+                        {dispatchAllArmed ? "Confirm — dispatch all" : "Dispatch all"}
+                      </Button>
+                    </>
+                  )}
+                </div>
               </div>
+              {dispatchAllArmed && (
+                <p className="px-4 py-2 text-xs text-yellow-400/80 flex items-center gap-1.5 border-b border-border">
+                  <Warning className="size-3 shrink-0" />
+                  Click again to trigger a run on every active workflow ({workflows.length}) on {ref.trim()}.
+                </p>
+              )}
               {isLoading ? (
                 <div className="p-4 flex flex-col gap-2">
                   {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}
@@ -351,6 +398,33 @@ export default function AutomationPage() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              )}
+
+              {dispatchAllMutation.isError && (
+                <p className="px-4 py-3 text-xs text-destructive flex items-center gap-1.5 border-t border-border">
+                  <Warning className="size-3 shrink-0" />
+                  {dispatchAllMutation.error.message}
+                </p>
+              )}
+              {dispatchAllMutation.data && (
+                <div className="px-4 py-3 border-t border-border flex flex-col gap-1.5 text-xs">
+                  <p>
+                    <span className="text-green-400">{dispatchAllMutation.data.dispatched_count} dispatched</span>
+                    <span className="text-muted-foreground"> · {dispatchAllMutation.data.skipped_count} skipped</span>
+                    <span className={dispatchAllMutation.data.failed_count > 0 ? "text-destructive" : "text-muted-foreground"}>
+                      {" · "}{dispatchAllMutation.data.failed_count} failed
+                    </span>
+                  </p>
+                  {dispatchAllMutation.data.failed_count > 0 && (
+                    <ul className="text-destructive list-disc pl-6">
+                      {dispatchAllMutation.data.results
+                        .filter((r) => r.status === "failed")
+                        .map((r) => (
+                          <li key={r.workflow_id}>{r.name}: {r.message}</li>
+                        ))}
+                    </ul>
+                  )}
                 </div>
               )}
 

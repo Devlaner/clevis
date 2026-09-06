@@ -24,6 +24,9 @@ from src.core.db import get_db
 from src.core.rbac import OrgContext, assert_owner_matches_org, require_org_role
 from src.repositories import audit_repo, tenant_repo
 from src.schemas.automation import (
+    DispatchAllInput,
+    DispatchAllResponse,
+    DispatchAllResult,
     DispatchInput,
     DispatchResponse,
     RunSummary,
@@ -143,6 +146,95 @@ def _dispatch(
     return DispatchResponse(dispatched=True, message="Workflow dispatched.")
 
 
+# Bounds one bulk-dispatch request: each active workflow is one sequential GitHub POST,
+# and the request shouldn't fan out unboundedly. Repos with more workflows than this
+# should dispatch individually.
+_BULK_DISPATCH_MAX = 40
+
+
+def _github_message(exc: httpx.HTTPStatusError) -> str:
+    try:
+        return exc.response.json().get("message") or ""
+    except (ValueError, AttributeError):
+        return ""
+
+
+def _dispatch_all(
+    db: Session,
+    owner: str,
+    repo: str,
+    payload: DispatchAllInput,
+    token: str,
+    actor: str,
+    tenant_id: int | None = None,
+) -> DispatchAllResponse:
+    client = GitHubClient(token)
+    try:
+        data = client.request("GET", f"/repos/{owner}/{repo}/actions/workflows")
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        raise _github_error(exc) from exc
+
+    active = [w for w in data.get("workflows", []) if w.get("state") == "active"]
+    if len(active) > _BULK_DISPATCH_MAX:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Too many workflows for bulk dispatch ({_BULK_DISPATCH_MAX} max); dispatch individually.",
+        )
+
+    results: list[DispatchAllResult] = []
+    for w in active:
+        wf_id, name = w["id"], w["name"]
+        # One audit row per attempted workflow, written before the call -- same
+        # convention as _dispatch, so a rejected bulk dispatch still leaves a record.
+        audit_repo.write(
+            db,
+            actor,
+            "automation.workflow.dispatch",
+            f"{owner}/{repo}#{wf_id}",
+            {"ref": payload.ref, "inputs": {}, "bulk": True},
+            tenant_id=tenant_id,
+        )
+        try:
+            client.request(
+                "POST",
+                f"/repos/{owner}/{repo}/actions/workflows/{wf_id}/dispatches",
+                json={"ref": payload.ref, "inputs": {}},
+            )
+        except httpx.HTTPStatusError as exc:
+            message = _github_message(exc)
+            if exc.response.status_code == 422 and "workflow_dispatch" in message:
+                results.append(
+                    DispatchAllResult(
+                        workflow_id=wf_id, name=name, status="skipped",
+                        message="No workflow_dispatch trigger",
+                    )
+                )
+            else:
+                results.append(
+                    DispatchAllResult(
+                        workflow_id=wf_id, name=name, status="failed",
+                        message=message or f"GitHub API error: {exc.response.status_code}",
+                    )
+                )
+        except httpx.RequestError:
+            results.append(
+                DispatchAllResult(
+                    workflow_id=wf_id, name=name, status="failed",
+                    message="GitHub API unreachable",
+                )
+            )
+        else:
+            results.append(DispatchAllResult(workflow_id=wf_id, name=name, status="dispatched"))
+
+    return DispatchAllResponse(
+        ref=payload.ref,
+        results=results,
+        dispatched_count=sum(r.status == "dispatched" for r in results),
+        skipped_count=sum(r.status == "skipped" for r in results),
+        failed_count=sum(r.status == "failed" for r in results),
+    )
+
+
 # ── org-scoped ───────────────────────────────────────────────────────────────
 
 @router.get("/orgs/{org_login}/repos/{owner}/{repo}/workflows", response_model=WorkflowsResponse)
@@ -200,6 +292,25 @@ def org_dispatch_workflow(
     return _dispatch(db, owner, repo, workflow_id, payload, token, actor=user.email, tenant_id=ctx.org.tenant_id)
 
 
+@router.post("/orgs/{org_login}/repos/{owner}/{repo}/workflows/dispatch-all", response_model=DispatchAllResponse)
+def org_dispatch_all_workflows(
+    org_login: str,
+    owner: str,
+    repo: str,
+    payload: DispatchAllInput,
+    ctx: OrgContext = Depends(require_org_role(min_role="admin")),
+    user: UserOut = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    assert_owner_matches_org(owner, ctx)
+    client_token = payload.token.get_secret_value() if payload.token else None
+    try:
+        token = resolve_org_token(db, org_id=ctx.org.id, account_login=owner, client_token=client_token)
+    except NoGitHubTokenAvailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _dispatch_all(db, owner, repo, payload, token, actor=user.email, tenant_id=ctx.org.tenant_id)
+
+
 # ── personal-scoped ──────────────────────────────────────────────────────────
 
 @router.get("/me/repos/{owner}/{repo}/workflows", response_model=WorkflowsResponse)
@@ -251,3 +362,22 @@ def personal_dispatch_workflow(
         raise HTTPException(status_code=400, detail=str(exc))
     personal_tenant = tenant_repo.ensure_personal_tenant(db, user.id)
     return _dispatch(db, owner, repo, workflow_id, payload, token, actor=user.email, tenant_id=personal_tenant.id)
+
+
+@router.post("/me/repos/{owner}/{repo}/workflows/dispatch-all", response_model=DispatchAllResponse)
+def personal_dispatch_all_workflows(
+    owner: str,
+    repo: str,
+    payload: DispatchAllInput,
+    user: UserOut = Depends(require_auth),
+    db: Session = Depends(get_db),
+):
+    client_token = payload.token.get_secret_value() if payload.token else None
+    try:
+        token = resolve_owner_token(db, user_id=user.id, owner=owner, client_token=client_token, min_role="admin")
+    except InsufficientOrgRole as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except NoGitHubTokenAvailable as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    personal_tenant = tenant_repo.ensure_personal_tenant(db, user.id)
+    return _dispatch_all(db, owner, repo, payload, token, actor=user.email, tenant_id=personal_tenant.id)

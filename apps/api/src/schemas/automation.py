@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -54,3 +54,27 @@ class DispatchInput(BaseModel):
 class DispatchResponse(BaseModel):
     dispatched: bool
     message: str | None = None
+
+
+class DispatchAllInput(BaseModel):
+    # Same token fallback as DispatchInput. No per-workflow `inputs` -- a single
+    # inputs dict can't sensibly apply across every workflow in the repo.
+    token: SecretStr | None = None
+    ref: str = Field(max_length=255)
+
+
+class DispatchAllResult(BaseModel):
+    workflow_id: int
+    name: str
+    # "skipped" = the workflow has no `workflow_dispatch` trigger (GitHub 422); this
+    # is an expected outcome for a bulk fire, not a failure.
+    status: Literal["dispatched", "skipped", "failed"]
+    message: str | None = None
+
+
+class DispatchAllResponse(BaseModel):
+    ref: str
+    results: list[DispatchAllResult]
+    dispatched_count: int
+    skipped_count: int
+    failed_count: int

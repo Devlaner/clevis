@@ -460,6 +460,7 @@ function SavedTokensSection() {
         </div>
         <p className="text-xs text-muted-foreground mt-0.5">
           Being replaced by the GitHub App. Still used by Health &amp; Security and Cache pages until they move to the App.
+          A classic token needs the <code>repo</code> scope (plus <code>workflow</code> to dispatch Actions workflows).
         </p>
       </div>
 

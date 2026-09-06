@@ -538,6 +538,21 @@ export interface DispatchResponse {
   message: string | null
 }
 
+export interface DispatchAllResult {
+  workflow_id: number
+  name: string
+  status: "dispatched" | "skipped" | "failed"
+  message: string | null
+}
+
+export interface DispatchAllResponse {
+  ref: string
+  results: DispatchAllResult[]
+  dispatched_count: number
+  skipped_count: number
+  failed_count: number
+}
+
 // issue #288 — bulk branch-protection apply
 export interface BranchProtectionPreset {
   required_pull_request_reviews?: { required_approving_review_count: number } | null
