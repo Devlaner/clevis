@@ -791,11 +791,30 @@ async def personal_analytics_cockpit(
     except NoGitHubTokenAvailable as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    scans = scan_results_repo.list_recent(db, owner=owner, limit=10)
+    # Establish tenant/RLS session context BEFORE any tenant-scoped DB read below.
+    # _cockpit_connected_tenant calls set_tenant_session_context once it has confirmed
+    # membership; scan_results is FORCE ROW LEVEL SECURITY, so reading it first (as this
+    # used to) returns nothing under an enforced-RLS deployment -- only tenant_id IS NULL
+    # rows match an unset app.tenant_id, and real scans always carry a tenant.
+    connected_tenant_id = await anyio.to_thread.run_sync(lambda: _cockpit_connected_tenant(db, user.id, owner))
+
+    # Scan history is a local DB read, not a GitHub-authorized one, so it needs its own
+    # access gate -- the same one /me/analytics/history and /me/analytics/export use.
+    # A caller with no claim at all still gets the rest of the cockpit, just no trend.
+    history_scope = await anyio.to_thread.run_sync(lambda: _user_history_scope(db, user, owner))
+    scans = (
+        scan_results_repo.list_recent(
+            db,
+            owner=owner,
+            limit=10,
+            scanned_by_user_id=user.id if history_scope == "own" else None,
+        )
+        if history_scope is not None
+        else []
+    )
     latest_score = scans[0]["score"] if scans else None
     score_trend = [s["score"] for s in reversed(scans)]
     cache_job_success_rate = _cache_job_success_rate(db)
-    connected_tenant_id = await anyio.to_thread.run_sync(lambda: _cockpit_connected_tenant(db, user.id, owner))
 
     try:
         repos = await anyio.to_thread.run_sync(lambda: _safe_list_repos(owner, token))

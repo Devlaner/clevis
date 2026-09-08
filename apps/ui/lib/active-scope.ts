@@ -77,6 +77,16 @@ export function setActiveScope(scope: ActiveScope): void {
   window.dispatchEvent(new Event(CHANGE_EVENT))
 }
 
+// Called on logout so a new user on the same browser doesn't start already
+// scoped into the previous user's org (which would also fire scoped requests
+// for an org they may have no relationship with). Clears the legacy key too.
+export function clearActiveScope(): void {
+  if (typeof window === "undefined") return
+  localStorage.removeItem(STORAGE_KEY)
+  localStorage.removeItem(LEGACY_ORG_KEY)
+  window.dispatchEvent(new Event(CHANGE_EVENT))
+}
+
 export function useActiveScope(): { scope: ActiveScope | null; setScope: (scope: ActiveScope) => void } {
   const scope = useSyncExternalStore(subscribe, read, getServerSnapshot)
   const setScope = useCallback((next: ActiveScope) => setActiveScope(next), [])

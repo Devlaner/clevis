@@ -85,7 +85,10 @@ def get_pending_for_org_and_email(db: Session, org_id: int, email: str) -> Invit
         db.query(Invitation)
         .filter(
             Invitation.org_id == org_id,
-            Invitation.email.ilike(email),
+            # Case-insensitive *exact* match -- ilike(email) would treat `_`/`%` in
+            # the address (a `_` is common in local parts) as wildcards, matching
+            # unrelated invites. Mirrors _expire_lapsed and the lower(email) unique index.
+            func.lower(Invitation.email) == email.lower(),
             Invitation.status == "pending",
             Invitation.expires_at > datetime.now(timezone.utc),
         )
@@ -97,7 +100,8 @@ def list_pending_for_email(db: Session, email: str) -> list[Invitation]:
     return (
         db.query(Invitation)
         .filter(
-            Invitation.email.ilike(email),
+            # Exact, case-insensitive -- see get_pending_for_org_and_email.
+            func.lower(Invitation.email) == email.lower(),
             Invitation.status == "pending",
             Invitation.expires_at > datetime.now(timezone.utc),
         )

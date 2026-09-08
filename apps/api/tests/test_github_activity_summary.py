@@ -2,6 +2,7 @@
 concrete piece of the feat/aggregates-api-sse foundation -- see docs/plan.md's S6 section."""
 
 import json
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +14,7 @@ from src.core.auth import UserOut, require_auth
 from src.core.db import User, get_db
 from src.repositories import installation_repo, org_membership_repo, org_repo
 from src.routers.github import _activity_summary_stream, router as github_router
+from src.schemas.github import ActivitySummaryResponse
 
 _MEMBER = UserOut(id=1, email="member@example.com", name=None, is_workspace_admin=False)
 
@@ -176,19 +178,40 @@ def test_activity_summary_non_member_forbidden(db, acme_org):
 # ---------------------------------------------------------------------------
 # SSE stream -- tested against the generator function directly (not through
 # TestClient's own streaming, which would require a real multi-second wait per
-# poll interval); a tiny poll_interval keeps these tests fast.
+# poll interval); a tiny poll_interval keeps these tests fast. The generators are
+# async (the between-poll wait is `await asyncio.sleep`, not a blocking
+# `time.sleep` on a threadpool worker -- see _activity_summary_stream).
 # ---------------------------------------------------------------------------
 
 
-def test_stream_emits_a_real_event_first_then_heartbeats_when_unchanged(db, acme_org_with_installation, rbac_ctx_factory):
+async def _take(agen, n):
+    out = []
+    for _ in range(n):
+        out.append(await agen.__anext__())
+    return out
+
+
+def _reuse_session(session):
+    """A `session_scope` for _activity_summary_stream that hands each poll the test's own
+    transaction-scoped fixture session (so it can see uncommitted fixture rows) and skips
+    the real per-poll teardown, which would roll the fixture data back."""
+
+    @contextmanager
+    def _scope():
+        yield session
+
+    return _scope
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_a_real_event_first_then_heartbeats_when_unchanged(db, acme_org_with_installation, rbac_ctx_factory):
     today = date.today()
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/api", event_type="push", day=today, count=1)
     ctx = rbac_ctx_factory(acme_org_with_installation)
 
-    gen = _activity_summary_stream(db, "acme", ctx, days=7, poll_interval=0)
-    first = next(gen)
-    second = next(gen)
-    gen.close()
+    gen = _activity_summary_stream("acme", ctx, days=7, poll_interval=0, session_scope=_reuse_session(db))
+    first, second = await _take(gen, 2)
+    await gen.aclose()
 
     assert first.startswith("event: activity_summary\ndata: ")
     payload = json.loads(first.removeprefix("event: activity_summary\ndata: ").strip())
@@ -196,65 +219,95 @@ def test_stream_emits_a_real_event_first_then_heartbeats_when_unchanged(db, acme
     assert second == ": heartbeat\n\n"
 
 
-def test_stream_emits_a_new_event_when_the_aggregate_changes(db, acme_org_with_installation, rbac_ctx_factory):
+@pytest.mark.asyncio
+async def test_stream_emits_a_new_event_when_the_aggregate_changes(db, acme_org_with_installation, rbac_ctx_factory):
     today = date.today()
     ctx = rbac_ctx_factory(acme_org_with_installation)
 
-    gen = _activity_summary_stream(db, "acme", ctx, days=7, poll_interval=0)
-    first = next(gen)
+    gen = _activity_summary_stream("acme", ctx, days=7, poll_interval=0, session_scope=_reuse_session(db))
+    (first,) = await _take(gen, 1)
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/api", event_type="push", day=today, count=1)
-    second = next(gen)
-    gen.close()
+    (second,) = await _take(gen, 1)
+    await gen.aclose()
 
     assert json.loads(first.removeprefix("event: activity_summary\ndata: ").strip())["totals"] == []
     assert second.startswith("event: activity_summary\ndata: ")
 
 
-def test_stream_reports_unconnected_for_a_legacy_pat_org(db, acme_org, rbac_ctx_factory):
+@pytest.mark.asyncio
+async def test_stream_reports_unconnected_for_a_legacy_pat_org(db, acme_org, rbac_ctx_factory):
     ctx = rbac_ctx_factory(acme_org)
 
-    gen = _activity_summary_stream(db, "acme", ctx, days=7, poll_interval=0)
-    first = next(gen)
-    gen.close()
+    gen = _activity_summary_stream("acme", ctx, days=7, poll_interval=0, session_scope=_reuse_session(db))
+    (first,) = await _take(gen, 1)
+    await gen.aclose()
 
     payload = json.loads(first.removeprefix("event: activity_summary\ndata: ").strip())
     assert payload["connected"] is False
 
 
-def test_stream_session_wrapper_opens_and_closes_its_own_session(monkeypatch):
-    """Regression test (CodeRabbit finding on PR #349): the SSE route must not reuse the
-    request-scoped `Depends(get_db)` session, which FastAPI 0.116.1 closes (and RESETs its
-    tenant/user SET vars on) as soon as the route handler returns the StreamingResponse --
-    before this generator has streamed anything. Verifies the wrapper opens its own
-    session via SessionLocal, sets tenant context on it, and closes it once the stream
-    ends, independent of _activity_summary_stream's own query logic (covered above)."""
+@pytest.mark.asyncio
+async def test_stream_opens_and_tears_down_a_fresh_session_per_poll(monkeypatch):
+    """Regression test (CodeRabbit findings on PR #349 and #405): the SSE stream must not
+    reuse the request-scoped `Depends(get_db)` session (FastAPI 0.116.1 tears that down as
+    soon as the handler returns the StreamingResponse), and it must not hold ONE session
+    open across the whole <=15-min stream either -- an open Session pins a pooled
+    connection, so a few idle streams would exhaust the pool. Each poll gets its own
+    SessionLocal(), with tenant context + a bounded statement_timeout set on it, and it's
+    closed before the next poll."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     import src.routers.github as github_module
 
-    fake_db = MagicMock()
-    monkeypatch.setattr(github_module, "SessionLocal", lambda: fake_db)
+    sessions: list = []
 
-    captured: dict = {}
+    def _fake_session_local():
+        s = MagicMock()
+        sessions.append(s)
+        return s
 
-    def _fake_inner_stream(db, org_login, ctx, days, poll_interval):
-        captured["db"] = db
-        yield "event: activity_summary\ndata: {}\n\n"
-
-    monkeypatch.setattr(github_module, "_activity_summary_stream", _fake_inner_stream)
+    monkeypatch.setattr(github_module, "SessionLocal", _fake_session_local)
+    monkeypatch.setattr(
+        github_module,
+        "_activity_summary_snapshot",
+        lambda db, org_login, ctx, days: ActivitySummaryResponse(
+            org=org_login, days=days, connected=False, generated_at=datetime.now(timezone.utc), totals=[]
+        ),
+    )
 
     ctx = SimpleNamespace(org=SimpleNamespace(tenant_id=42), membership=SimpleNamespace(user_id=7))
-    gen = github_module._activity_summary_stream_session("acme", ctx, days=1, poll_interval=0)
-    first = next(gen)
-    gen.close()
+    gen = github_module._activity_summary_stream("acme", ctx, days=1, poll_interval=0)
+    await _take(gen, 2)
+    await gen.aclose()
 
-    assert first == "event: activity_summary\ndata: {}\n\n"
-    assert captured["db"] is fake_db
-    executed_sql = [c.args[0].text for c in fake_db.execute.call_args_list]
-    assert "SET app.tenant_id = 42" in executed_sql
-    assert "SET app.user_id = 7" in executed_sql
-    fake_db.close.assert_called_once()
+    # One session per poll, each closed (not left holding a connection across the sleep).
+    assert len(sessions) >= 2
+    for s in sessions:
+        executed_sql = [c.args[0].text for c in s.execute.call_args_list]
+        assert "SET app.tenant_id = 42" in executed_sql
+        assert "SET app.user_id = 7" in executed_sql
+        assert any(sql.startswith("SET LOCAL statement_timeout") for sql in executed_sql)
+        assert "RESET app.tenant_id" in executed_sql
+        s.close.assert_called_once()
+
+
+def test_teardown_stream_session_invalidates_connection_when_reset_fails():
+    """Regression (CodeRabbit finding on PR #405): app.tenant_id/app.user_id are set with
+    plain SET, so a teardown that fails partway (RESET or commit raises) must discard the
+    pooled connection rather than close() it back into the pool still tenant-scoped --
+    same contract as src.core.db.get_db's teardown."""
+    from unittest.mock import MagicMock
+
+    from src.routers.github import _teardown_stream_session
+
+    db = MagicMock()
+    db.execute.side_effect = RuntimeError("connection dropped mid-RESET")
+
+    _teardown_stream_session(db)
+
+    db.invalidate.assert_called_once()
+    db.close.assert_not_called()
 
 
 @pytest.fixture()

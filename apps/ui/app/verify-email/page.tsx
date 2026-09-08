@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { PageHeader } from "@/components/page-header"
 import { api } from "@/lib/api/client"
@@ -11,6 +11,10 @@ export default function VerifyEmailPage() {
   const token = searchParams.get("token")
   const [state, setState] = useState<"pending" | "success" | "error">("pending")
   const [errorMessage, setErrorMessage] = useState("")
+  // Tracks which token value we've already POSTed. Scoped to the token, not the
+  // component instance: a boolean "ran" flag would also swallow a genuinely new
+  // token (URL changes, or a missing token becoming present) after the first run.
+  const attemptedToken = useRef<string | null>(null)
 
   useEffect(() => {
     if (!token) {
@@ -18,6 +22,14 @@ export default function VerifyEmailPage() {
       setErrorMessage("This verification link is missing its token.")
       return
     }
+    // The verification token is single-use: React Strict Mode (dev) double-invokes
+    // this effect. Without this guard the second POST 400s on the now-consumed token
+    // and overwrites a real "success" with an error. A hard remount (new component
+    // instance) still can't be deduped from the client alone -- the API clears the
+    // token server-side, so a resubmit legitimately surfaces "expired".
+    if (attemptedToken.current === token) return
+    attemptedToken.current = token
+    setState("pending")
     api.auth
       .verifyEmail(token)
       .then(() => setState("success"))

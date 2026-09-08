@@ -687,3 +687,71 @@ describe("AuthProvider pendingInvitations", () => {
     expect(result.current.pendingInvitations).toEqual([]);
   });
 });
+
+describe("AuthProvider per-user browser state", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function seedPerUserState() {
+    localStorage.setItem("active_scope", JSON.stringify({ kind: "org", login: "acme" }));
+    localStorage.setItem("default_org", "acme");
+    localStorage.setItem("activity_last_seen_at", "2024-01-01T00:00:00Z");
+  }
+
+  function expectPerUserStateCleared() {
+    expect(localStorage.getItem("active_scope")).toBeNull();
+    expect(localStorage.getItem("default_org")).toBeNull();
+    expect(localStorage.getItem("activity_last_seen_at")).toBeNull();
+  }
+
+  const wrapper = ({ children }: { children: React.ReactNode }) => <AuthProvider>{children}</AuthProvider>;
+
+  it("clears the previous user's scope and activity marker on setSession (register flow)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) return Promise.resolve(new Response(null, { status: 401 }));
+        return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+      }),
+    );
+    seedPerUserState();
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+
+    act(() => {
+      result.current.setSession(makeJwt(9, "new-user@e.com"), { ...passwordUser, id: 9, email: "new-user@e.com" });
+    });
+
+    expectPerUserStateCleared();
+  });
+
+  it("clears the previous user's scope and activity marker on login", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/login")) {
+          return Promise.resolve(jsonResponse({ access_token: makeJwt(9, "new-user@e.com"), user: passwordUser }));
+        }
+        if (url.endsWith("/auth/me")) return Promise.resolve(new Response(null, { status: 401 }));
+        return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+      }),
+    );
+    seedPerUserState();
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+
+    await act(async () => {
+      await result.current.login("new-user@example.com", "supersecret1234");
+    });
+
+    expectPerUserStateCleared();
+  });
+});

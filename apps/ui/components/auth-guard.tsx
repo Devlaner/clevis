@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { Fragment, useEffect, useRef } from "react"
 import { useRouter, usePathname } from "next/navigation"
 import { X } from "@phosphor-icons/react"
 import { useAuth } from "@/lib/auth-context"
@@ -106,7 +106,13 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
           </button>
         </div>
       )}
-      {children}
+      {/* Remount the whole authenticated page subtree when the signed-in user
+          changes on the same tab. QueryAuthSync empties the shared QueryClient
+          synchronously on that transition, but a live QueryObserver memoizes its
+          last result, so a query keyed on `org` alone (e.g. ["tokens.resolve",
+          org]) would still paint the previous user's data for one frame. A fresh
+          key forces new observers that read the just-cleared cache instead. */}
+      <Fragment key={user.id}>{children}</Fragment>
     </>
   )
 }

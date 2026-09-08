@@ -1,5 +1,6 @@
 """Tests for individual GitHub security checks."""
 
+import time
 from unittest.mock import patch
 
 import httpx
@@ -174,6 +175,53 @@ def test_get_honors_the_actual_retry_after_value_not_a_blind_backoff():
 def test_get_caps_an_excessive_retry_after_value():
     request = httpx.Request("GET", "https://x/y")
     rate_limited = httpx.Response(429, headers={"Retry-After": "600"}, request=request)
+    ok_response = httpx.Response(200, json={"login": "acme"}, request=request)
+    responses = iter([rate_limited, ok_response])
+
+    with patch("time.sleep") as mock_sleep, patch("httpx.Client.get", side_effect=lambda url, headers: next(responses)):
+        _get("https://x/y", "tok")
+    mock_sleep.assert_called_once_with(_MAX_RETRY_AFTER_SECONDS)
+
+
+def test_get_falls_back_to_ratelimit_reset_when_no_retry_after():
+    # GitHub's docs say to wait until X-RateLimit-Reset (epoch seconds) when
+    # X-RateLimit-Remaining is 0 but no Retry-After was sent -- the common primary
+    # rate-limit shape. Previously this hit a blind 2**attempt = 1s retry that just
+    # burned the attempt budget.
+    request = httpx.Request("GET", "https://x/y")
+    reset_at = time.time() + 30
+    rate_limited = httpx.Response(
+        429, headers={"X-RateLimit-Reset": str(int(reset_at))}, request=request
+    )
+    ok_response = httpx.Response(200, json={"login": "acme"}, request=request)
+    responses = iter([rate_limited, ok_response])
+
+    with patch("time.sleep") as mock_sleep, patch("httpx.Client.get", side_effect=lambda url, headers: next(responses)):
+        result = _get("https://x/y", "tok")
+    assert result == {"login": "acme"}
+    slept = mock_sleep.call_args[0][0]
+    assert 20 <= slept <= 30
+
+
+def test_get_ignores_a_malformed_ratelimit_reset_and_waits_the_cap():
+    # A non-numeric X-RateLimit-Reset must not raise -- it falls through to the cap
+    # (same as having no usable header at all).
+    request = httpx.Request("GET", "https://x/y")
+    rate_limited = httpx.Response(429, headers={"X-RateLimit-Reset": "soon"}, request=request)
+    ok_response = httpx.Response(200, json={"login": "acme"}, request=request)
+    responses = iter([rate_limited, ok_response])
+
+    with patch("time.sleep") as mock_sleep, patch("httpx.Client.get", side_effect=lambda url, headers: next(responses)):
+        result = _get("https://x/y", "tok")
+    assert result == {"login": "acme"}
+    mock_sleep.assert_called_once_with(_MAX_RETRY_AFTER_SECONDS)
+
+
+def test_get_waits_the_cap_for_a_ratelimit_with_no_usable_header():
+    # A 429 with neither Retry-After nor X-RateLimit-Reset waits the full documented
+    # minimum backoff, not a fast exponential retry into the same limit.
+    request = httpx.Request("GET", "https://x/y")
+    rate_limited = httpx.Response(429, request=request)
     ok_response = httpx.Response(200, json={"login": "acme"}, request=request)
     responses = iter([rate_limited, ok_response])
 
@@ -479,7 +527,10 @@ def test_force_push_passes_when_disallowed():
     repos = [{"name": "api", "default_branch": "main"}]
 
     def fake_get(url, token):
-        return {"protection": {"allow_force_pushes": {"enabled": False}}}
+        # The dedicated /branches/{branch}/protection sub-resource -- this is where
+        # allow_force_pushes actually lives (the plain branch endpoint never returns it).
+        assert url.endswith("/repos/acme/api/branches/main/protection")
+        return {"allow_force_pushes": {"enabled": False}}
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("checks.github_checks._get", fake_get)
@@ -493,7 +544,8 @@ def test_force_push_fails_when_allowed():
     repos = [{"name": "api", "default_branch": "main"}]
 
     def fake_get(url, token):
-        return {"protection": {"allow_force_pushes": {"enabled": True}}}
+        assert url.endswith("/repos/acme/api/branches/main/protection")
+        return {"allow_force_pushes": {"enabled": True}}
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("checks.github_checks._get", fake_get)
@@ -503,8 +555,9 @@ def test_force_push_fails_when_allowed():
 
 
 def test_force_push_unprotected_branch_404_means_force_push_is_allowed():
-    # Regression test for #245: a 404 from the branches endpoint means the default
-    # branch has NO protection at all -- force pushes are unambiguously allowed, not
+    # Regression test for #245: a 404 from the branch-protection endpoint ("Branch not
+    # protected") means the default branch has NO protection at all -- force pushes are
+    # unambiguously allowed, not
     # merely "unknown". Previously this was excluded from the denominator entirely, so
     # an org where every repo's default branch was completely unprotected (the exact
     # worst case this check exists to catch) reported checked == 0 -> "error", never

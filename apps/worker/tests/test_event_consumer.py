@@ -583,6 +583,20 @@ def test_parse_alert_timestamp_falls_back_on_missing_or_malformed_value():
     assert event_consumer._parse_alert_timestamp("not-a-real-timestamp", fallback) == fallback
 
 
+def test_rollback_quietly_clears_the_transaction():
+    conn = MagicMock()
+    event_consumer._rollback_quietly(conn)
+    conn.rollback.assert_called_once_with()
+
+
+def test_rollback_quietly_swallows_a_failing_rollback():
+    conn = MagicMock()
+    conn.rollback.side_effect = psycopg.OperationalError("connection already gone")
+    # Must not raise -- the outer loop reconnects on a dead connection.
+    event_consumer._rollback_quietly(conn)
+    conn.rollback.assert_called_once_with()
+
+
 def _org_member(conn, tenant_id, login):
     with conn.cursor() as cur:
         cur.execute(f"SET app.tenant_id = {int(tenant_id)}")

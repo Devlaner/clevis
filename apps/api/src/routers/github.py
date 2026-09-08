@@ -11,11 +11,15 @@ itself (no `prefix=` passed to include_router in main.py), matching every
 sibling org-scoped router's convention of defining its complete path locally.
 """
 
+import asyncio
 import hashlib
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
+import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -40,6 +44,8 @@ from src.schemas.github import (
 )
 from src.services.github_client import GitHubClient, github_error as _github_error
 from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token
+
+logger = logging.getLogger(__name__)
 
 # repo_events.event_type is the lowercase vocabulary apps/worker's event_consumer.py and
 # backfill.py both write (issue #191/#192) -- the UI's event-feed.tsx filter chips match
@@ -261,6 +267,12 @@ _ACTIVITY_SUMMARY_DEFAULT_DAYS = 7
 # gateway timeout would force anyway).
 _SSE_POLL_INTERVAL_SECONDS = 5
 _SSE_MAX_DURATION_SECONDS = 15 * 60
+# Upper bound on a single snapshot read. The stream offloads the read to a threadpool
+# worker via anyio.to_thread.run_sync with abandon_on_cancel=False (the worker owns the
+# Session, so we must not abandon it mid-query) -- meaning a snapshot that blocks would
+# also block cancellation of the stream itself. A server-side statement_timeout lets
+# Postgres kill a stuck read so the worker returns and cancellation can proceed.
+_SSE_SNAPSHOT_TIMEOUT_MS = 20_000
 
 
 def _org_installation_connected(db: Session, org_login: str, ctx: OrgContext) -> bool:
@@ -289,10 +301,63 @@ def _activity_summary_snapshot(db: Session, org_login: str, ctx: OrgContext, day
     )
 
 
-def _activity_summary_stream(db: Session, org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
-    """SSE body generator. Runs in Starlette's threadpool iterator (this route is a plain
-    `def`, matching every other handler in this file, so FastAPI already executes it off
-    the event loop) -- the blocking time.sleep below does not stall other requests.
+def _teardown_stream_session(db: Session) -> None:
+    # Mirrors src.core.db.get_db's teardown: app.tenant_id/app.user_id are set with plain
+    # SET (not SET LOCAL -- see set_tenant_session_context), so they persist on the pooled
+    # connection unless RESET before checkin. If any step here fails it's unclear whether
+    # the RESET took, so invalidate() to force the pool to discard the DBAPI connection
+    # rather than risk handing a still-tenant-scoped one to an unrelated later request.
+    try:
+        db.rollback()
+        db.execute(text("RESET app.tenant_id"))
+        db.execute(text("RESET app.user_id"))
+        db.commit()
+        db.close()
+    except Exception:
+        logger.exception("failed to reset SSE stream session context; invalidating connection instead of reusing it")
+        db.invalidate()
+
+
+@contextmanager
+def _stream_poll_session():
+    """A fresh short-lived Session for one poll, torn down (and its connection returned to
+    the pool) before the caller sleeps until the next poll. The stream must NOT hold one
+    Session open for its whole <=15-min lifetime: the Session keeps a pooled connection
+    checked out for as long as it has an open transaction, so a handful of idle streams --
+    openable by any org member -- would otherwise exhaust the connection pool."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        _teardown_stream_session(db)
+
+
+def _run_activity_summary_poll(session_scope, org_login: str, ctx: OrgContext, days: int) -> ActivitySummaryResponse:
+    """One snapshot read on its own session (see _stream_poll_session). Runs in a
+    threadpool worker via anyio.to_thread; the SET LOCAL statement_timeout bounds a read
+    that blocks so stream cancellation isn't stuck waiting on Postgres."""
+    with session_scope() as db:
+        set_tenant_session_context(db, ctx.org.tenant_id, ctx.membership.user_id)
+        db.execute(text(f"SET LOCAL statement_timeout = {int(_SSE_SNAPSHOT_TIMEOUT_MS)}"))
+        return _activity_summary_snapshot(db, org_login, ctx, days)
+
+
+async def _activity_summary_stream(
+    org_login: str,
+    ctx: OrgContext,
+    days: int,
+    poll_interval: float = _SSE_POLL_INTERVAL_SECONDS,
+    *,
+    session_scope=_stream_poll_session,
+):
+    """Async SSE body generator. The between-poll wait is `await asyncio.sleep`, not a
+    blocking `time.sleep` on a threadpool worker -- a stream stays open up to
+    _SSE_MAX_DURATION_SECONDS (15 min), and the previous sync generator pinned one of
+    Starlette's ~40 shared threadpool tokens for that whole time, so ~40 concurrent
+    EventSource connections (openable by any org member) could starve every other
+    endpoint. Each poll's DB snapshot runs on its own short-lived session, offloaded to a
+    thread, so nothing DB-side is held across the sleep either (`session_scope` is
+    injectable only so tests can reuse their transaction-scoped fixture session).
 
     Only emits a real `activity_summary` event when the aggregate actually changed since
     the last poll (comparing on totals/connected, not generated_at, which changes every
@@ -302,14 +367,14 @@ def _activity_summary_stream(db: Session, org_login: str, ctx: OrgContext, days:
     deadline = time.monotonic() + _SSE_MAX_DURATION_SECONDS
     last_key: tuple | None = None
     while time.monotonic() < deadline:
-        snapshot = _activity_summary_snapshot(db, org_login, ctx, days)
+        snapshot = await anyio.to_thread.run_sync(_run_activity_summary_poll, session_scope, org_login, ctx, days)
         key = (snapshot.connected, tuple(sorted((t.repo, t.event_type, t.count) for t in snapshot.totals)))
         if key != last_key:
             yield f"event: activity_summary\ndata: {snapshot.model_dump_json()}\n\n"
             last_key = key
         else:
             yield ": heartbeat\n\n"
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
 
 
 @router.get("/github/orgs/{org_login}/activity-summary", response_model=ActivitySummaryResponse)
@@ -332,37 +397,20 @@ def org_activity_summary(
     return _activity_summary_snapshot(db, org_login, ctx, days)
 
 
-def _activity_summary_stream_session(org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
-    """Owns a dedicated DB session for the SSE connection's whole lifetime instead of the
-    request-scoped `Depends(get_db)` session: FastAPI 0.116.1 runs a yield-dependency's
-    cleanup as soon as the route handler *returns* the StreamingResponse object, not after
-    this generator finishes streaming its body -- a borrowed request session would already
-    be closed (and its tenant/user SET vars RESET) before this loop's first poll runs."""
-    db = SessionLocal()
-    try:
-        set_tenant_session_context(db, ctx.org.tenant_id, ctx.membership.user_id)
-        yield from _activity_summary_stream(db, org_login, ctx, days, poll_interval)
-    finally:
-        try:
-            db.rollback()
-            db.execute(text("RESET app.tenant_id"))
-            db.execute(text("RESET app.user_id"))
-            db.commit()
-        finally:
-            db.close()
-
-
 @router.get("/github/orgs/{org_login}/activity-summary/stream")
-def org_activity_summary_stream(
+async def org_activity_summary_stream(
     org_login: str,
     days: int = _ACTIVITY_SUMMARY_DEFAULT_DAYS,
     ctx: OrgContext = Depends(require_org_role(min_role="member")),
 ):
     """SSE channel pushing the same shape org_activity_summary returns, whenever it
-    changes. First concrete piece of S6's "+ SSE" half -- see _activity_summary_stream
-    and _activity_summary_stream_session."""
+    changes. First concrete piece of S6's "+ SSE" half -- see _activity_summary_stream.
+
+    No `Depends(get_db)`: FastAPI 0.116.1 tears a yield-dependency down as soon as the
+    handler *returns* the StreamingResponse, before the body has streamed -- so the
+    stream opens its own per-poll sessions instead (see _stream_poll_session)."""
     days = max(1, min(days, _ACTIVITY_SUMMARY_MAX_DAYS))
-    return StreamingResponse(_activity_summary_stream_session(org_login, ctx, days), media_type="text/event-stream")
+    return StreamingResponse(_activity_summary_stream(org_login, ctx, days), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------------------

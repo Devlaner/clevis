@@ -38,7 +38,21 @@ HEARTBEAT_FILE = Path("/tmp/worker_heartbeat")
 _MAX_POLL_SECONDS = 30
 
 # psycopg.connect() expects plain postgresql://, not the SQLAlchemy +psycopg dialect prefix
-_DB_URL = settings.database_url.get_secret_value().replace("postgresql+psycopg://", "postgresql://")
+_CONNECT_TIMEOUT_SECONDS = 5
+
+
+def _plain_db_url(url: str) -> str:
+    """Strip the SQLAlchemy dialect prefix and bound connection establishment. Without an
+    explicit connect_timeout, psycopg.connect() can block indefinitely on a network blip /
+    paused pooler -- and it's called on the hot poll-loop path (and, worse, synchronously in
+    _JobHeartbeat.__enter__ after a job is already committed as 'processing'), so an
+    unbounded hang there stalls the worker until the 60s docker healthcheck restarts it."""
+    stripped = url.replace("postgresql+psycopg://", "postgresql://")
+    sep = "&" if "?" in stripped else "?"
+    return f"{stripped}{sep}connect_timeout={_CONNECT_TIMEOUT_SECONDS}"
+
+
+_DB_URL = _plain_db_url(settings.database_url.get_secret_value())
 
 # Shared cap on jobs.retry_count, incremented by both the reclaim sweep (a worker
 # crashed mid-job) and a transient-failure requeue in process_job — either path marks
