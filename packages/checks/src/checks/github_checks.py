@@ -34,13 +34,29 @@ _MAX_RETRY_AFTER_SECONDS = 60
 def _retry_delay_seconds(r: httpx.Response, attempt: int) -> float:
     """Prefer the server's own Retry-After value (GitHub's rate-limit responses include
     one) over a blind exponential backoff -- retrying before the window it asked for just
-    burns the fixed attempt budget hitting the same limit again."""
+    burns the fixed attempt budget hitting the same limit again. Falls back to
+    X-RateLimit-Reset (epoch seconds) when Retry-After is absent -- GitHub's docs say to
+    wait until that reset time when X-RateLimit-Remaining is 0 but no Retry-After was sent.
+    If neither header is usable, a 429 or a secondary-limit 403 waits the full cap
+    (GitHub's documented minimum rate-limit backoff) rather than a fast exponential retry
+    that would just hit the same limit again; any other status (a plain 5xx) still uses
+    exponential backoff. Ported from apps/worker/src/backfill.py's copy of this contract."""
     raw = r.headers.get("Retry-After")
     if raw is not None:
         try:
             return min(float(raw), _MAX_RETRY_AFTER_SECONDS)
         except ValueError:
             pass
+    reset_raw = r.headers.get("X-RateLimit-Reset")
+    if reset_raw is not None:
+        try:
+            delay = float(reset_raw) - time.time()
+            if delay > 0:
+                return min(delay, _MAX_RETRY_AFTER_SECONDS)
+        except ValueError:
+            pass
+    if r.status_code == 429 or _is_secondary_rate_limit(r):
+        return _MAX_RETRY_AFTER_SECONDS
     return 2**attempt
 
 
@@ -349,14 +365,21 @@ class DefaultBranchNoForcePushCheck(Check):
         for repo in repos:
             branch = repo.get("default_branch")
             try:
-                details = _get(f"{base_url}/repos/{owner}/{repo['name']}/branches/{branch}", token)
+                # The dedicated branch-protection sub-resource -- the plain
+                # /repos/{owner}/{repo}/branches/{branch} response only carries a reduced
+                # `protection` object (enabled + required_status_checks) and never
+                # `allow_force_pushes`, so reading force-push status off it always saw
+                # None and this check could never return "fail" for a protected branch.
+                details = _get(
+                    f"{base_url}/repos/{owner}/{repo['name']}/branches/{branch}/protection", token
+                )
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code == 404:
-                    # No branch protection at all -- force pushes are unambiguously
-                    # allowed, not merely "unknown". Bucketing this with the genuine
-                    # unknowns below meant an org where every repo's default branch had
-                    # no protection at all reported checked == 0 -> "error", never the
-                    # "fail" this check exists to catch.
+                    # 404 here means "Branch not protected" -- no protection rules at all,
+                    # so force pushes are unambiguously allowed, not merely "unknown".
+                    # Bucketing this with the genuine unknowns below meant an org where
+                    # every repo's default branch had no protection reported checked == 0
+                    # -> "error", never the "fail" this check exists to catch.
                     checked += 1
                     force_push_allowed += 1
                     continue
@@ -370,8 +393,7 @@ class DefaultBranchNoForcePushCheck(Check):
                 unknown += 1
                 continue
             checked += 1
-            protection = details.get("protection") or {}
-            allow_force_pushes = (protection.get("allow_force_pushes") or {}).get("enabled")
+            allow_force_pushes = (details.get("allow_force_pushes") or {}).get("enabled")
             if allow_force_pushes:
                 force_push_allowed += 1
         if checked == 0:
