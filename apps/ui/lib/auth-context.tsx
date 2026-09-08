@@ -38,6 +38,21 @@ const BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8080"
 const _LOGOUT_WARNING =
   "Logged out locally, but the server session may still be active. Avoid shared devices until you can retry."
 
+// Per-user browser state that must not survive an identity change on this tab.
+// active_scope / default_org would point a new user at the previous user's org
+// for owner-scoped requests; activity_last_seen_at would mis-seed their unread
+// count. Cleared on logout AND on login/setSession (the public /register route
+// calls setSession() while a session is already active, replacing the user
+// without ever going through logout()).
+function clearPerUserBrowserState(): void {
+  clearActiveScope()
+  try {
+    localStorage.removeItem("activity_last_seen_at")
+  } catch {
+    // best-effort; nothing to do if storage is unavailable
+  }
+}
+
 function parseJwtPayload(token: string): AuthUser | null {
   try {
     const segment = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")
@@ -89,8 +104,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     // Drop per-user browser state so a different user on this browser doesn't
     // inherit the previous user's org scope / unread-activity marker. The React
     // Query cache is cleared separately by QueryAuthSync on the user-id change.
-    clearActiveScope()
-    localStorage.removeItem("activity_last_seen_at")
+    clearPerUserBrowserState()
     setToken(null)
     setUser(null)
     setAuthUnconfirmed(false)
@@ -225,6 +239,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     bumpSessionEpoch()
     clearLogoutWarning()
+    clearPerUserBrowserState()
     localStorage.setItem(_TOKEN_KEY, access_token)
     setToken(access_token)
     setUser(u)
@@ -241,6 +256,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     (jwtToken: string, authUser: AuthUser, invitations: PendingInvitationSummary[] = []) => {
       bumpSessionEpoch()
       clearLogoutWarning()
+      clearPerUserBrowserState()
       localStorage.setItem(_TOKEN_KEY, jwtToken)
       setToken(jwtToken)
       setUser(authUser)

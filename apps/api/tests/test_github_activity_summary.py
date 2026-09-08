@@ -269,6 +269,24 @@ async def test_stream_session_wrapper_opens_and_closes_its_own_session(monkeypat
     fake_db.close.assert_called_once()
 
 
+def test_teardown_stream_session_invalidates_connection_when_reset_fails():
+    """Regression (CodeRabbit finding on PR #405): app.tenant_id/app.user_id are set with
+    plain SET, so a teardown that fails partway (RESET or commit raises) must discard the
+    pooled connection rather than close() it back into the pool still tenant-scoped --
+    same contract as src.core.db.get_db's teardown."""
+    from unittest.mock import MagicMock
+
+    from src.routers.github import _teardown_stream_session
+
+    db = MagicMock()
+    db.execute.side_effect = RuntimeError("connection dropped mid-RESET")
+
+    _teardown_stream_session(db)
+
+    db.invalidate.assert_called_once()
+    db.close.assert_not_called()
+
+
 @pytest.fixture()
 def rbac_ctx_factory(db):
     from src.core.rbac import OrgContext, set_tenant_session_context

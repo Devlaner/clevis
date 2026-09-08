@@ -13,6 +13,7 @@ sibling org-scoped router's convention of defining its complete path locally.
 
 import asyncio
 import hashlib
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -42,6 +43,8 @@ from src.schemas.github import (
 )
 from src.services.github_client import GitHubClient, github_error as _github_error
 from src.services.token_resolution import NoGitHubTokenAvailable, resolve_org_token
+
+logger = logging.getLogger(__name__)
 
 # repo_events.event_type is the lowercase vocabulary apps/worker's event_consumer.py and
 # backfill.py both write (issue #191/#192) -- the UI's event-feed.tsx filter chips match
@@ -338,13 +341,20 @@ def org_activity_summary(
 
 
 def _teardown_stream_session(db: Session) -> None:
+    # Mirrors src.core.db.get_db's teardown: app.tenant_id/app.user_id are set with plain
+    # SET (not SET LOCAL -- see set_tenant_session_context), so they persist on the pooled
+    # connection unless RESET before checkin. If any step here fails it's unclear whether
+    # the RESET took, so invalidate() to force the pool to discard the DBAPI connection
+    # rather than risk handing a still-tenant-scoped one to an unrelated later request.
     try:
         db.rollback()
         db.execute(text("RESET app.tenant_id"))
         db.execute(text("RESET app.user_id"))
         db.commit()
-    finally:
         db.close()
+    except Exception:
+        logger.exception("failed to reset SSE stream session context; invalidating connection instead of reusing it")
+        db.invalidate()
 
 
 async def _activity_summary_stream_session(org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):

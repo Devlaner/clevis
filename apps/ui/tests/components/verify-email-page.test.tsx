@@ -55,4 +55,43 @@ describe("VerifyEmailPage", () => {
     await screen.findByText(/missing its token/i);
     expect(verifyEmailMock).not.toHaveBeenCalled();
   });
+
+  it("submits the new token when the URL token changes", async () => {
+    mockSearchParams = new URLSearchParams({ token: "first-token" });
+    verifyEmailMock.mockResolvedValue({ ok: true });
+
+    const { rerender } = render(<VerifyEmailPage />);
+    await screen.findByText(/your email is verified/i);
+    expect(verifyEmailMock).toHaveBeenCalledWith("first-token");
+
+    mockSearchParams = new URLSearchParams({ token: "second-token" });
+    rerender(<VerifyEmailPage />);
+
+    await vi.waitFor(() => expect(verifyEmailMock).toHaveBeenCalledWith("second-token"));
+  });
+
+  it("submits once a token appears after initially being absent", async () => {
+    verifyEmailMock.mockResolvedValue({ ok: true });
+
+    const { rerender } = render(<VerifyEmailPage />);
+    await screen.findByText(/missing its token/i);
+
+    mockSearchParams = new URLSearchParams({ token: "late-token" });
+    rerender(<VerifyEmailPage />);
+
+    await vi.waitFor(() => expect(verifyEmailMock).toHaveBeenCalledWith("late-token"));
+  });
+
+  it("does not resubmit the same token on re-render (Strict Mode replay)", async () => {
+    mockSearchParams = new URLSearchParams({ token: "stable-token" });
+    verifyEmailMock.mockResolvedValue({ ok: true });
+
+    const { rerender } = render(<VerifyEmailPage />);
+    await screen.findByText(/your email is verified/i);
+
+    rerender(<VerifyEmailPage />);
+    rerender(<VerifyEmailPage />);
+
+    expect(verifyEmailMock).toHaveBeenCalledTimes(1);
+  });
 });
