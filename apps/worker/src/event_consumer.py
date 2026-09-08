@@ -434,6 +434,18 @@ def _process_entry(pg_conn: psycopg.Connection, redis_client: redis.Redis, entry
     redis_client.xack(_STREAM_KEY, _GROUP_NAME, entry_id)
 
 
+def _rollback_quietly(pg_conn: psycopg.Connection) -> None:
+    """Clear an aborted transaction after a failed entry so the shared connection is
+    usable for the rest of the batch. Without this, a psycopg error on one entry leaves
+    pg_conn in InFailedSqlTransaction and every subsequent entry in the same
+    xreadgroup/xclaim batch fails its first execute -- the per-entry isolation the
+    callers' comments claim doesn't actually hold at batch granularity."""
+    try:
+        pg_conn.rollback()
+    except Exception:  # noqa: BLE001 -- best effort; the outer loop reconnects on a dead conn
+        log.exception("rollback after a failed stream entry itself failed")
+
+
 def _sweep_pending(pg_conn: psycopg.Connection, redis_client: redis.Redis) -> None:
     """Reclaims entries idle longer than _RECLAIM_IDLE_MS (a prior consumer likely
     crashed mid-processing), or drops ones that have failed too many times."""
@@ -461,6 +473,7 @@ def _sweep_pending(pg_conn: psycopg.Connection, redis_client: redis.Redis) -> No
             _process_entry(pg_conn, redis_client, entry_id, fields)
         except Exception:
             log.exception("failed to process reclaimed stream entry %s", entry_id)
+            _rollback_quietly(pg_conn)
 
 
 def run() -> None:
@@ -497,8 +510,11 @@ def run() -> None:
                             # Left unacked on purpose -- _sweep_pending reclaims it next
                             # pass once _RECLAIM_IDLE_MS has elapsed, same "one bad
                             # entry doesn't take down the loop" posture as
-                            # worker.py's process_job.
+                            # worker.py's process_job. Roll back first so an aborted
+                            # transaction from this entry doesn't poison the rest of
+                            # the batch on the shared connection.
                             log.exception("failed to process stream entry %s", entry_id)
+                            _rollback_quietly(pg_conn)
         except (psycopg.OperationalError, redis.RedisError) as error:
             log.error("event consumer connection error: %s", type(error).__name__)
             time.sleep(5)
