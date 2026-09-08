@@ -51,11 +51,19 @@ def exists_for_user(db: Session, owner: str, user_id: int) -> bool:
     )
 
 
-def list_recent(db: Session, owner: str, limit: int = 30) -> list[dict]:
+def list_recent(
+    db: Session, owner: str, limit: int = 30, scanned_by_user_id: int | None = None
+) -> list[dict]:
+    """Newest-first scan summaries for ``owner``. ``scanned_by_user_id``, when given,
+    restricts the result to that user's own scans -- used on a personal endpoint when
+    the caller's only claim to this owner's history is a prior BYO-PAT scan they ran
+    themselves (see ``_user_history_scope`` in the analytics router), same as
+    ``list_for_export``."""
+    query = db.query(ScanResult).filter(ScanResult.owner == owner)
+    if scanned_by_user_id is not None:
+        query = query.filter(ScanResult.scanned_by_user_id == scanned_by_user_id)
     rows = (
-        db.query(ScanResult)
-        .filter(ScanResult.owner == owner)
-        .order_by(ScanResult.created_at.desc(), ScanResult.id.desc())
+        query.order_by(ScanResult.created_at.desc(), ScanResult.id.desc())
         .limit(limit)
         .all()
     )

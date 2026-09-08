@@ -43,6 +43,10 @@ class _CachedToken:
 
 _cache: dict[int, _CachedToken] = {}
 _lock = threading.Lock()
+# One mint lock per installation_id, so a stampede for the same uncached
+# installation collapses into a single GitHub call without serialising mints for
+# *other* installations (which holding _lock across the HTTP POST used to do).
+_mint_locks: dict[int, threading.Lock] = {}
 
 
 def _require_config() -> tuple[str, str]:
@@ -127,14 +131,38 @@ def delete_installation(installation_id: int) -> None:
     resp.raise_for_status()
 
 
-def get_installation_token(installation_id: int) -> str:
-    """Return a valid installation access token, minting and caching it as needed."""
+def _cached_token(installation_id: int) -> str | None:
     with _lock:
         cached = _cache.get(installation_id)
-        if cached and cached.expires_at - _TOKEN_EXPIRY_MARGIN_SECONDS > time.time():
-            return cached.token
+    if cached and cached.expires_at - _TOKEN_EXPIRY_MARGIN_SECONDS > time.time():
+        return cached.token
+    return None
+
+
+def get_installation_token(installation_id: int) -> str:
+    """Return a valid installation access token, minting and caching it as needed.
+
+    The blocking mint (`_request_installation_token` -- an httpx POST to GitHub,
+    up to a 20s timeout) is done *outside* `_lock`. Holding the shared cache lock
+    across that call serialised token resolution for every installation behind a
+    single slow GitHub response. A per-installation `_mint_locks` entry still
+    collapses a concurrent stampede for the same uncached installation into one
+    mint, and the cache is re-checked after acquiring it."""
+    hit = _cached_token(installation_id)
+    if hit is not None:
+        return hit
+
+    with _lock:
+        mint_lock = _mint_locks.setdefault(installation_id, threading.Lock())
+
+    with mint_lock:
+        # Another thread may have minted while we waited for mint_lock.
+        hit = _cached_token(installation_id)
+        if hit is not None:
+            return hit
         fresh = _request_installation_token(installation_id)
-        _cache[installation_id] = fresh
+        with _lock:
+            _cache[installation_id] = fresh
         return fresh.token
 
 
@@ -167,3 +195,4 @@ def clear_cache() -> None:
     """Drop all cached installation tokens (used by tests and on config change)."""
     with _lock:
         _cache.clear()
+        _mint_locks.clear()

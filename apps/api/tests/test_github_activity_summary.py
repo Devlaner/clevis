@@ -176,19 +176,28 @@ def test_activity_summary_non_member_forbidden(db, acme_org):
 # ---------------------------------------------------------------------------
 # SSE stream -- tested against the generator function directly (not through
 # TestClient's own streaming, which would require a real multi-second wait per
-# poll interval); a tiny poll_interval keeps these tests fast.
+# poll interval); a tiny poll_interval keeps these tests fast. The generators are
+# async (the between-poll wait is `await asyncio.sleep`, not a blocking
+# `time.sleep` on a threadpool worker -- see _activity_summary_stream).
 # ---------------------------------------------------------------------------
 
 
-def test_stream_emits_a_real_event_first_then_heartbeats_when_unchanged(db, acme_org_with_installation, rbac_ctx_factory):
+async def _take(agen, n):
+    out = []
+    for _ in range(n):
+        out.append(await agen.__anext__())
+    return out
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_a_real_event_first_then_heartbeats_when_unchanged(db, acme_org_with_installation, rbac_ctx_factory):
     today = date.today()
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/api", event_type="push", day=today, count=1)
     ctx = rbac_ctx_factory(acme_org_with_installation)
 
     gen = _activity_summary_stream(db, "acme", ctx, days=7, poll_interval=0)
-    first = next(gen)
-    second = next(gen)
-    gen.close()
+    first, second = await _take(gen, 2)
+    await gen.aclose()
 
     assert first.startswith("event: activity_summary\ndata: ")
     payload = json.loads(first.removeprefix("event: activity_summary\ndata: ").strip())
@@ -196,32 +205,35 @@ def test_stream_emits_a_real_event_first_then_heartbeats_when_unchanged(db, acme
     assert second == ": heartbeat\n\n"
 
 
-def test_stream_emits_a_new_event_when_the_aggregate_changes(db, acme_org_with_installation, rbac_ctx_factory):
+@pytest.mark.asyncio
+async def test_stream_emits_a_new_event_when_the_aggregate_changes(db, acme_org_with_installation, rbac_ctx_factory):
     today = date.today()
     ctx = rbac_ctx_factory(acme_org_with_installation)
 
     gen = _activity_summary_stream(db, "acme", ctx, days=7, poll_interval=0)
-    first = next(gen)
+    (first,) = await _take(gen, 1)
     _insert_daily_count(db, acme_org_with_installation.tenant_id, repo="acme/api", event_type="push", day=today, count=1)
-    second = next(gen)
-    gen.close()
+    (second,) = await _take(gen, 1)
+    await gen.aclose()
 
     assert json.loads(first.removeprefix("event: activity_summary\ndata: ").strip())["totals"] == []
     assert second.startswith("event: activity_summary\ndata: ")
 
 
-def test_stream_reports_unconnected_for_a_legacy_pat_org(db, acme_org, rbac_ctx_factory):
+@pytest.mark.asyncio
+async def test_stream_reports_unconnected_for_a_legacy_pat_org(db, acme_org, rbac_ctx_factory):
     ctx = rbac_ctx_factory(acme_org)
 
     gen = _activity_summary_stream(db, "acme", ctx, days=7, poll_interval=0)
-    first = next(gen)
-    gen.close()
+    (first,) = await _take(gen, 1)
+    await gen.aclose()
 
     payload = json.loads(first.removeprefix("event: activity_summary\ndata: ").strip())
     assert payload["connected"] is False
 
 
-def test_stream_session_wrapper_opens_and_closes_its_own_session(monkeypatch):
+@pytest.mark.asyncio
+async def test_stream_session_wrapper_opens_and_closes_its_own_session(monkeypatch):
     """Regression test (CodeRabbit finding on PR #349): the SSE route must not reuse the
     request-scoped `Depends(get_db)` session, which FastAPI 0.116.1 closes (and RESETs its
     tenant/user SET vars on) as soon as the route handler returns the StreamingResponse --
@@ -238,7 +250,7 @@ def test_stream_session_wrapper_opens_and_closes_its_own_session(monkeypatch):
 
     captured: dict = {}
 
-    def _fake_inner_stream(db, org_login, ctx, days, poll_interval):
+    async def _fake_inner_stream(db, org_login, ctx, days, poll_interval):
         captured["db"] = db
         yield "event: activity_summary\ndata: {}\n\n"
 
@@ -246,8 +258,8 @@ def test_stream_session_wrapper_opens_and_closes_its_own_session(monkeypatch):
 
     ctx = SimpleNamespace(org=SimpleNamespace(tenant_id=42), membership=SimpleNamespace(user_id=7))
     gen = github_module._activity_summary_stream_session("acme", ctx, days=1, poll_interval=0)
-    first = next(gen)
-    gen.close()
+    (first,) = await _take(gen, 1)
+    await gen.aclose()
 
     assert first == "event: activity_summary\ndata: {}\n\n"
     assert captured["db"] is fake_db

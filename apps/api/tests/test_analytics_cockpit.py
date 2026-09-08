@@ -97,6 +97,9 @@ def test_cockpit_no_token_available_returns_400(http):
 
 def test_cockpit_success_all_sources(http, db, mock_user):
     org = org_repo.get_or_create(db, github_login="acme")
+    # The score trend is gated the same way /me/analytics/history is -- the caller
+    # must be a member of the matching org (or have their own BYO-PAT scans).
+    org_membership_repo.get_or_create(db, org_id=org.id, user_id=mock_user.id, role="member")
     scan_results_repo.insert(db, owner="acme", score=70, total_checks=5, failed_checks=1, checks=[], tenant_id=org.tenant_id)
     scan_results_repo.insert(db, owner="acme", score=85, total_checks=5, failed_checks=0, checks=[], tenant_id=org.tenant_id)
     for status in ("done", "done", "done", "failed"):
@@ -126,6 +129,27 @@ def test_cockpit_success_all_sources(http, db, mock_user):
 
 
 def test_cockpit_no_scans_yet(http, db, mock_user):
+    patchers = _patch_all()
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["latest_score"] is None
+    assert body["score_trend"] == []
+
+
+def test_cockpit_hides_score_trend_from_a_non_member_byo_pat_caller(http, db, mock_user):
+    # A connected org with scan history exists, but mock_user has no membership and
+    # never ran a scan of it -- resolving a BYO-PAT for the login must not expose the
+    # org's score history, same gate as /me/analytics/history.
+    org = org_repo.get_or_create(db, github_login="acme")
+    scan_results_repo.insert(db, owner="acme", score=70, total_checks=5, failed_checks=1, checks=[], tenant_id=org.tenant_id)
+
     patchers = _patch_all()
     _start_all(patchers)
     try:

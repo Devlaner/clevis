@@ -25,8 +25,6 @@ existing memberships are left untouched rather than being wiped on a transient f
 
 import logging
 
-import httpx
-
 from sqlalchemy.orm import Session
 
 from src.core.db import Org, User, set_session_user
@@ -86,7 +84,12 @@ def sync_org_admin_memberships(db: Session, user: User, user_token: str) -> None
     set_session_user(db, user.id)
     try:
         memberships = github_oauth.list_user_org_memberships(user_token)
-    except httpx.HTTPError:
+    except Exception:  # noqa: BLE001 -- best-effort; must never block login
+        # Not just httpx.HTTPError: a shape drift in GitHub's response (a missing
+        # `organization`/`id`/`login`/`role` key, a non-JSON body) raises KeyError /
+        # TypeError / ValueError, which previously escaped this handler and 500'd the
+        # OAuth callback -- contrary to the module docstring's "logged and swallowed".
+        # Matches connect_admin_org_from_token's own catch above.
         logger.warning(
             "Failed to list GitHub org memberships for user %s during org provisioning", user.id, exc_info=True
         )

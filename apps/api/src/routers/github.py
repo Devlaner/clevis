@@ -11,11 +11,13 @@ itself (no `prefix=` passed to include_router in main.py), matching every
 sibling org-scoped router's convention of defining its complete path locally.
 """
 
+import asyncio
 import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -289,10 +291,13 @@ def _activity_summary_snapshot(db: Session, org_login: str, ctx: OrgContext, day
     )
 
 
-def _activity_summary_stream(db: Session, org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
-    """SSE body generator. Runs in Starlette's threadpool iterator (this route is a plain
-    `def`, matching every other handler in this file, so FastAPI already executes it off
-    the event loop) -- the blocking time.sleep below does not stall other requests.
+async def _activity_summary_stream(db: Session, org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
+    """Async SSE body generator. The between-poll wait is `await asyncio.sleep`, not a
+    blocking `time.sleep` on a threadpool worker -- a stream stays open up to
+    _SSE_MAX_DURATION_SECONDS (15 min), and the previous sync generator pinned one of
+    Starlette's ~40 shared threadpool tokens for that whole time, so ~40 concurrent
+    EventSource connections (openable by any org member) could starve every other
+    endpoint. Only the short DB snapshot is offloaded to a thread.
 
     Only emits a real `activity_summary` event when the aggregate actually changed since
     the last poll (comparing on totals/connected, not generated_at, which changes every
@@ -302,14 +307,14 @@ def _activity_summary_stream(db: Session, org_login: str, ctx: OrgContext, days:
     deadline = time.monotonic() + _SSE_MAX_DURATION_SECONDS
     last_key: tuple | None = None
     while time.monotonic() < deadline:
-        snapshot = _activity_summary_snapshot(db, org_login, ctx, days)
+        snapshot = await anyio.to_thread.run_sync(_activity_summary_snapshot, db, org_login, ctx, days)
         key = (snapshot.connected, tuple(sorted((t.repo, t.event_type, t.count) for t in snapshot.totals)))
         if key != last_key:
             yield f"event: activity_summary\ndata: {snapshot.model_dump_json()}\n\n"
             last_key = key
         else:
             yield ": heartbeat\n\n"
-        time.sleep(poll_interval)
+        await asyncio.sleep(poll_interval)
 
 
 @router.get("/github/orgs/{org_login}/activity-summary", response_model=ActivitySummaryResponse)
@@ -332,28 +337,37 @@ def org_activity_summary(
     return _activity_summary_snapshot(db, org_login, ctx, days)
 
 
-def _activity_summary_stream_session(org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
+def _teardown_stream_session(db: Session) -> None:
+    try:
+        db.rollback()
+        db.execute(text("RESET app.tenant_id"))
+        db.execute(text("RESET app.user_id"))
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _activity_summary_stream_session(org_login: str, ctx: OrgContext, days: int, poll_interval: float = _SSE_POLL_INTERVAL_SECONDS):
     """Owns a dedicated DB session for the SSE connection's whole lifetime instead of the
     request-scoped `Depends(get_db)` session: FastAPI 0.116.1 runs a yield-dependency's
     cleanup as soon as the route handler *returns* the StreamingResponse object, not after
     this generator finishes streaming its body -- a borrowed request session would already
-    be closed (and its tenant/user SET vars RESET) before this loop's first poll runs."""
+    be closed (and its tenant/user SET vars RESET) before this loop's first poll runs.
+
+    The sync session is only ever touched from one thread at a time (each blocking call is
+    awaited via anyio.to_thread before the next starts), so it's safe to shuttle it
+    between threadpool workers this way."""
     db = SessionLocal()
     try:
-        set_tenant_session_context(db, ctx.org.tenant_id, ctx.membership.user_id)
-        yield from _activity_summary_stream(db, org_login, ctx, days, poll_interval)
+        await anyio.to_thread.run_sync(set_tenant_session_context, db, ctx.org.tenant_id, ctx.membership.user_id)
+        async for chunk in _activity_summary_stream(db, org_login, ctx, days, poll_interval):
+            yield chunk
     finally:
-        try:
-            db.rollback()
-            db.execute(text("RESET app.tenant_id"))
-            db.execute(text("RESET app.user_id"))
-            db.commit()
-        finally:
-            db.close()
+        await anyio.to_thread.run_sync(_teardown_stream_session, db)
 
 
 @router.get("/github/orgs/{org_login}/activity-summary/stream")
-def org_activity_summary_stream(
+async def org_activity_summary_stream(
     org_login: str,
     days: int = _ACTIVITY_SUMMARY_DEFAULT_DAYS,
     ctx: OrgContext = Depends(require_org_role(min_role="member")),
