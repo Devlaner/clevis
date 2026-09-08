@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react"
 import type { PendingInvitationSummary } from "@/lib/api/types"
+import { clearActiveScope } from "@/lib/active-scope"
 
 export interface AuthUser {
   id: number
@@ -85,6 +86,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
       .catch(() => setLogoutWarning(_LOGOUT_WARNING))
     localStorage.removeItem(_TOKEN_KEY)
+    // Drop per-user browser state so a different user on this browser doesn't
+    // inherit the previous user's org scope / unread-activity marker. The React
+    // Query cache is cleared separately by QueryAuthSync on the user-id change.
+    clearActiveScope()
+    localStorage.removeItem("activity_last_seen_at")
     setToken(null)
     setUser(null)
     setAuthUnconfirmed(false)

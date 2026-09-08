@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { Toaster } from "@/components/ui/toast"
 import { QueryProvider } from "@/components/query-provider"
+import { QueryAuthSync } from "@/components/query-auth-sync"
 import { AuthProvider } from "@/lib/auth-context"
 import { AuthGuard } from "@/components/auth-guard"
 import { ShellRouter } from "@/components/shell-router"
@@ -58,6 +59,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <TooltipProvider>
             <IconProvider>
               <AuthProvider>
+                <QueryAuthSync />
                 <AuthGuard>
                   <ShellRouter>{children}</ShellRouter>
                   <Toaster />

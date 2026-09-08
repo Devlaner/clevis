@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useSearchParams } from "next/navigation"
 import { PageHeader } from "@/components/page-header"
 import { api } from "@/lib/api/client"
@@ -11,8 +11,16 @@ export default function VerifyEmailPage() {
   const token = searchParams.get("token")
   const [state, setState] = useState<"pending" | "success" | "error">("pending")
   const [errorMessage, setErrorMessage] = useState("")
+  const ranRef = useRef(false)
 
   useEffect(() => {
+    // The verification token is single-use: React Strict Mode (dev) double-invokes
+    // this effect, and a client nav away-and-back remounts it. Without this guard the
+    // second POST 400s on the now-consumed token and overwrites a real "success" with
+    // an error. Mirrors app/settings/github-callback/page.tsx.
+    if (ranRef.current) return
+    ranRef.current = true
+
     if (!token) {
       setState("error")
       setErrorMessage("This verification link is missing its token.")
