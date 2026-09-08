@@ -96,6 +96,24 @@ def test_expired_cache_refetches(app_configured):
     assert mock_client.post.call_count == 2
 
 
+def test_get_installation_token_rechecks_cache_after_acquiring_mint_lock(app_configured, monkeypatch):
+    # Simulates another thread minting the token in the window between the lock-free
+    # cache check and this call acquiring the per-installation mint lock: the second
+    # check must short-circuit and no HTTP mint should happen.
+    calls: list[int] = []
+
+    def fake_cached(installation_id: int):
+        calls.append(installation_id)
+        return None if len(calls) == 1 else "ghs_raced"
+
+    minted = MagicMock()
+    monkeypatch.setattr(github_app, "_cached_token", fake_cached)
+    monkeypatch.setattr(github_app, "_request_installation_token", minted)
+
+    assert github_app.get_installation_token(42) == "ghs_raced"
+    minted.assert_not_called()
+
+
 def test_not_configured_raises(monkeypatch):
     monkeypatch.setattr(settings, "github_app_id", None)
     monkeypatch.setattr(settings, "github_app_private_key", None)

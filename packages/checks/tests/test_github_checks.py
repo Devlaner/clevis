@@ -203,6 +203,20 @@ def test_get_falls_back_to_ratelimit_reset_when_no_retry_after():
     assert 20 <= slept <= 30
 
 
+def test_get_ignores_a_malformed_ratelimit_reset_and_waits_the_cap():
+    # A non-numeric X-RateLimit-Reset must not raise -- it falls through to the cap
+    # (same as having no usable header at all).
+    request = httpx.Request("GET", "https://x/y")
+    rate_limited = httpx.Response(429, headers={"X-RateLimit-Reset": "soon"}, request=request)
+    ok_response = httpx.Response(200, json={"login": "acme"}, request=request)
+    responses = iter([rate_limited, ok_response])
+
+    with patch("time.sleep") as mock_sleep, patch("httpx.Client.get", side_effect=lambda url, headers: next(responses)):
+        result = _get("https://x/y", "tok")
+    assert result == {"login": "acme"}
+    mock_sleep.assert_called_once_with(_MAX_RETRY_AFTER_SECONDS)
+
+
 def test_get_waits_the_cap_for_a_ratelimit_with_no_usable_header():
     # A 429 with neither Retry-After nor X-RateLimit-Reset waits the full documented
     # minimum backoff, not a fast exponential retry into the same limit.

@@ -164,6 +164,39 @@ def test_cockpit_hides_score_trend_from_a_non_member_byo_pat_caller(http, db, mo
     assert body["score_trend"] == []
 
 
+def test_cockpit_shows_own_byo_pat_scans_when_caller_has_no_org_membership(http, db, mock_user):
+    # An org row for "acme" exists but the caller has no membership and no installation
+    # -- their only claim to its history is a scan they ran themselves, so
+    # _user_history_scope is "own" and only their own scan rows feed the trend.
+    # Mirrors test_analytics_history.py::test_personal_history_returns_seeded_rows_newest_first.
+    org = org_repo.get_or_create(db, github_login="acme")
+    other = User(email="other-cockpit@example.com", name=None, is_workspace_admin=False)
+    db.add(other)
+    db.flush()
+    scan_results_repo.insert(
+        db, owner="acme", score=60, total_checks=5, failed_checks=2, checks=[],
+        tenant_id=org.tenant_id, scanned_by_user_id=mock_user.id,
+    )
+    scan_results_repo.insert(
+        db, owner="acme", score=90, total_checks=5, failed_checks=0, checks=[],
+        tenant_id=org.tenant_id, scanned_by_user_id=other.id,
+    )
+
+    patchers = _patch_all()
+    _start_all(patchers)
+    try:
+        with patch("src.routers.analytics.resolve_owner_token", return_value="ghp_test"):
+            resp = http.get("/me/analytics/cockpit/acme")
+    finally:
+        _stop_all(patchers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # Only mock_user's own scan (60), not the other user's (90).
+    assert body["latest_score"] == 60
+    assert body["score_trend"] == [60]
+
+
 def test_cockpit_no_cache_jobs_yet(http, db, mock_user):
     patchers = _patch_all()
     _start_all(patchers)
