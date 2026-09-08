@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import { useRef } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useAuth } from "@/lib/auth-context"
 
@@ -13,8 +13,17 @@ import { useAuth } from "@/lib/auth-context"
  * alone (`["tokens.resolve", org]` resolves to a decrypted GitHub PAT,
  * `["analytics.my-view", org]`, `["my-orgs"]`, `["installations"]`, …). Without
  * this, user B landing on the app within `staleTime` of user A signing out
- * could be served A's cached PAT and personal data (CWE-200). `app/page.tsx`
- * mitigated one query by adding `user?.id` to its key; this generalises it.
+ * could be served A's cached PAT and personal data (CWE-200).
+ *
+ * The clear runs **during render**, not in an effect. This component is
+ * rendered immediately before `<AuthGuard>` in `app/layout.tsx`, so a
+ * synchronous clear here lands before any `useQuery` inside the authenticated
+ * subtree reads the cache on the same commit. An effect-based clear would run
+ * only after that first paint, leaving one frame in which a query keyed on
+ * `org` alone serves the previous user's data. Adjusting external state during
+ * render for a prop change is a supported React pattern; `queryClient.clear()`
+ * is idempotent and the ref guard makes it fire once per identity change
+ * (Strict Mode's double render included).
  *
  * Rendered inside AuthProvider (needs useAuth) and QueryProvider (needs
  * useQueryClient); it renders nothing.
@@ -24,18 +33,14 @@ export function QueryAuthSync() {
   const queryClient = useQueryClient()
   const lastUserId = useRef<number | null | undefined>(undefined)
 
-  useEffect(() => {
-    const current = user?.id ?? null
-    if (lastUserId.current === undefined) {
-      // First observation on mount — nothing cached under a prior identity yet.
-      lastUserId.current = current
-      return
-    }
-    if (lastUserId.current !== current) {
-      lastUserId.current = current
-      queryClient.clear()
-    }
-  }, [user?.id, queryClient])
+  const currentUserId = user?.id ?? null
+  if (lastUserId.current === undefined) {
+    // First observation on mount — nothing cached under a prior identity yet.
+    lastUserId.current = currentUserId
+  } else if (lastUserId.current !== currentUserId) {
+    lastUserId.current = currentUserId
+    queryClient.clear()
+  }
 
   return null
 }
