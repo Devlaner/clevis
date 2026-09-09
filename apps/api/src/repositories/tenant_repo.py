@@ -143,6 +143,13 @@ def get_or_create_membership(
     db: Session, tenant_id: int, user_id: int, role: str, *, commit: bool = True
 ) -> Membership:
     def _find():
+        # Re-assert the session user on every lookup, not just before the insert: the
+        # commit=True path's post-IntegrityError refetch runs after a full db.rollback()
+        # that discards the earlier SET LOCAL, and under the FORCE-RLS clevis_api role a
+        # context-less read of memberships returns nothing -- which would turn a genuine
+        # lost create-race into a re-raised IntegrityError instead of returning the row
+        # the winner committed. SET LOCAL is idempotent, so the happy path is unaffected.
+        _set_session_user(db, user_id)
         return (
             db.query(Membership)
             .filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id)
@@ -152,7 +159,6 @@ def get_or_create_membership(
     membership = _find()
     if membership is not None:
         return membership
-    _set_session_user(db, user_id)
     return _persist_new(db, Membership(tenant_id=tenant_id, user_id=user_id, role=role), _find, commit=commit)
 
 

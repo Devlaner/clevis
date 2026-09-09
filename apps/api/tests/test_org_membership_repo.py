@@ -191,7 +191,7 @@ def test_update_role_blocks_a_concurrent_delete_until_the_mirror_sync_commits():
         # under test; re-establish a tenant context so this assertion query can actually
         # see memberships rows (FORCE row-level security, migration 0031) rather than
         # getting an RLS-filtered empty result and passing vacuously.
-        session_a.execute(text(f"SET app.tenant_id = {tenant.id}"))
+        session_a.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
         mirror = (
             session_a.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
         )
@@ -206,7 +206,7 @@ def test_update_role_blocks_a_concurrent_delete_until_the_mirror_sync_commits():
             # memberships has FORCE row-level security (migration 0031); under the
             # non-superuser clevis_api role this bulk delete matches nothing unless a
             # tenant session context is set first.
-            session_a.execute(text(f"SET app.tenant_id = {tenant.id}"))
+            session_a.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
             session_a.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
             # orgs.tenant_id and tenants.org_id reference each other (composite reciprocal
             # FK) -- null the org side first so either row can then be deleted freely.
@@ -296,7 +296,7 @@ def test_delete_blocks_a_concurrent_get_or_create_until_the_mirror_delete_commit
         # under test; re-establish a tenant context so this assertion query can actually
         # see memberships rows (FORCE row-level security, migration 0031) rather than
         # getting an RLS-filtered empty result and passing vacuously.
-        session_a.execute(text(f"SET app.tenant_id = {tenant.id}"))
+        session_a.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
         mirror = (
             session_a.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
         )
@@ -310,7 +310,7 @@ def test_delete_blocks_a_concurrent_get_or_create_until_the_mirror_delete_commit
             # memberships has FORCE row-level security (migration 0031); under the
             # non-superuser clevis_api role this bulk delete matches nothing unless a
             # tenant session context is set first.
-            session_a.execute(text(f"SET app.tenant_id = {tenant.id}"))
+            session_a.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
             session_a.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
             org_row = session_a.query(Org).filter(Org.id == org_id).first()
             if org_row is not None:
@@ -406,7 +406,7 @@ def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirr
         # under test; re-establish a tenant context so this assertion query can actually
         # see memberships rows (FORCE row-level security, migration 0031) rather than
         # getting an RLS-filtered empty result and passing vacuously.
-        session_a.execute(text(f"SET app.tenant_id = {tenant.id}"))
+        session_a.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
         mirror = (
             session_a.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
         )
@@ -419,7 +419,7 @@ def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirr
             # memberships has FORCE row-level security (migration 0031); under the
             # non-superuser clevis_api role this bulk delete matches nothing unless a
             # tenant session context is set first.
-            session_a.execute(text(f"SET app.tenant_id = {tenant.id}"))
+            session_a.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
             session_a.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
             org_row = session_a.query(Org).filter(Org.id == org_id).first()
             if org_row is not None:
