@@ -53,8 +53,8 @@ $fmt$, :'api_password') \gexec
 
 GRANT CONNECT ON DATABASE :"db_name" TO clevis_api;
 GRANT USAGE ON SCHEMA public TO clevis_api;
-GRANT SELECT, INSERT, UPDATE, DELETE ON users, orgs, org_memberships, tenants, memberships, invitations, github_installations, saved_tokens, audit_logs, scan_results, jobs, app_config, webhook_deliveries TO clevis_api;
-GRANT USAGE, SELECT ON users_id_seq, orgs_id_seq, org_memberships_id_seq, tenants_id_seq, memberships_id_seq, invitations_id_seq, github_installations_id_seq, saved_tokens_id_seq, audit_logs_id_seq, scan_results_id_seq, jobs_id_seq, webhook_deliveries_id_seq TO clevis_api;
+GRANT SELECT, INSERT, UPDATE, DELETE ON users, orgs, tenants, memberships, invitations, github_installations, saved_tokens, audit_logs, scan_results, jobs, app_config, webhook_deliveries TO clevis_api;
+GRANT USAGE, SELECT ON users_id_seq, orgs_id_seq, tenants_id_seq, memberships_id_seq, invitations_id_seq, github_installations_id_seq, saved_tokens_id_seq, audit_logs_id_seq, scan_results_id_seq, jobs_id_seq, webhook_deliveries_id_seq TO clevis_api;
 
 -- repo_events (migration 0036, issue #191/S4 PR 1): the API doesn't write this table
 -- itself (only apps/worker's consumer does; S6 will add API reads later), but CI runs

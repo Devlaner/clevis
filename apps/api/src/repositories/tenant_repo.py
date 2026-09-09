@@ -57,14 +57,18 @@ def _persist_new(db: Session, obj, refetch, *, commit: bool):
     return obj
 
 
-def get_or_create_org_tenant(db: Session, org_id: int, *, commit: bool = True) -> Tenant:
-    def _find():
-        return db.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+def get_org_tenant(db: Session, org_id: int) -> Tenant | None:
+    """Read-only lookup of an org's tenant, or None if the org has no tenant row yet."""
+    return db.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
 
-    tenant = _find()
+
+def get_or_create_org_tenant(db: Session, org_id: int, *, commit: bool = True) -> Tenant:
+    tenant = get_org_tenant(db, org_id)
     if tenant is not None:
         return tenant
-    return _persist_new(db, Tenant(kind="org", org_id=org_id), _find, commit=commit)
+    return _persist_new(
+        db, Tenant(kind="org", org_id=org_id), lambda: get_org_tenant(db, org_id), commit=commit
+    )
 
 
 def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Tenant:
@@ -117,19 +121,24 @@ def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Te
     return tenant
 
 
-def get_membership(db: Session, tenant_id: int, user_id: int) -> Membership | None:
-    """Read-only lookup, keyed on tenant_id -- the memberships-side equivalent of
-    org_membership_repo.get's org_id-keyed lookup on the legacy org_memberships table.
-    Issue #190 step 6a: RBAC callsites now read from here instead of org_memberships;
-    org_membership_repo's write functions are unchanged and keep dual-writing into
-    memberships via _sync_membership_mirror, so this always sees the current state."""
-    return db.query(Membership).filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id).first()
+def get_membership(
+    db: Session, tenant_id: int, user_id: int, *, for_update: bool = False
+) -> Membership | None:
+    """Lookup keyed on tenant_id -- the source of truth for org RBAC since #190 step 6a
+    (RBAC call sites read here; org_membership_repo is a thin org_id-keyed adapter over it).
+
+    for_update takes a SELECT ... FOR UPDATE row lock, used by org_membership_repo to
+    serialize a concurrent grant and revoke for the same (org, user) across the whole
+    logical operation (issue #334)."""
+    query = db.query(Membership).filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id)
+    if for_update:
+        query = query.with_for_update()
+    return query.first()
 
 
 def list_org_memberships_for_user(db: Session, user_id: int) -> list[tuple[Org, Membership]]:
-    """All of a user's org-tenant memberships, joined back to each Org row -- the
-    memberships-side equivalent of org_membership_repo.list_for_user, for callers that
-    need to enumerate a user's orgs rather than check one specific org."""
+    """All of a user's org-tenant memberships, joined back to each Org row -- for callers
+    that need to enumerate a user's orgs rather than check one specific org."""
     return (
         db.query(Org, Membership)
         .join(Tenant, Tenant.org_id == Org.id)
