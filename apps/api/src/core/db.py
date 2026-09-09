@@ -415,15 +415,10 @@ class Org(Base):
     tenant_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
-class OrgMembership(Base):
-    __tablename__ = "org_memberships"
-    __table_args__ = (UniqueConstraint("org_id", "user_id", name="uq_org_memberships_org_user"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    org_id: Mapped[int] = mapped_column(ForeignKey("orgs.id"), nullable=False)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    role: Mapped[str] = mapped_column(String, nullable=False)  # "admin" | "member"
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+# The legacy org_memberships table (org_id-keyed) was dropped in migration 0045 / issue
+# #331: reads cut over to the tenant-scoped `Membership` table in #190 step 6a and writes
+# in #190 PR 4, leaving org_memberships a pure write-amplification mirror. Org membership
+# now lives entirely in `Membership` below, keyed on the org's `Tenant`.
 
 
 class Tenant(Base):
