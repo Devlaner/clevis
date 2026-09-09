@@ -87,12 +87,14 @@ export default function OverviewPage() {
 
   // Resolves the "Team Members" card and "View Collaborators" quick action to the
   // members page of an org the user admins (issue #282). Same ["my-orgs"] key as
-  // the sidebar so TanStack Query dedupes the request.
-  const { data: memberships = [] } = useQuery<MyOrgMembership[]>({
+  // the sidebar so TanStack Query dedupes the request. While it's still loading,
+  // hold at /settings rather than briefly resolving off an empty [] (same guard
+  // the sidebar applies).
+  const { data: memberships = [], isLoading: membershipsLoading } = useQuery<MyOrgMembership[]>({
     queryKey: ["my-orgs"],
     queryFn: () => api.orgs.mine(),
   })
-  const membersUrl = membersHref(memberships, scope)
+  const membersUrl = membershipsLoading ? "/settings" : membersHref(memberships, scope)
   const [orgChecked, setOrgChecked] = useState(false)
   useEffect(() => {
     setOrgChecked(true)

@@ -368,11 +368,12 @@ export function AppSidebar() {
                   {items.map((item) => {
                     const isCollaborators = item.href === "/collaborators"
                     const href = isCollaborators ? membersNavHref : item.href
-                    // The Collaborators item now lives under /settings/org/<login>/members,
-                    // so light it up on any org-scoped settings members route rather than
-                    // matching its (now non-existent) sentinel href.
+                    // The Collaborators item now lives at /settings/org/<login>/members,
+                    // so light it up on that members route (any org's) rather than matching
+                    // its now-non-existent sentinel href -- but not on sibling
+                    // /settings/org/<login>/* routes a future change might add.
                     const active = isCollaborators
-                      ? pathname.startsWith("/settings/org/")
+                      ? /^\/settings\/org\/[^/]+\/members$/.test(pathname)
                       : isActive(item.href)
                     return (
                       <SidebarMenuItem key={item.title}>
