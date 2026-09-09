@@ -11,12 +11,13 @@ import { BarGroupChart } from "@/components/charts/bar-group-chart"
 import { ArrowRight, Warning } from "@phosphor-icons/react"
 import { api } from "@/lib/api/client"
 import { useActiveScope } from "@/lib/active-scope"
+import { membersHref } from "@/lib/members-href"
 import { useAuth } from "@/lib/auth-context"
 import { CHART_COLORS } from "@/lib/charts/theme"
 import { relativeTime } from "@/lib/format"
 import { SectionError } from "@/components/section-error"
 import { EmptyStateNoAccount } from "@/components/empty-state"
-import type { MyViewIssueSummary, MyViewPRSummary } from "@/lib/api/types"
+import type { MyOrgMembership, MyViewIssueSummary, MyViewPRSummary } from "@/lib/api/types"
 
 const MY_VIEW_TABS = [
   { id: "prs", label: "My PRs" },
@@ -50,6 +51,8 @@ function MyViewRow({ item }: { item: MyViewPRSummary | MyViewIssueSummary }) {
 const quickActions = [
   { label: "Run Security Scan",  href: "/security" },
   { label: "Manage Caches",      href: "/repos" },
+  // "/collaborators" is a sentinel resolved to the scope's org members page at
+  // render time (issue #282) — the standalone /collaborators route was removed.
   { label: "View Collaborators", href: "/collaborators" },
 ]
 
@@ -81,6 +84,15 @@ export default function OverviewPage() {
   const { scope } = useActiveScope()
   const { user } = useAuth()
   const org = scope?.login ?? ""
+
+  // Resolves the "Team Members" card and "View Collaborators" quick action to the
+  // members page of an org the user admins (issue #282). Same ["my-orgs"] key as
+  // the sidebar so TanStack Query dedupes the request.
+  const { data: memberships = [] } = useQuery<MyOrgMembership[]>({
+    queryKey: ["my-orgs"],
+    queryFn: () => api.orgs.mine(),
+  })
+  const membersUrl = membersHref(memberships, scope)
   const [orgChecked, setOrgChecked] = useState(false)
   useEffect(() => {
     setOrgChecked(true)
@@ -217,7 +229,7 @@ export default function OverviewPage() {
         />
         <LiveStatCard
           label="Team Members"
-          href="/collaborators"
+          href={membersUrl}
           loading={cockpitQuery.isLoading}
           configured={configured}
           value={cockpit?.member_count}
@@ -495,16 +507,19 @@ export default function OverviewPage() {
           <span className="section-label">Quick Actions</span>
         </div>
         <div className="p-2">
-          {quickActions.map((action) => (
+          {quickActions.map((action) => {
+            const href = action.href === "/collaborators" ? membersUrl : action.href
+            return (
             <Link
-              key={action.href}
-              href={action.href}
+              key={href}
+              href={href}
               className="flex items-center justify-between px-3 py-2.5 text-sm text-muted-foreground hover:text-foreground hover:bg-elevated transition-colors group"
             >
               {action.label}
               <ArrowRight className="size-3.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
             </Link>
-          ))}
+            )
+          })}
         </div>
       </div>
     </>

@@ -7,7 +7,6 @@ const ROUTE_LABELS: Record<string, string> = {
   "/activity":      "activity",
   "/repos":         "repositories",
   "/security":      "health & security",
-  "/collaborators": "collaborators",
   "/automation":    "automation",
   "/pulls":         "pull requests",
   "/releases":      "releases",

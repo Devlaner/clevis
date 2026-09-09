@@ -6,6 +6,7 @@ const tokensResolveMock = vi.fn();
 const cockpitMock = vi.fn();
 const myViewMock = vi.fn();
 const actionsUsageMock = vi.fn();
+const orgsMineMock = vi.fn();
 
 let authUser: { id: number } | null = { id: 1 };
 vi.mock("@/lib/auth-context", () => ({
@@ -21,6 +22,9 @@ vi.mock("@/lib/api/client", () => ({
       cockpit: (...args: unknown[]) => cockpitMock(...args),
       myView: (...args: unknown[]) => myViewMock(...args),
       actionsUsage: (...args: unknown[]) => actionsUsageMock(...args),
+    },
+    orgs: {
+      mine: (...args: unknown[]) => orgsMineMock(...args),
     },
   },
 }));
@@ -74,6 +78,8 @@ describe("OverviewPage cockpit", () => {
     cockpitMock.mockReset();
     myViewMock.mockReset();
     actionsUsageMock.mockReset();
+    orgsMineMock.mockReset();
+    orgsMineMock.mockResolvedValue([]);
     myViewMock.mockResolvedValue(EMPTY_MY_VIEW);
     // Default: the Actions-usage query fails (App lacks the billing permission) so the
     // card is absent -- matching the common self-hosted setup.
@@ -103,7 +109,9 @@ describe("OverviewPage cockpit", () => {
       Repositories: "/repos",
       "Open PRs": "/pulls",
       "Security Score": "/security",
-      "Team Members": "/collaborators",
+      // Issue #282: no org configured + no admin membership resolves to /settings
+      // (the /collaborators redirect stub was removed).
+      "Team Members": "/settings",
     };
     for (const [label, href] of Object.entries(expectedHrefs)) {
       // getByRole (not getByText) since "Security Score" also appears as a plain

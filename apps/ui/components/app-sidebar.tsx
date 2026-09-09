@@ -19,6 +19,7 @@ import {
 import { useAuth } from "@/lib/auth-context"
 import { api } from "@/lib/api/client"
 import { useActiveScope, type ActiveScope } from "@/lib/active-scope"
+import { membersHref } from "@/lib/members-href"
 import type { InstallationMeta, MyOrgMembership } from "@/lib/api/types"
 
 const ACTIVITY_LAST_SEEN_KEY = "activity_last_seen_at"
@@ -43,6 +44,8 @@ const groups = [
     { title: "Health & Security",href: "/security", showHealthDot: true },
   ],
   [
+    // "/collaborators" is a sentinel, not a real route (issue #282): the render
+    // loop swaps in the scope-resolved org members URL (membersNavHref).
     { title: "Collaborators",    href: "/collaborators" },
     { title: "Automation",       href: "/automation" },
     { title: "Audit Log",        href: "/audit" },
@@ -202,10 +205,9 @@ export function AppSidebar() {
   const { scope, setScope } = useActiveScope()
   const scopeLogin = scope?.login ?? ""
 
-  // Same query key as the /collaborators redirect page so TanStack Query dedupes
-  // the request when both are mounted. Only route the "Invite members" link at an
-  // org where the user is actually an admin — mirrors the /collaborators fallback
-  // logic (prefer the active org scope, else the first admin org, else /settings).
+  // ["my-orgs"] is also queried by the Overview page; TanStack Query dedupes the
+  // request when both are mounted. Feeds membersHref() below (prefer the active
+  // org scope, else the first admin org, else /settings).
   const {
     data: memberships = [],
     isLoading: membershipsLoading,
@@ -270,13 +272,11 @@ export function AppSidebar() {
     email: user?.email || "",
   }
 
-  const adminOrgs = memberships.filter((m) => m.role === "admin")
-  const inviteTarget = membershipsLoading
-    ? undefined
-    : adminOrgs.find((m) => scope?.kind === "org" && m.org_login === scope.login) || adminOrgs[0]
-  const inviteHref = inviteTarget
-    ? `/settings/org/${encodeURIComponent(inviteTarget.org_login)}/members`
-    : "/settings"
+  // Destination for both the "Collaborators" sidebar item and the profile-menu
+  // "Invite members" link: the resolved org members page (issue #282 removed the
+  // /collaborators redirect stub that used to do this hop). While memberships are
+  // still loading, point at /settings rather than flicker between fallbacks.
+  const membersNavHref = membershipsLoading ? "/settings" : membersHref(memberships, scope)
 
   // Same resolve-then-use pattern as the Overview page — falls back to a saved
   // PAT for orgs without a GitHub App installation.
@@ -351,7 +351,7 @@ export function AppSidebar() {
             activeScope={scope}
             onSelectScope={setScope}
             addInstallUrl={addInstallUrl}
-            inviteHref={inviteHref}
+            inviteHref={membersNavHref}
             onClose={() => setOpen(false)}
             onSignOut={() => { logout(); setOpen(false); router.replace("/login") }}
           />
@@ -366,7 +366,14 @@ export function AppSidebar() {
               <SidebarGroupContent>
                 <SidebarMenu>
                   {items.map((item) => {
-                    const active = isActive(item.href)
+                    const isCollaborators = item.href === "/collaborators"
+                    const href = isCollaborators ? membersNavHref : item.href
+                    // The Collaborators item now lives under /settings/org/<login>/members,
+                    // so light it up on any org-scoped settings members route rather than
+                    // matching its (now non-existent) sentinel href.
+                    const active = isCollaborators
+                      ? pathname.startsWith("/settings/org/")
+                      : isActive(item.href)
                     return (
                       <SidebarMenuItem key={item.title}>
                         <SidebarMenuButton
@@ -377,7 +384,7 @@ export function AppSidebar() {
                               ? "bg-sidebar-accent text-sidebar-foreground font-medium"
                               : "text-sidebar-foreground/50 hover:text-sidebar-foreground hover:bg-sidebar-accent/60",
                           ].join(" ")}
-                          render={<Link href={item.href} />}
+                          render={<Link href={href} />}
                         >
                           <span>{item.title}</span>
                           {"showHealthDot" in item && item.showHealthDot && healthDot && (
