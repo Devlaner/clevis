@@ -16,14 +16,25 @@ def get(db: Session, org_id: int, user_id: int, for_update: bool = False) -> Org
 
 
 def _sync_membership_mirror(db: Session, org_id: int, membership: OrgMembership) -> None:
-    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
-    tenant_repo.upsert_membership(db, tenant_id=tenant.id, user_id=membership.user_id, role=membership.role)
+    # commit=False (issue #334): the callers below hold a SELECT ... FOR UPDATE lock on the
+    # OrgMembership row and must keep it until they issue their own single db.commit(). The
+    # tenant_repo helpers used to commit internally, ending the transaction and releasing
+    # that lock mid-operation, which let a concurrent delete() interleave. They now flush
+    # into this transaction instead, so the lock is held for the whole logical operation.
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id, commit=False)
+    tenant_repo.upsert_membership(
+        db, tenant_id=tenant.id, user_id=membership.user_id, role=membership.role, commit=False
+    )
 
 
 def get_or_create(db: Session, org_id: int, user_id: int, role: str) -> OrgMembership:
     membership = get(db, org_id, user_id, for_update=True)
     if membership is not None:
+        # Lock held from the get() above through the mirror sync to this commit -- the
+        # tenant_repo helpers no longer commit internally (issue #334), so this is the one
+        # commit that ends the operation and releases the lock.
         _sync_membership_mirror(db, org_id, membership)
+        db.commit()
         return membership
     membership = OrgMembership(org_id=org_id, user_id=user_id, role=role)
     db.add(membership)
@@ -36,17 +47,20 @@ def get_or_create(db: Session, org_id: int, user_id: int, role: str) -> OrgMembe
         if membership is None:
             raise
         _sync_membership_mirror(db, org_id, membership)
+        db.commit()
         return membership
     # Re-lock the row we just committed before syncing its mirror -- the commit above
     # released any lock, opening a window where a concurrent delete() could remove this
     # row and find no mirror yet (nothing synced), then have this call resume and create a
     # mirror for a membership that's already revoked (CodeRabbit finding on #323's 2nd
     # review). If the re-lock finds the row already gone, retry from scratch instead of
-    # syncing a mirror for a membership that no longer exists.
+    # syncing a mirror for a membership that no longer exists. The re-lock is now held
+    # across the mirror sync until the final commit below (issue #334).
     membership = get(db, org_id, user_id, for_update=True)
     if membership is None:
         return get_or_create(db, org_id, user_id, role)
     _sync_membership_mirror(db, org_id, membership)
+    db.commit()
     return membership
 
 
@@ -64,11 +78,10 @@ def update_role(db: Session, org_id: int, user_id: int, role: str) -> OrgMembers
         return None
     membership.role = role
     # Sync the mirror before committing -- committing first would release the FOR UPDATE
-    # lock get() just took, reopening the same window a concurrent delete() could land in.
-    # _sync_membership_mirror's own internal commit (tenant_repo.upsert_membership) flushes
-    # this pending role change too, so the OrgMembership update and the mirror update land
-    # together; this commit() is a no-op in that case and only matters if the mirror's role
-    # already matched (nothing to update inside the sync, so nothing committed it yet).
+    # lock get() just took, reopening the window a concurrent delete() could land in.
+    # _sync_membership_mirror flushes (does not commit -- issue #334) both the pending
+    # OrgMembership role change and the mirror row into this transaction; the single
+    # commit() below persists them together and releases the lock.
     _sync_membership_mirror(db, org_id, membership)
     db.commit()
     # Not db.refresh(membership): the row lock is released by the commit above, so a
@@ -83,10 +96,13 @@ def delete(db: Session, org_id: int, user_id: int) -> None:
     # touched, leaving a window where a concurrent get_or_create() could find the row gone,
     # legitimately re-create a fresh OrgMembership + mirror, and then have this function's
     # now-unblocked mirror delete remove that brand-new mirror out from under it. Same
-    # principle as update_role's lock-then-sync-then-commit ordering above.
-    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    # principle as update_role's lock-then-sync-then-commit ordering above. Both tenant_repo
+    # calls run with commit=False (issue #334) so the DELETE's implicit row lock is held
+    # until this function's single commit() -- a concurrent get_or_create() blocks on it for
+    # the whole operation instead of slipping in after an early internal commit.
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id, commit=False)
     db.query(OrgMembership).filter(
         OrgMembership.org_id == org_id, OrgMembership.user_id == user_id
     ).delete()
-    tenant_repo.delete_membership(db, tenant_id=tenant.id, user_id=user_id)
+    tenant_repo.delete_membership(db, tenant_id=tenant.id, user_id=user_id, commit=False)
     db.commit()
