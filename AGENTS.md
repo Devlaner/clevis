@@ -13,9 +13,10 @@ Clevis is a GitHub analytics dashboard with three independently deployable servi
 
 ### Database models (`apps/api/src/core/db.py`)
 
-Tables managed by Alembic — no runtime DDL. (Not an exhaustive list of every table in `apps/api/src/core/db.py` — `tenants`/`memberships` predate this list being kept current; see that file for the authoritative schema.)
+Tables managed by Alembic — no runtime DDL. (Not an exhaustive list of every table in `apps/api/src/core/db.py`; see that file for the authoritative schema.)
 - **`users`** — email/password or GitHub-OAuth-linked accounts. `is_workspace_admin` (instance-level, set once at first-run `/auth/setup`), `token_version` (bumped to invalidate all issued JWTs), `email_verified` / `email_verify_token` / `email_verify_token_expires_at` (issue #217 — self-registered accounts start unverified and can't accept org invites until they click the emailed link; GitHub-linked and first-run-setup accounts are verified immediately since their email is already trusted).
-- **`orgs`** / **`org_memberships`** — a GitHub org becomes a Clevis `Org` row once someone connects it; `org_memberships` is the `(org_id, user_id) -> role ("member"|"admin")` join table `require_org_role` checks against.
+- **`orgs`** — a GitHub org becomes a Clevis `Org` row once someone connects it, paired 1:1 with a `kind="org"` **`tenants`** row.
+- **`tenants`** / **`memberships`** — every org (and every user, personally) has a `Tenant`; `memberships` is the tenant-scoped `(tenant_id, user_id) -> role ("member"|"admin")` join table `require_org_role` checks against (via `tenant_repo.get_membership`). The legacy org_id-keyed `org_memberships` table it superseded was dropped in migration 0045 / issue #331; `org_membership_repo` is now a thin org_id→tenant_id adapter over `tenant_repo`.
 - **`invitations`** — pending org invites by email; `accept_invitation` requires the accepting user's email to match and (per #217) `email_verified=True`.
 - **`github_installations`** — account login, installation ID, auth mode, and `token_ref` (a symbolic reference like `tok_acme`, not the actual token). Exactly one of `org_id` / `owner_user_id` is set (org-connected vs. personal installs).
 - **`saved_tokens`** — legacy Fernet-encrypted PAT-per-org fallback, used when no GitHub App installation covers that org.
@@ -36,7 +37,7 @@ Tables managed by Alembic — no runtime DDL. (Not an exhaustive list of every t
 Access is enforced with JWT session auth, not an `X-Role` header:
 
 - `require_auth` / `require_workspace_admin` — `apps/api/src/core/auth.py` (any signed-in user vs instance workspace admin).
-- `require_org_role("member"|"admin")` — `apps/api/src/core/rbac.py` (org-scoped membership lookup in the DB, against `org_memberships`).
+- `require_org_role("member"|"admin")` — `apps/api/src/core/rbac.py` (org-scoped membership lookup in the DB, against the tenant-scoped `memberships` table via `tenant_repo.get_membership`).
 
 The old `viewer` / `analyst` / `admin` header model was removed in Phase 5.
 

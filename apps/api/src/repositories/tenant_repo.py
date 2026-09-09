@@ -20,23 +20,55 @@ def _set_session_user(db: Session, user_id: int) -> None:
     db.execute(text(f"SET LOCAL app.user_id = {int(user_id)}"))
 
 
-def get_or_create_org_tenant(db: Session, org_id: int) -> Tenant:
-    tenant = db.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+def _persist_new(db: Session, obj, refetch, *, commit: bool):
+    """Insert ``obj``, tolerating a lost race with a concurrent insert of the same row.
+
+    ``commit=True`` (standalone caller): real ``db.commit()``; on a unique-violation,
+    full ``db.rollback()`` then ``refetch()`` the row the other transaction committed.
+
+    ``commit=False`` (issue #334): the caller owns the transaction and may be holding a
+    ``SELECT ... FOR UPDATE`` lock it needs kept across the whole logical operation, so
+    this must not commit or top-level-rollback. The insert lands via a SAVEPOINT
+    (``begin_nested``); a unique-violation rolls back only that savepoint, leaving the
+    caller's outer transaction and its lock intact, then ``refetch()`` the existing row.
+    """
+    if commit:
+        db.add(obj)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            existing = refetch()
+            if existing is None:
+                raise
+            return existing
+        db.refresh(obj)
+        return obj
+
+    try:
+        with db.begin_nested():
+            db.add(obj)
+            db.flush()
+    except IntegrityError:
+        existing = refetch()
+        if existing is None:
+            raise
+        return existing
+    return obj
+
+
+def get_org_tenant(db: Session, org_id: int) -> Tenant | None:
+    """Read-only lookup of an org's tenant, or None if the org has no tenant row yet."""
+    return db.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+
+
+def get_or_create_org_tenant(db: Session, org_id: int, *, commit: bool = True) -> Tenant:
+    tenant = get_org_tenant(db, org_id)
     if tenant is not None:
         return tenant
-    tenant = Tenant(kind="org", org_id=org_id)
-    db.add(tenant)
-    try:
-        db.commit()
-    except IntegrityError:
-        # Lost a race with a concurrent insert of the same org's tenant.
-        db.rollback()
-        tenant = db.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
-        if tenant is None:
-            raise
-        return tenant
-    db.refresh(tenant)
-    return tenant
+    return _persist_new(
+        db, Tenant(kind="org", org_id=org_id), lambda: get_org_tenant(db, org_id), commit=commit
+    )
 
 
 def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Tenant:
@@ -89,19 +121,24 @@ def ensure_personal_tenant(db: Session, user_id: int, commit: bool = True) -> Te
     return tenant
 
 
-def get_membership(db: Session, tenant_id: int, user_id: int) -> Membership | None:
-    """Read-only lookup, keyed on tenant_id -- the memberships-side equivalent of
-    org_membership_repo.get's org_id-keyed lookup on the legacy org_memberships table.
-    Issue #190 step 6a: RBAC callsites now read from here instead of org_memberships;
-    org_membership_repo's write functions are unchanged and keep dual-writing into
-    memberships via _sync_membership_mirror, so this always sees the current state."""
-    return db.query(Membership).filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id).first()
+def get_membership(
+    db: Session, tenant_id: int, user_id: int, *, for_update: bool = False
+) -> Membership | None:
+    """Lookup keyed on tenant_id -- the source of truth for org RBAC since #190 step 6a
+    (RBAC call sites read here; org_membership_repo is a thin org_id-keyed adapter over it).
+
+    for_update takes a SELECT ... FOR UPDATE row lock, used by org_membership_repo to
+    serialize a concurrent grant and revoke for the same (org, user) across the whole
+    logical operation (issue #334)."""
+    query = db.query(Membership).filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id)
+    if for_update:
+        query = query.with_for_update()
+    return query.first()
 
 
 def list_org_memberships_for_user(db: Session, user_id: int) -> list[tuple[Org, Membership]]:
-    """All of a user's org-tenant memberships, joined back to each Org row -- the
-    memberships-side equivalent of org_membership_repo.list_for_user, for callers that
-    need to enumerate a user's orgs rather than check one specific org."""
+    """All of a user's org-tenant memberships, joined back to each Org row -- for callers
+    that need to enumerate a user's orgs rather than check one specific org."""
     return (
         db.query(Org, Membership)
         .join(Tenant, Tenant.org_id == Org.id)
@@ -111,50 +148,56 @@ def list_org_memberships_for_user(db: Session, user_id: int) -> list[tuple[Org, 
     )
 
 
-def get_or_create_membership(db: Session, tenant_id: int, user_id: int, role: str) -> Membership:
-    membership = (
-        db.query(Membership)
-        .filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id)
-        .first()
-    )
-    if membership is not None:
-        return membership
-    _set_session_user(db, user_id)
-    membership = Membership(tenant_id=tenant_id, user_id=user_id, role=role)
-    db.add(membership)
-    try:
-        db.commit()
-    except IntegrityError:
-        # Lost a race with a concurrent insert of the same (tenant_id, user_id) pair.
-        db.rollback()
-        membership = (
+def get_or_create_membership(
+    db: Session, tenant_id: int, user_id: int, role: str, *, commit: bool = True
+) -> Membership:
+    def _find():
+        # Re-assert the session user on every lookup, not just before the insert: the
+        # commit=True path's post-IntegrityError refetch runs after a full db.rollback()
+        # that discards the earlier SET LOCAL, and under the FORCE-RLS clevis_api role a
+        # context-less read of memberships returns nothing -- which would turn a genuine
+        # lost create-race into a re-raised IntegrityError instead of returning the row
+        # the winner committed. SET LOCAL is idempotent, so the happy path is unaffected.
+        _set_session_user(db, user_id)
+        return (
             db.query(Membership)
             .filter(Membership.tenant_id == tenant_id, Membership.user_id == user_id)
             .first()
         )
-        if membership is None:
-            raise
+
+    membership = _find()
+    if membership is not None:
         return membership
-    db.refresh(membership)
-    return membership
+    return _persist_new(db, Membership(tenant_id=tenant_id, user_id=user_id, role=role), _find, commit=commit)
 
 
-def upsert_membership(db: Session, tenant_id: int, user_id: int, role: str) -> Membership:
+def upsert_membership(
+    db: Session, tenant_id: int, user_id: int, role: str, *, commit: bool = True
+) -> Membership:
     """get_or_create_membership plus role reconciliation -- unlike get_or_create_membership
     alone, this also fixes a stale role on an already-existing row, so callers that resolve
     a membership through more than one code path (existing found / newly created / recovered
-    from a concurrent-insert race) can call this unconditionally and always end up in sync."""
-    membership = get_or_create_membership(db, tenant_id, user_id, role)
+    from a concurrent-insert race) can call this unconditionally and always end up in sync.
+
+    commit=False threads through to the sub-calls so the whole get-or-create + role-fix
+    sequence stays in the caller's transaction (issue #334)."""
+    membership = get_or_create_membership(db, tenant_id, user_id, role, commit=commit)
     if membership.role != role:
-        updated = update_membership_role(db, tenant_id, user_id, role)
+        updated = update_membership_role(db, tenant_id, user_id, role, commit=commit)
         # A concurrent delete_membership could remove the row between the get-or-create
         # above and this update -- re-create it rather than returning None despite this
         # function's Membership (non-Optional) return type.
-        membership = updated if updated is not None else get_or_create_membership(db, tenant_id, user_id, role)
+        membership = (
+            updated
+            if updated is not None
+            else get_or_create_membership(db, tenant_id, user_id, role, commit=commit)
+        )
     return membership
 
 
-def update_membership_role(db: Session, tenant_id: int, user_id: int, role: str) -> Membership | None:
+def update_membership_role(
+    db: Session, tenant_id: int, user_id: int, role: str, *, commit: bool = True
+) -> Membership | None:
     _set_session_user(db, user_id)
     membership = (
         db.query(Membership)
@@ -164,14 +207,26 @@ def update_membership_role(db: Session, tenant_id: int, user_id: int, role: str)
     if membership is None:
         return None
     membership.role = role
-    db.commit()
-    db.refresh(membership)
+    # commit=False (issue #334): flush the role change into the caller's open transaction
+    # instead of committing it -- the caller owns the single commit for the whole logical
+    # operation, keeping its FOR UPDATE lock held until then. No db.refresh(): the value we
+    # just set is already current in-session, and a refresh is a needless round-trip.
+    if commit:
+        db.commit()
+        db.refresh(membership)
+    else:
+        db.flush()
     return membership
 
 
-def delete_membership(db: Session, tenant_id: int, user_id: int) -> None:
+def delete_membership(db: Session, tenant_id: int, user_id: int, *, commit: bool = True) -> None:
     _set_session_user(db, user_id)
     db.query(Membership).filter(
         Membership.tenant_id == tenant_id, Membership.user_id == user_id
     ).delete()
-    db.commit()
+    # commit=False (issue #334): see update_membership_role -- flush into the caller's
+    # transaction so its lock survives until the caller's own single commit.
+    if commit:
+        db.commit()
+    else:
+        db.flush()

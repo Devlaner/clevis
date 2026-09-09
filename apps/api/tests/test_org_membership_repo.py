@@ -1,31 +1,19 @@
-"""Tests for src.repositories.org_membership_repo's Membership dual-write (issue #190 PR 4):
-every OrgMembership create/update/delete must be mirrored onto the tenants/memberships
-tables, keyed off the org's tenant."""
+"""Tests for src.repositories.org_membership_repo.
+
+Since #331 dropped the legacy org_memberships table, this module is a thin org_id->
+tenant_id adapter over tenant_repo: every create/update/delete lands in the tenant-scoped
+`memberships` table, keyed off the org's tenant. The write paths still take a
+SELECT ... FOR UPDATE on the memberships row and commit once (issue #334), so a concurrent
+grant and revoke for the same (org, user) stay serialized.
+"""
 
 import threading
 from unittest.mock import patch
 
-import pytest
+from sqlalchemy import text
 
-from src.core.db import Membership, Org, OrgMembership, SessionLocal, Tenant, User
-from src.repositories import org_membership_repo, org_repo
-
-# Issue #330: these 3 tests hit a pre-existing race condition, unrelated to RLS itself --
-# get_or_create_membership/update_membership_role (tenant_repo.py) each do their own
-# internal db.commit(), which (by this code's own documented design -- see update_role's
-# comment) releases update_role's outer FOR UPDATE lock on OrgMembership before the whole
-# multi-step mirror-sync operation finishes. That's always been true, but running under
-# clevis_api adds extra SET LOCAL round-trips (session-context fixes for RLS self-access
-# checks) that widen the race window enough to hit it reliably here, where the original
-# superuser-connected code was fast enough to not usually collide. A real fix means
-# refactoring get_or_create_membership/update_membership_role/upsert_membership so they
-# stop committing internally and let the outermost caller own a single commit for the
-# whole logical operation -- more invasive than this PR's RLS/role-cutover scope. Tracked
-# as a follow-up; not fixed here.
-_CONCURRENCY_RACE_XFAIL = pytest.mark.xfail(
-    reason="issue #330: pre-existing race in tenant_repo's nested-commit mirror-sync, exposed by RLS timing -- see module docstring",
-    strict=False,
-)
+from src.core.db import Membership, Org, SessionLocal, Tenant, User
+from src.repositories import org_membership_repo, org_repo, tenant_repo
 
 
 def _make_user(db, email: str) -> User:
@@ -43,7 +31,7 @@ def _membership_row(db, org_id: int, user_id: int) -> Membership | None:
     return db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
 
 
-def test_get_or_create_mirrors_a_membership_row(db):
+def test_get_or_create_writes_the_membership_row(db):
     org = org_repo.get_or_create(db, github_login="acme")
     user = _make_user(db, "alice@example.com")
 
@@ -54,7 +42,7 @@ def test_get_or_create_mirrors_a_membership_row(db):
     assert membership.role == "admin"
 
 
-def test_get_or_create_is_idempotent_on_the_mirror_too(db):
+def test_get_or_create_is_idempotent(db):
     org = org_repo.get_or_create(db, github_login="acme")
     user = _make_user(db, "bob@example.com")
 
@@ -66,7 +54,18 @@ def test_get_or_create_is_idempotent_on_the_mirror_too(db):
     assert len(rows) == 1
 
 
-def test_update_role_mirrors_onto_membership(db):
+def test_get_returns_none_for_an_org_with_no_tenant(db):
+    # A read for an org that was never provisioned must not create the tenant as a side effect.
+    org = Org(github_login="unprovisioned")
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+
+    assert org_membership_repo.get(db, org_id=org.id, user_id=1) is None
+    assert db.query(Tenant).filter(Tenant.org_id == org.id).first() is None
+
+
+def test_update_role_changes_the_membership_role(db):
     org = org_repo.get_or_create(db, github_login="acme")
     user = _make_user(db, "carol@example.com")
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="member")
@@ -78,27 +77,49 @@ def test_update_role_mirrors_onto_membership(db):
     assert membership.role == "admin"
 
 
-def test_delete_removes_the_membership_mirror_too(db):
+def test_update_role_returns_none_when_there_is_no_membership(db):
+    org = org_repo.get_or_create(db, github_login="acme")
+    user = _make_user(db, "wanda@example.com")
+
+    assert org_membership_repo.update_role(db, org_id=org.id, user_id=user.id, role="admin") is None
+
+
+def test_update_role_returns_none_for_an_unprovisioned_org(db):
+    org = Org(github_login="unprovisioned-3")
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+
+    assert org_membership_repo.update_role(db, org_id=org.id, user_id=1, role="admin") is None
+    assert db.query(Tenant).filter(Tenant.org_id == org.id).first() is None
+
+
+def test_delete_removes_the_membership_row(db):
     org = org_repo.get_or_create(db, github_login="acme")
     user = _make_user(db, "dave@example.com")
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="admin")
 
     org_membership_repo.delete(db, org_id=org.id, user_id=user.id)
 
-    membership = _membership_row(db, org.id, user.id)
-    assert membership is None
+    assert _membership_row(db, org.id, user.id) is None
 
 
-def test_get_or_create_repairs_a_missing_mirror_on_an_existing_membership(db):
-    # Regression test for a CodeRabbit finding on #323: get_or_create's early-return path
-    # (OrgMembership already exists) used to skip the dual-write entirely, so a Membership
-    # row deleted or never created out-of-band would never get repaired on subsequent calls
-    # -- exactly the pattern org_provisioning.py's reconcile loop hits on every login.
+def test_delete_is_a_noop_for_an_unprovisioned_org(db):
+    org = Org(github_login="unprovisioned-2")
+    db.add(org)
+    db.commit()
+    db.refresh(org)
+
+    org_membership_repo.delete(db, org_id=org.id, user_id=1)  # must not raise
+    assert db.query(Tenant).filter(Tenant.org_id == org.id).first() is None
+
+
+def test_get_or_create_recreates_a_row_deleted_out_of_band(db):
+    # org_provisioning.py's reconcile loop calls get_or_create on every login; if the
+    # membership row went missing out of band it must be recreated, not skipped.
     org = org_repo.get_or_create(db, github_login="acme")
     user = _make_user(db, "grace@example.com")
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="member")
-    assert _membership_row(db, org.id, user.id) is not None
-    # Simulate the mirror having gone missing out-of-band.
     tenant = db.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org.id).first()
     db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user.id).delete()
     db.commit()
@@ -111,11 +132,10 @@ def test_get_or_create_repairs_a_missing_mirror_on_an_existing_membership(db):
     assert membership.role == "member"
 
 
-def test_get_or_create_repairs_a_stale_role_on_an_existing_mirror(db):
+def test_get_or_create_repairs_a_stale_role(db):
     org = org_repo.get_or_create(db, github_login="acme")
     user = _make_user(db, "heidi@example.com")
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="member")
-    # Simulate the mirror's role having drifted out-of-band from the OrgMembership's role.
     tenant = db.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org.id).first()
     stale = db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user.id).first()
     stale.role = "admin"
@@ -123,17 +143,66 @@ def test_get_or_create_repairs_a_stale_role_on_an_existing_mirror(db):
 
     org_membership_repo.get_or_create(db, org_id=org.id, user_id=user.id, role="member")
 
-    membership = _membership_row(db, org.id, user.id)
-    assert membership.role == "member"
+    assert _membership_row(db, org.id, user.id).role == "member"
 
 
-@_CONCURRENCY_RACE_XFAIL
-def test_update_role_blocks_a_concurrent_delete_until_the_mirror_sync_commits():
-    """Regression test for a CodeRabbit finding on #324: without row locking, a concurrent
-    delete() could interleave between update_role's membership lookup and its mirror sync,
-    resurrecting the tenant Membership mirror right after revocation. Needs two genuinely
-    separate connections (not the savepoint-per-test `db` fixture, same reasoning as
-    test_db_get_db.py) since the race only exists across real concurrent transactions."""
+def test_dual_write_uses_the_same_tenant_for_every_membership_in_an_org(db):
+    org = org_repo.get_or_create(db, github_login="acme")
+    admin = _make_user(db, "erin@example.com")
+    member = _make_user(db, "frank@example.com")
+
+    org_membership_repo.get_or_create(db, org_id=org.id, user_id=admin.id, role="admin")
+    org_membership_repo.get_or_create(db, org_id=org.id, user_id=member.id, role="member")
+
+    assert _membership_row(db, org.id, admin.id).tenant_id == _membership_row(db, org.id, member.id).tenant_id
+
+
+# ── Concurrency: the FOR UPDATE lock serializes a grant against a concurrent revoke ──
+#
+# These use two or three genuinely separate SessionLocal() connections (not the
+# savepoint-per-test `db` fixture) because the race only exists across real concurrent
+# transactions. They pause a tenant_repo helper *inside* org_membership_repo's locked
+# section (after get_membership(for_update=True), before the single commit) and assert a
+# concurrent delete()/get_or_create() blocks on the row until that commit lands.
+
+
+def _cleanup(session, org_id: int, user_id: int) -> None:
+    session.rollback()
+    tenant = session.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+    if tenant is not None:
+        # memberships has FORCE row-level security (migration 0031); under the non-superuser
+        # clevis_api role this bulk delete matches nothing unless a tenant context is set.
+        # SET LOCAL, not SET: transaction-scoped so it can't leak onto the pooled connection.
+        session.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
+        session.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
+        org_row = session.query(Org).filter(Org.id == org_id).first()
+        if org_row is not None:
+            # orgs.tenant_id and tenants.org_id reference each other (composite reciprocal
+            # FK) -- null the org side first so either row can then be deleted freely.
+            org_row.tenant_id = None
+            session.commit()
+        session.query(Tenant).filter(Tenant.id == tenant.id).delete()
+    session.query(Org).filter(Org.id == org_id).delete()
+    session.query(User).filter(User.id == user_id).delete()
+    session.commit()
+    session.close()
+
+
+def _membership_after(session, org_id: int, user_id: int) -> Membership | None:
+    tenant = session.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
+    if tenant is None:
+        return None
+    # The operation under test committed and cleared session's SET LOCAL app.user_id;
+    # re-establish a context so this assertion isn't RLS-filtered to a vacuous None.
+    session.execute(text(f"SET LOCAL app.tenant_id = {tenant.id}"))
+    return (
+        session.query(Membership)
+        .filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id)
+        .first()
+    )
+
+
+def test_update_role_blocks_a_concurrent_delete_until_it_commits():
     setup = SessionLocal()
     org = org_repo.get_or_create(setup, github_login="acme-lock-test")
     user = User(email="ivy@example.com", name=None, password_hash=None, is_workspace_admin=False)
@@ -143,17 +212,15 @@ def test_update_role_blocks_a_concurrent_delete_until_the_mirror_sync_commits():
     org_id, user_id = org.id, user.id
     org_membership_repo.get_or_create(setup, org_id=org_id, user_id=user_id, role="member")
     setup.close()
-    # org/user are bound to `setup`, now closed -- only org_id/user_id (plain ints) are used
-    # from here on, never the detached ORM objects themselves.
 
     reached_lock = threading.Event()
     release_lock = threading.Event()
-    original_sync = org_membership_repo._sync_membership_mirror
+    original = tenant_repo.update_membership_role
 
-    def paused_sync(db, org_id, membership):
+    def paused(db, tenant_id, user_id, role, *, commit=True):
         reached_lock.set()
-        assert release_lock.wait(timeout=5), "test setup never released the paused sync"
-        original_sync(db, org_id, membership)
+        assert release_lock.wait(timeout=5), "test setup never released the paused update"
+        return original(db, tenant_id, user_id, role, commit=commit)
 
     update_result: dict[str, bool] = {}
     delete_result: dict[str, bool] = {}
@@ -173,7 +240,7 @@ def test_update_role_blocks_a_concurrent_delete_until_the_mirror_sync_commits():
 
     session_a = SessionLocal()
     try:
-        with patch.object(org_membership_repo, "_sync_membership_mirror", paused_sync):
+        with patch.object(tenant_repo, "update_membership_role", paused):
             update_thread = threading.Thread(target=run_update_role, args=(session_a,))
             update_thread.start()
             assert reached_lock.wait(timeout=5), "update_role never reached its locked section"
@@ -189,49 +256,14 @@ def test_update_role_blocks_a_concurrent_delete_until_the_mirror_sync_commits():
         assert update_result.get("finished") is True
         assert delete_result.get("finished") is True
 
-        # The delete landed after update_role's commit released the lock, so the final
-        # state must reflect the delete -- no resurrected mirror row.
-        remaining = (
-            session_a.query(OrgMembership)
-            .filter(OrgMembership.org_id == org_id, OrgMembership.user_id == user_id)
-            .first()
-        )
-        assert remaining is None
-        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
-        mirror = (
-            session_a.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
-        )
-        assert mirror is None
+        # The delete landed after update_role's commit released the lock -- final state
+        # must reflect the delete.
+        assert _membership_after(session_a, org_id, user_id) is None
     finally:
-        # This test uses real committing connections (not the savepoint-per-test `db`
-        # fixture), so the rows it creates persist unless cleaned up explicitly here.
-        session_a.rollback()
-        session_a.query(OrgMembership).filter(OrgMembership.org_id == org_id).delete()
-        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
-        if tenant is not None:
-            session_a.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
-            # orgs.tenant_id and tenants.org_id reference each other (composite reciprocal
-            # FK) -- null the org side first so either row can then be deleted freely.
-            org_row = session_a.query(Org).filter(Org.id == org_id).first()
-            if org_row is not None:
-                org_row.tenant_id = None
-                session_a.commit()
-            session_a.query(Tenant).filter(Tenant.id == tenant.id).delete()
-        session_a.query(Org).filter(Org.id == org_id).delete()
-        session_a.query(User).filter(User.id == user_id).delete()
-        session_a.commit()
-        session_a.close()
+        _cleanup(session_a, org_id, user_id)
 
 
-@_CONCURRENCY_RACE_XFAIL
-def test_delete_blocks_a_concurrent_get_or_create_until_the_mirror_delete_commits():
-    """Regression test for a code-review finding on #324: delete()'s original two-phase
-    commit (commit the OrgMembership delete, *then* delete the mirror) released its row
-    lock before the mirror was touched. A concurrent get_or_create() could see the row
-    already gone, legitimately re-create a fresh OrgMembership + mirror, and then have
-    delete()'s now-unblocked mirror deletion remove that brand-new mirror out from under
-    it -- membership drift from the opposite direction of the get_or_create/update_role
-    race fixed above. Needs two genuinely separate connections, same reasoning as above."""
+def test_delete_blocks_a_concurrent_get_or_create_until_it_commits():
     setup = SessionLocal()
     org = org_repo.get_or_create(setup, github_login="acme-lock-test-2")
     user = User(email="mallory@example.com", name=None, password_hash=None, is_workspace_admin=False)
@@ -244,12 +276,12 @@ def test_delete_blocks_a_concurrent_get_or_create_until_the_mirror_delete_commit
 
     reached_lock = threading.Event()
     release_lock = threading.Event()
-    original_delete_membership = org_membership_repo.tenant_repo.delete_membership
+    original = tenant_repo.delete_membership
 
-    def paused_delete_membership(db, tenant_id, user_id):
+    def paused(db, tenant_id, user_id, *, commit=True):
         reached_lock.set()
         assert release_lock.wait(timeout=5), "test setup never released the paused delete"
-        original_delete_membership(db, tenant_id=tenant_id, user_id=user_id)
+        original(db, tenant_id=tenant_id, user_id=user_id, commit=commit)
 
     delete_result: dict[str, bool] = {}
     recreate_result: dict[str, bool] = {}
@@ -269,7 +301,7 @@ def test_delete_blocks_a_concurrent_get_or_create_until_the_mirror_delete_commit
 
     session_a = SessionLocal()
     try:
-        with patch.object(org_membership_repo.tenant_repo, "delete_membership", paused_delete_membership):
+        with patch.object(tenant_repo, "delete_membership", paused):
             delete_thread = threading.Thread(target=run_delete, args=(session_a,))
             delete_thread.start()
             assert reached_lock.wait(timeout=5), "delete() never reached its locked section"
@@ -286,47 +318,21 @@ def test_delete_blocks_a_concurrent_get_or_create_until_the_mirror_delete_commit
         assert recreate_result.get("finished") is True
 
         # get_or_create() ran after delete()'s commit released the lock, legitimately
-        # re-creating the membership -- its mirror must exist and match, not be missing
-        # (which is what the pre-fix ordering would have left behind).
-        remaining = (
-            session_a.query(OrgMembership)
-            .filter(OrgMembership.org_id == org_id, OrgMembership.user_id == user_id)
-            .first()
-        )
-        assert remaining is not None
-        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
-        mirror = (
-            session_a.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
-        )
-        assert mirror is not None
-        assert mirror.role == remaining.role
+        # re-creating the membership.
+        recreated = _membership_after(session_a, org_id, user_id)
+        assert recreated is not None
+        assert recreated.role == "member"
     finally:
-        session_a.rollback()
-        session_a.query(OrgMembership).filter(OrgMembership.org_id == org_id).delete()
-        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
-        if tenant is not None:
-            session_a.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
-            org_row = session_a.query(Org).filter(Org.id == org_id).first()
-            if org_row is not None:
-                org_row.tenant_id = None
-                session_a.commit()
-            session_a.query(Tenant).filter(Tenant.id == tenant.id).delete()
-        session_a.query(Org).filter(Org.id == org_id).delete()
-        session_a.query(User).filter(User.id == user_id).delete()
-        session_a.commit()
-        session_a.close()
+        _cleanup(session_a, org_id, user_id)
 
 
-@_CONCURRENCY_RACE_XFAIL
-def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirror_sync_commits():
-    """Regression test for a CodeRabbit finding on #323's 2nd review: get_or_create's
-    new-row path used to commit the freshly-inserted OrgMembership, then sync its mirror
-    with no lock held across that gap. A concurrent delete() landing in the gap would
-    remove the just-created row and find no mirror yet, then have this call resume and
-    create a mirror for a membership that's already revoked. Fixed by re-locking the row
-    immediately after the insert commits, before syncing -- same lock-then-sync ordering
-    as update_role's fix. Needs two genuinely separate connections, same reasoning as the
-    other concurrency tests in this file (the race only exists across real transactions)."""
+def test_concurrent_get_or_create_and_delete_on_a_fresh_row_end_consistently():
+    # With no pre-existing row there is nothing for get_or_create to FOR UPDATE lock, so
+    # it and a concurrent delete() aren't strictly serialized -- but the whole get_or_create
+    # is one transaction and upsert_membership's own IntegrityError/SAVEPOINT recovery means
+    # the outcome is always consistent: the row is present with the granted role, or absent.
+    # Never a half-written row, never an exception. (Supersedes the pre-#331 test that relied
+    # on get_or_create's now-removed commit-then-mirror-sync gap.)
     setup = SessionLocal()
     org = org_repo.get_or_create(setup, github_login="acme-lock-test-3")
     user = User(email="judy@example.com", name=None, password_hash=None, is_workspace_admin=False)
@@ -335,97 +341,38 @@ def test_get_or_create_blocks_a_concurrent_delete_until_the_new_memberships_mirr
     setup.refresh(user)
     org_id, user_id = org.id, user.id
     setup.close()
-    # No get_or_create() call yet for (org_id, user_id) -- the pair doesn't exist, so the
-    # first call below goes down the new-row insert path, not the early-return path.
 
-    reached_lock = threading.Event()
-    delete_started = threading.Event()
-    release_lock = threading.Event()
-    original_sync = org_membership_repo._sync_membership_mirror
+    errors: list[BaseException] = []
 
-    def paused_sync(db, org_id, membership):
-        reached_lock.set()
-        assert release_lock.wait(timeout=5), "test setup never released the paused sync"
-        original_sync(db, org_id, membership)
-
-    create_result: dict[str, bool] = {}
-    delete_result: dict[str, bool] = {}
-
-    def run_get_or_create(session_a):
-        org_membership_repo.get_or_create(session_a, org_id=org_id, user_id=user_id, role="member")
-        create_result["finished"] = True
+    def run_get_or_create():
+        session = SessionLocal()
+        try:
+            org_membership_repo.get_or_create(session, org_id=org_id, user_id=user_id, role="member")
+        except BaseException as exc:  # noqa: BLE001 -- surfaced via `errors` below
+            errors.append(exc)
+        finally:
+            session.close()
 
     def run_delete():
-        session_b = SessionLocal()
+        session = SessionLocal()
         try:
-            assert reached_lock.wait(timeout=5), "get_or_create never reached its locked section"
-            delete_started.set()
-            org_membership_repo.delete(session_b, org_id=org_id, user_id=user_id)
-            delete_result["finished"] = True
+            org_membership_repo.delete(session, org_id=org_id, user_id=user_id)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
         finally:
-            session_b.close()
+            session.close()
 
     session_a = SessionLocal()
     try:
-        with patch.object(org_membership_repo, "_sync_membership_mirror", paused_sync):
-            create_thread = threading.Thread(target=run_get_or_create, args=(session_a,))
-            create_thread.start()
-            assert reached_lock.wait(timeout=5), "get_or_create never reached its locked section"
+        t1 = threading.Thread(target=run_get_or_create)
+        t2 = threading.Thread(target=run_delete)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
 
-            delete_thread = threading.Thread(target=run_delete)
-            delete_thread.start()
-            # Wait for the delete thread to actually reach delete() (not just start()) before
-            # checking it's blocked -- otherwise a slow scheduler could let the 0.3s timeout
-            # below expire before run_delete has even called delete(), passing "not
-            # delete_result" for the wrong reason instead of proving the lock blocked it.
-            assert delete_started.wait(timeout=5), "delete thread never reached delete()"
-            delete_thread.join(timeout=0.3)
-            assert not delete_result, "delete() must block while get_or_create holds the row lock"
-
-            release_lock.set()
-            create_thread.join(timeout=5)
-            delete_thread.join(timeout=5)
-        assert create_result.get("finished") is True
-        assert delete_result.get("finished") is True
-
-        # The delete landed after get_or_create's sync committed the mirror, so the final
-        # state must reflect the delete -- no leftover membership or mirror.
-        remaining = (
-            session_a.query(OrgMembership)
-            .filter(OrgMembership.org_id == org_id, OrgMembership.user_id == user_id)
-            .first()
-        )
-        assert remaining is None
-        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
-        mirror = (
-            session_a.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user_id).first()
-        )
-        assert mirror is None
+        assert not errors, f"a concurrent get_or_create/delete raised: {errors}"
+        final = _membership_after(session_a, org_id, user_id)
+        assert final is None or final.role == "member"
     finally:
-        session_a.rollback()
-        session_a.query(OrgMembership).filter(OrgMembership.org_id == org_id).delete()
-        tenant = session_a.query(Tenant).filter(Tenant.kind == "org", Tenant.org_id == org_id).first()
-        if tenant is not None:
-            session_a.query(Membership).filter(Membership.tenant_id == tenant.id).delete()
-            org_row = session_a.query(Org).filter(Org.id == org_id).first()
-            if org_row is not None:
-                org_row.tenant_id = None
-                session_a.commit()
-            session_a.query(Tenant).filter(Tenant.id == tenant.id).delete()
-        session_a.query(Org).filter(Org.id == org_id).delete()
-        session_a.query(User).filter(User.id == user_id).delete()
-        session_a.commit()
-        session_a.close()
-
-
-def test_dual_write_uses_the_same_tenant_for_every_membership_in_an_org(db):
-    org = org_repo.get_or_create(db, github_login="acme")
-    admin = _make_user(db, "erin@example.com")
-    member = _make_user(db, "frank@example.com")
-
-    org_membership_repo.get_or_create(db, org_id=org.id, user_id=admin.id, role="admin")
-    org_membership_repo.get_or_create(db, org_id=org.id, user_id=member.id, role="member")
-
-    admin_membership = _membership_row(db, org.id, admin.id)
-    member_membership = _membership_row(db, org.id, member.id)
-    assert admin_membership.tenant_id == member_membership.tenant_id
+        _cleanup(session_a, org_id, user_id)

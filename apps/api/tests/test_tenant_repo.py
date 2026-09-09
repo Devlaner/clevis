@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from sqlalchemy.orm import Query
 
-from src.core.db import Membership, User
+from src.core.db import Membership, Tenant, User
 from src.repositories import tenant_repo
 
 
@@ -254,12 +254,107 @@ def test_upsert_membership_recreates_a_row_deleted_between_its_two_internal_look
 
     original_update = tenant_repo.update_membership_role
 
-    def racy_update(db, tenant_id, user_id, role):
+    def racy_update(db, tenant_id, user_id, role, **kwargs):
         tenant_repo.delete_membership(db, tenant_id=tenant_id, user_id=user_id)
-        return original_update(db, tenant_id=tenant_id, user_id=user_id, role=role)
+        return original_update(db, tenant_id=tenant_id, user_id=user_id, role=role, **kwargs)
 
     with patch.object(tenant_repo, "update_membership_role", racy_update):
         membership = tenant_repo.upsert_membership(db, tenant_id=tenant.id, user_id=user.id, role="admin")
 
     assert membership is not None
     assert membership.role == "admin"
+
+
+# ── commit=False: keep the write in the caller's transaction (issue #334) ──────
+
+def test_get_or_create_org_tenant_commit_false_flushes_without_committing(db):
+    org_id = _acme_org_id(db)
+
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id, commit=False)
+
+    assert tenant.kind == "org"
+    assert db.query(Tenant).filter(Tenant.id == tenant.id).first() is not None
+    assert db.in_transaction()
+
+
+def test_get_or_create_org_tenant_commit_false_recovers_from_a_lost_insert_race(db):
+    org_id = _acme_org_id(db)
+    existing = tenant_repo.get_or_create_org_tenant(db, org_id)
+
+    original_first = Query.first
+    calls = {"n": 0}
+
+    def racy_first(self):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else original_first(self)
+
+    # First lookup returns None -> insert path -> IntegrityError on the unique org tenant
+    # -> the SAVEPOINT rolls back alone (caller's transaction survives) -> refetch wins.
+    with patch.object(Query, "first", racy_first):
+        result = tenant_repo.get_or_create_org_tenant(db, org_id, commit=False)
+
+    assert result.id == existing.id
+    assert db.in_transaction()
+
+
+def test_get_or_create_membership_commit_false_flushes_without_committing(db):
+    org_id = _acme_org_id(db)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    user = _make_user(db, "mona@example.com")
+
+    membership = tenant_repo.get_or_create_membership(
+        db, tenant_id=tenant.id, user_id=user.id, role="member", commit=False
+    )
+
+    assert membership.role == "member"
+    assert (
+        db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user.id).first()
+        is not None
+    )
+    assert db.in_transaction()
+
+
+def test_update_membership_role_commit_false_flushes_without_committing(db):
+    org_id = _acme_org_id(db)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    user = _make_user(db, "nate@example.com")
+    tenant_repo.get_or_create_membership(db, tenant_id=tenant.id, user_id=user.id, role="member")
+
+    updated = tenant_repo.update_membership_role(
+        db, tenant_id=tenant.id, user_id=user.id, role="admin", commit=False
+    )
+
+    assert updated is not None
+    assert updated.role == "admin"
+    assert db.in_transaction()
+
+
+def test_delete_membership_commit_false_flushes_without_committing(db):
+    org_id = _acme_org_id(db)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    user = _make_user(db, "opal@example.com")
+    tenant_repo.get_or_create_membership(db, tenant_id=tenant.id, user_id=user.id, role="member")
+
+    tenant_repo.delete_membership(db, tenant_id=tenant.id, user_id=user.id, commit=False)
+
+    assert (
+        db.query(Membership).filter(Membership.tenant_id == tenant.id, Membership.user_id == user.id).first()
+        is None
+    )
+    assert db.in_transaction()
+
+
+def test_upsert_membership_commit_false_threads_through_to_both_sub_calls(db):
+    org_id = _acme_org_id(db)
+    tenant = tenant_repo.get_or_create_org_tenant(db, org_id)
+    user = _make_user(db, "pete@example.com")
+    tenant_repo.get_or_create_membership(db, tenant_id=tenant.id, user_id=user.id, role="member")
+
+    # role differs -> upsert_membership must run get_or_create_membership AND
+    # update_membership_role, both with commit=False.
+    membership = tenant_repo.upsert_membership(
+        db, tenant_id=tenant.id, user_id=user.id, role="admin", commit=False
+    )
+
+    assert membership.role == "admin"
+    assert db.in_transaction()

@@ -13,7 +13,7 @@ INVITATION_LIFETIME = timedelta(days=7)
 
 class DuplicatePendingInvitation(Exception):
     """Raised by create() when an active pending invitation already exists for this
-    (org, email). Mirrors org_membership_repo.get_or_create's IntegrityError handling:
+    (org, email). Mirrors tenant_repo._persist_new's IntegrityError handling:
     the partial unique index uq_invitations_org_email_pending (migration 0042) is what
     makes the losing side of a concurrent double-insert fail instead of both winning."""
 
@@ -55,7 +55,7 @@ def create(db: Session, org_id: int, email: str, invited_by_user_id: int) -> Inv
         # Only convert to a 409 if the failure was actually a duplicate pending invite
         # (the concurrent-insert race). Any other IntegrityError -- an FK violation, a
         # token collision, a future constraint -- must surface as itself, not as a
-        # misleading "already exists". Mirrors org_membership_repo.get_or_create, which
+        # misleading "already exists". Mirrors tenant_repo._persist_new, which
         # re-queries the specific row and re-raises when it isn't there.
         if get_pending_for_org_and_email(db, org_id=org_id, email=email) is None:
             raise
